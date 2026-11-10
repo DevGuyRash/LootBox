@@ -1,6 +1,6 @@
 # LootBox
 
-LootBox is a standalone Project Zomboid Build 42 client mod for reusable item categories, loot checklists, storage labels, sorting, hauling, and batch cleanup. LootBox is the working name. This development version is undergoing gameplay qualification; see [verification](docs/verification.md) for the exact exercised scope and remaining checks.
+LootBox is a standalone Project Zomboid Build 42 client mod for reusable item categories, loot checklists, storage labels, sorting, hauling, and batch cleanup. LootBox is the working name. This development version has been checked on Linux 42.22.2 in single-player and multiplayer. See [verification](docs/verification.md) for the exercised workflows and platform limits.
 
 All executable mod files are client-side. A multiplayer host can enable `LootBox` in its normal mod list without running LootBox server scripts. With native Lua checksums enabled, the host still needs matching distributed client files and a normal restart after an update; client-only describes where the mod executes. The mod uses the game's native walking, transfer transactions, vehicle interactions, and trash command. Host permissions, locked storage, safehouses, capacity, and native action rejection remain authoritative. It has no dependency on LuaBuddy, Area Tasks, Easy Drop'n'Loot, or LootSense.
 
@@ -34,7 +34,7 @@ Cleanup uses real observed trash cans. It fills a bin before deleting a batch, e
 
 Source discovery is limited to loaded, permitted native locations. Multiplayer's Lua API does not acknowledge an empty container-content response, and its normal inventory UI marks exploration before synchronization completes. Jobs move observed eligible items and report newly searched sources as unconfirmed; they cannot certify a fully cleared building from an empty local list. Human corpse hauling is excluded because its special native action can change held equipment. Native failure remains visible instead of becoming a direct inventory mutation.
 
-Categories and checklists are private local preferences. Container and instance labels persist locally per world and player; they are not automatically shared with other clients. Native fixture identity has no persistent UUID, so an identical replacement in the same location and slot cannot always be distinguished across reconnect. Unloaded remembered locations remain unverified, and observed missing trash cans are retired.
+Categories and checklists are private local preferences. Container and instance labels persist locally per world and player; they are not automatically shared with other clients. Native fixture identity has no persistent UUID, so an identical replacement in the same location and slot cannot always be distinguished across reconnect. Vehicle memory and labels use the native key ID and model. Lookup requires a unique loaded match and never adopts a nearby car by its appearance or position. Native key IDs are key associations rather than guaranteed UUIDs; keyed-alike modded vehicles can remain ambiguous. Explicit rekeying or a model change requires remembering and labeling the vehicle again. Unloaded remembered locations remain unverified, and observed missing trash cans are retired.
 
 ## Develop and verify
 

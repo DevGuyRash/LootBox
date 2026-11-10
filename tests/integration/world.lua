@@ -17,7 +17,7 @@ local function equal(actual, expected, message)
 end
 
 local function fixture()
-    local squares, ids = {}, 0
+    local squares, vehicles, ids = {}, {}, 0
     local function square(x, y)
         local value = {x = x, y = y, objects = {}, moving = {}, corpses = {}, ground = {}}
         function value:getX() return self.x end
@@ -94,12 +94,21 @@ local function fixture()
     item(inventory, "CarriedFood")
     origin.ground[1] = {}
     getCell = function()
-        return {getGridSquare = function(_, x, y, z) return squares[x .. ":" .. y .. ":" .. z] end}
+        return {getGridSquare = function(_, x, y, z) return squares[x .. ":" .. y .. ":" .. z] end,
+            getVehicles = function()
+                return {iterator = function()
+                    local index = 0
+                    return {hasNext = function() return index < #vehicles end,
+                        next = function() index = index + 1; return vehicles[index] end}
+                end}
+            end}
     end
     instanceof = function() return false end
     isClient = function() return false end
     getTextOrNull = function() return nil end
-    getVehicleById = function() return nil end
+    getVehicleById = function(id)
+        for _, vehicle in ipairs(vehicles) do if vehicle:getId() == id then return vehicle end end
+    end
     ISInventoryPaneContextMenu = {getContainers = function() return list({inventory, junk, unlabeled, tools}) end}
     local state = {containerLabels = {}, itemLabels = {}, keep = {}, trash = {}}
     local world = World.new(player, state)
@@ -117,7 +126,7 @@ local function fixture()
     end
     return {world = world, state = state, player = player, squares = squares, origin = origin, far = far,
         junk = junk, tools = tools, unlabeled = unlabeled, remote = remote, inventory = inventory,
-        container = container, item = item, names = names}
+        container = container, item = item, names = names, vehicles = vehicles}
 end
 
 local function case(name, run)
@@ -147,25 +156,139 @@ case("Any labeled source excludes unlabeled containers", function(f)
     equal(f.names(scan), "Apple,Beans,Scrap,Soup")
 end)
 
-case("A saved labeled vehicle part rebinds by native ID when its square is loaded", function(f)
-    local vehicle, part = {}, {}
+local function car(f, keyId, id, script, square)
+    local vehicle, part = {id = id or 72, keyId = keyId or 78341922, script = script or "Fixture.Car",
+        square = square or f.far, mechanicalId = 41863}, {}
     local storage = f.container("TruckBed", vehicle)
-    f.item(storage, "VehicleFood")
     function storage:getVehiclePart() return part end
-    function vehicle:getId() return 72 end
-    function vehicle:getSquare() return f.far end
-    function vehicle:isRemovedFromWorld() return false end
-    function vehicle:getScriptName() return "Fixture.Car" end
+    function vehicle:getId() return self.id end
+    function vehicle:getKeyId() return self.keyId end
+    function vehicle:getMechanicalID() return self.mechanicalId end
+    function vehicle:getSquare() return self.square end
+    function vehicle:isRemovedFromWorld() return self.removed == true end
+    function vehicle:getScriptName() return self.script end
+    function vehicle:getPartCount() return 1 end
     function vehicle:getPartByIndex(index) if index == 0 then return part end end
-    function vehicle:getPartById(id) if id == "TruckBed" then return part end end
     function part:getVehicle() return vehicle end
     function part:getIndex() return 0 end
     function part:getId() return "TruckBed" end
     function part:getItemContainer() return storage end
-    getVehicleById = function(id) if id == 72 then return vehicle end end
-    f.state.containerLabels["vehicle:72:TruckBed"] = {"native:Junk"}
-    local scan = assert(World.new(f.player, f.state):scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
+    f.vehicles[#f.vehicles + 1] = vehicle
+    return vehicle, storage
+end
+
+case("Saved vehicle labels survive native network and mechanical ID changes", function(f)
+    local vehicle, storage = car(f)
+    f.item(storage, "VehicleFood")
+    f.state.containerLabels["vehicle:78341922:Fixture.Car:TruckBed"] = {"native:Junk"}
+    local world = World.new(f.player, f.state)
+    local scan = assert(world:scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
     equal(f.names(scan, {ids = {"native:Food"}}), "Apple,Beans,VehicleFood")
+    vehicle.id, vehicle.mechanicalId = 73, 41864
+    scan = assert(World.new(f.player, f.state):scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
+    equal(f.names(scan, {ids = {"native:Food"}}), "Apple,Beans,VehicleFood")
+    vehicle.keyId = 78341923
+    scan = assert(world:scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
+    equal(f.names(scan, {ids = {"native:Food"}}), "Apple,Beans")
+    scan = assert(World.new(f.player, f.state):scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
+    equal(f.names(scan, {ids = {"native:Food"}}), "Apple,Beans")
+end)
+
+case("A recreated native vehicle retains labels on the same loaded square", function(f)
+    local previous, storage = car(f)
+    f.item(storage, "OldFood")
+    f.state.containerLabels["vehicle:78341922:Fixture.Car:TruckBed"] = {"native:Junk"}
+    assert(f.world:scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
+    previous.removed = true
+    local _, replacement = car(f, 78341922, 73)
+    f.item(replacement, "NewFood")
+    local scan = assert(f.world:scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
+    equal(f.names(scan, {ids = {"native:Food"}}), "Apple,Beans,NewFood")
+    assert(f.state.containerLabels["vehicle:78341922:Fixture.Car:TruckBed"])
+end)
+
+case("A remembered vehicle survives client recreation of the mechanical ID", function(f)
+    local vehicle = car(f)
+    assert(f.world:rememberVehicle(vehicle))
+    vehicle.mechanicalId = 999
+    equal(World.new(f.player, f.state):vehicle(), vehicle)
+end)
+
+case("A recycled native ID with the same model cannot adopt a different keyed car", function(f)
+    local vehicle = car(f)
+    assert(f.world:rememberVehicle(vehicle))
+    vehicle.keyId = 78341923
+    equal(World.new(f.player, f.state):vehicle(), nil)
+end)
+
+case("A changed native network ID resolves the unique loaded keyed car and updates its hint", function(f)
+    local vehicle = car(f)
+    assert(f.world:rememberVehicle(vehicle))
+    vehicle.id = 73
+    car(f, 78341923, 72)
+    local reconnected = World.new(f.player, f.state)
+    equal(reconnected:vehicle(), vehicle)
+    equal(f.state.vehicle.id, 73)
+    assert(reconnected:observeNearby(), "The changed native hint must notify local persistence")
+end)
+
+case("A different vehicle model cannot use a remembered key association", function(f)
+    local vehicle = car(f)
+    assert(f.world:rememberVehicle(vehicle))
+    vehicle.script = "Fixture.OtherCar"
+    equal(World.new(f.player, f.state):vehicle(), nil)
+end)
+
+case("Ambiguous loaded key associations block remembered hauling and labels", function(f)
+    local vehicle, storage = car(f)
+    f.item(storage, "VehicleFood")
+    assert(f.world:rememberVehicle(vehicle))
+    f.state.containerLabels["vehicle:78341922:Fixture.Car:TruckBed"] = {"native:Junk"}
+    local _, otherStorage = car(f, 78341922, 73)
+    f.item(otherStorage, "OtherVehicleFood")
+    local reconnected = World.new(f.player, f.state)
+    local resolved, reason = reconnected:vehicle()
+    equal(resolved, nil)
+    assert(reason:find("Multiple loaded vehicles", 1, true))
+    local destinations, err = reconnected:destinations({destination = {kind = "vehicle"}}, nil)
+    equal(destinations, nil)
+    equal(err, reason)
+    assert(not reconnected:rememberVehicle(vehicle))
+    assert(not reconnected:key(storage))
+    local scan = assert(reconnected:scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
+    equal(f.names(scan, {ids = {"native:Food"}}), "Apple,Beans")
+end)
+
+case("An absent negative or malformed native key association cannot be remembered", function(f)
+    local vehicle = car(f)
+    for _, invalid in ipairs({-1, 1.5}) do
+        vehicle.keyId = invalid
+        assert(not f.world:rememberVehicle(vehicle))
+    end
+    vehicle.keyId = nil
+    assert(not f.world:rememberVehicle(vehicle))
+    f.state.vehicle = {id = 72, script = "Fixture.Car", x = 50, y = 50, z = 0}
+    local resolved, reason = World.new(f.player, f.state):vehicle()
+    equal(resolved, nil)
+    assert(type(reason) == "string" and #reason > 0)
+    vehicle.keyId = 0
+    assert(f.world:rememberVehicle(vehicle), "Zero is a valid native random key association")
+end)
+
+case("Stationary vehicles are discovered through the native loaded Set", function(f)
+    local vehicle = car(f, 123, 74, "Fixture.OtherCar", f.origin)
+    equal(#f.origin.moving, 0)
+    local known = f.world:knownVehicles()
+    equal(#known, 1)
+    equal(known[1], vehicle)
+end)
+
+case("Unloaded matching keyed cars do not substitute for loaded observations", function(f)
+    local vehicle = car(f)
+    assert(f.world:rememberVehicle(vehicle))
+    f.squares["50:50:0"] = nil
+    equal(World.new(f.player, f.state):vehicle(), nil)
+    equal(f.state.vehicle.keyId, 78341922)
 end)
 
 case("Inventory is independently optional beside labeled sources", function(f)
