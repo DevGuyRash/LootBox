@@ -69,6 +69,50 @@ local function loaded(square)
     return call(getCell(), "getGridSquare", call(square, "getX"), call(square, "getY"), call(square, "getZ")) == square
 end
 
+local function vehicleIdentity(vehicle)
+    local keyId, script = call(vehicle, "getKeyId"), call(vehicle, "getScriptName")
+    if not nativeInteger(keyId) or keyId < 0 or type(script) ~= "string" or script == "" then return nil end
+    return keyId, script
+end
+
+local function liveVehicles(hint)
+    local iterator = call(call(getCell and getCell(), "getVehicles"), "iterator")
+    if not iterator then return nil, "Loaded vehicle registry is unavailable" end
+    local result, seen = {}, {}
+    local function add(vehicle)
+        if vehicle and not seen[vehicle] and loaded(call(vehicle, "getSquare"))
+            and call(vehicle, "isRemovedFromWorld") ~= true then
+            seen[vehicle] = true
+            result[#result + 1] = vehicle
+        end
+    end
+    while true do
+        local more = call(iterator, "hasNext")
+        if more == false then break end
+        if more ~= true then return nil, "Loaded vehicle registry changed during lookup" end
+        local vehicle = call(iterator, "next")
+        if not vehicle then return nil, "Loaded vehicle registry changed during lookup" end
+        add(vehicle)
+    end
+    add(hint)
+    return result
+end
+
+local function uniqueVehicle(keyId, script, hint)
+    local vehicles, err = liveVehicles(hint)
+    if not vehicles then return nil, err end
+    local found
+    for _, vehicle in ipairs(vehicles) do
+        local candidateKey, candidateScript = vehicleIdentity(vehicle)
+        if candidateKey == keyId and candidateScript == script then
+            if found then return nil, "Multiple loaded vehicles share this key and model; select a vehicle explicitly" end
+            found = vehicle
+        end
+    end
+    if found then return found end
+    return nil, "Remembered vehicle is not loaded or its key or model changed"
+end
+
 local function spriteName(object)
     return tostring(call(object, "getSpriteName") or call(call(object, "getSprite"), "getName") or "")
 end
@@ -176,7 +220,11 @@ function World:_rawKey(container)
     if part then
         local vehicle = call(part, "getVehicle")
         if not vehicle then return nil, "Vehicle no longer exists" end
-        return "vehicle:" .. tostring(call(vehicle, "getId")) .. ":" .. tostring(call(part, "getId"))
+        local keyId, script = vehicleIdentity(vehicle)
+        if not keyId then return nil, "Vehicle has no usable native key identity" end
+        local resolved, err = uniqueVehicle(keyId, script, vehicle)
+        if resolved ~= vehicle then return nil, err end
+        return "vehicle:" .. tostring(keyId) .. ":" .. script .. ":" .. tostring(call(part, "getId"))
     end
     if call(container, "getType") == "floor" then return nil, "Floor locations cannot carry container labels" end
     local parent = call(container, "getParent")
@@ -196,10 +244,12 @@ function World:key(container)
     if not key then return nil, failure end
     local previous = self.containerKeys[container]
     if previous and previous ~= key then
-        for _, store in ipairs({self.state.containerLabels, self.state.trash}) do
-            if store[previous] ~= nil then self.dirty = true end
-            if store[previous] ~= nil and store[key] == nil then store[key] = store[previous] end
-            store[previous] = nil
+        if previous:sub(1, 8) ~= "vehicle:" then
+            for _, store in ipairs({self.state.containerLabels, self.state.trash}) do
+                if store[previous] ~= nil then self.dirty = true end
+                if store[previous] ~= nil and store[key] == nil then store[key] = store[previous] end
+                store[previous] = nil
+            end
         end
         self.endpoints[previous] = nil
         self.anchors[previous] = nil
@@ -254,14 +304,8 @@ function World:_observeVehicle(vehicle)
     if id == nil then return end
     self.vehicles[tostring(id)] = vehicle
     local previous = self.state.vehicle
-    if type(previous) ~= "table" or previous.id ~= id then return end
-    local point = position(call(vehicle, "getSquare"))
-    local script = tostring(call(vehicle, "getScriptName") or "")
-    if point and previous.script == script
-        and (previous.x ~= point.x or previous.y ~= point.y or previous.z ~= point.z) then
-        previous.x, previous.y, previous.z = point.x, point.y, point.z
-        self.dirty = true
-    end
+    local keyId, script = vehicleIdentity(vehicle)
+    if type(previous) == "table" and previous.keyId == keyId and previous.script == script then self:vehicle() end
 end
 
 function World:_observe(container)
@@ -271,7 +315,7 @@ function World:_observe(container)
     local parent = call(container, "getParent")
     local square = self:square(container)
     local previous = self.anchors[key]
-    if previous and previous.square == square and previous.parent ~= parent then
+    if previous and previous.square == square and previous.parent ~= parent and key:sub(1, 8) ~= "vehicle:" then
         if self.state.containerLabels[key] ~= nil or self.state.trash[key] ~= nil then self.dirty = true end
         self.state.containerLabels[key] = nil
         self.state.trash[key] = nil
@@ -514,17 +558,20 @@ function World:discover()
         local square = cell:getGridSquare(x + dx, y + dy, z)
         if square and call(square, "isSeen", call(self.player, "getPlayerNum")) == true then self:_containers(square, true) end
     end end
-    local labeledSquares = {}
-    for key in pairs(self.state.containerLabels) do
-        local vehicleId, partId = tostring(key):match("^vehicle:([^:]+):(.+)$")
-        vehicleId = tonumber(vehicleId)
-        if nativeInteger(vehicleId) and getVehicleById then
-            local vehicle = getVehicleById(vehicleId)
-            if vehicle and loaded(call(vehicle, "getSquare")) and call(vehicle, "isRemovedFromWorld") ~= true then
-                local container = call(call(vehicle, "getPartById", partId), "getItemContainer")
-                if container then self:_observe(container) end
+    for _, vehicle in ipairs(liveVehicles() or {}) do
+        local square = call(vehicle, "getSquare")
+        if permitted(self.player, square) and call(square, "isSeen", call(self.player, "getPlayerNum")) == true then
+            local nearby = distance(self.player, square) <= DISCOVERY_RADIUS * DISCOVERY_RADIUS
+            if nearby then self:_observeVehicle(vehicle) end
+            for index = 0, (call(vehicle, "getPartCount") or 0) - 1 do
+                local container = call(call(vehicle, "getPartByIndex", index), "getItemContainer")
+                local key = container and self:_rawKey(container)
+                if key and (nearby or self.state.containerLabels[key] ~= nil) then self:_observe(container) end
             end
         end
+    end
+    local labeledSquares = {}
+    for key in pairs(self.state.containerLabels) do
         local kind, x, y, floor = tostring(key):match("^([^:]+):([^:]+):([^:]+):([^:]+):")
         x, y, floor = tonumber(x), tonumber(y), tonumber(floor)
         if (kind == "world" or kind == "corpse") and nativeInteger(x) and nativeInteger(y) and nativeInteger(floor) then
@@ -586,11 +633,14 @@ end
 function World:rememberVehicle(vehicle)
     if not vehicle or call(vehicle, "isRemovedFromWorld") == true then return nil, "Vehicle is no longer available" end
     local id = call(vehicle, "getId")
-    if id == nil then return nil, "Vehicle has no native ID" end
+    local keyId, script = vehicleIdentity(vehicle)
+    if not nativeInteger(id) or not keyId then return nil, "Vehicle has no usable native key identity" end
+    local resolved, err = uniqueVehicle(keyId, script, vehicle)
+    if resolved ~= vehicle then return nil, err end
     local point = position(call(vehicle, "getSquare"))
     if not point then return nil, "Vehicle is not in a loaded square" end
     self.vehicles[tostring(id)] = vehicle
-    local remembered = {id = id, x = point.x, y = point.y, z = point.z, script = tostring(call(vehicle, "getScriptName") or "")}
+    local remembered = {id = id, keyId = keyId, x = point.x, y = point.y, z = point.z, script = script}
     for field, value in pairs(remembered) do
         if type(self.state.vehicle) ~= "table" or self.state.vehicle[field] ~= value then self.dirty = true; break end
     end
@@ -601,20 +651,29 @@ end
 function World:vehicle()
     local remembered = self.state.vehicle
     if not remembered then return nil end
-    if type(remembered) ~= "table" or not nativeInteger(remembered.id) or type(remembered.script) ~= "string" then return nil, "Invalid remembered vehicle" end
-    local vehicle = self.vehicles[tostring(remembered.id)]
-    if not vehicle and getVehicleById then vehicle = getVehicleById(remembered.id) end
-    if vehicle and loaded(call(vehicle, "getSquare")) and call(vehicle, "isRemovedFromWorld") ~= true
-        and tostring(call(vehicle, "getScriptName") or "") == remembered.script then return vehicle end
+    if type(remembered) ~= "table" or not nativeInteger(remembered.id) or not nativeInteger(remembered.keyId) or remembered.keyId < 0
+        or type(remembered.script) ~= "string" then return nil, "Remember this vehicle again to confirm its native identity" end
+    local hint = getVehicleById and getVehicleById(remembered.id) or self.vehicles[tostring(remembered.id)]
+    local vehicle, err = uniqueVehicle(remembered.keyId, remembered.script, hint)
+    if not vehicle then return nil, err end
+    local point, id = position(call(vehicle, "getSquare")), call(vehicle, "getId")
+    if not nativeInteger(id) then return nil, "Vehicle has no usable native network ID" end
+    if remembered.id ~= id or remembered.x ~= point.x or remembered.y ~= point.y or remembered.z ~= point.z then
+        remembered.id, remembered.x, remembered.y, remembered.z = id, point.x, point.y, point.z
+        self.dirty = true
+    end
+    self.vehicles[tostring(id)] = vehicle
+    return vehicle
 end
 
 function World:knownVehicles()
     self:discover()
-    local result = {}
+    local result, seen = {}, {}
     for id, vehicle in pairs(self.vehicles) do
-        if call(vehicle, "isRemovedFromWorld") == true or not loaded(call(vehicle, "getSquare")) then
+        if call(vehicle, "isRemovedFromWorld") == true or not loaded(call(vehicle, "getSquare"))
+            or tostring(call(vehicle, "getId")) ~= id then
             self.vehicles[id] = nil
-        else result[#result + 1] = vehicle end
+        elseif not seen[vehicle] then result[#result + 1] = vehicle; seen[vehicle] = true end
     end
     table.sort(result, function(a, b)
         local da, db = distance(self.player, call(a, "getSquare")), distance(self.player, call(b, "getSquare"))
@@ -684,8 +743,9 @@ function World:destinations(request, item)
         if not self:valid(destination.ref) then return nil, "Destination container is no longer available" end
         add(destination.ref)
     elseif destination.kind == "vehicle" then
-        local vehicle = destination.ref or self:vehicle()
-        if not vehicle or call(vehicle, "isRemovedFromWorld") == true then return nil, "Remember or select a loaded vehicle first" end
+        local vehicle, err = destination.ref
+        if not vehicle then vehicle, err = self:vehicle() end
+        if not vehicle or call(vehicle, "isRemovedFromWorld") == true then return nil, err or "Remember or select a loaded vehicle first" end
         local parts = {}
         for index = 0, (call(vehicle, "getPartCount") or 0) - 1 do
             local part = call(vehicle, "getPartByIndex", index)
@@ -704,7 +764,7 @@ function World:destinations(request, item)
         local candidates = {}
         for key, container in pairs(self.endpoints) do
             local labels = self.state.containerLabels[key]
-            if labels and descriptor and self.graph then
+            if labels and self:key(container) == key and descriptor and self.graph then
                 for _, id in ipairs(labels) do
                     if (not destination.labels or #destination.labels == 0 or contains(destination.labels, id)) and self.graph:matches(id, descriptor) then
                         candidates[#candidates + 1] = container

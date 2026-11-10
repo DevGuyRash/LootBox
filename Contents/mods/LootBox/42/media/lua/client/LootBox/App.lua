@@ -172,9 +172,10 @@ function App.get(playerIndex)
     initialize()
     local player = getSpecificPlayer(playerIndex or 0)
     if not player then return nil, "Enter a game to move or label items" end
-    local existing = sessions[playerIndex or 0]
-    if existing and existing.player == player then return existing end
     local path = scope(player)
+    local existing = sessions[playerIndex or 0]
+    if existing and existing.player == player and existing.path == path then return existing end
+    if existing then existing:cancel() end
     local state, err = Store.load(path)
     if state ~= nil then
         local invalid = stateError(state)
@@ -323,7 +324,6 @@ if Events then
     Events.OnTick.Add(App.tick)
     if Events.OnDisconnect then Events.OnDisconnect.Add(App.reset) end
     if Events.OnMainMenuEnter then Events.OnMainMenuEnter.Add(App.reset) end
-    if Events.OnCreatePlayer then Events.OnCreatePlayer.Add(function(index) App.get(index) end) end
 end
 
 return App

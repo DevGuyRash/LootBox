@@ -95,6 +95,21 @@ test("different worlds and players retain independent saved intentions", functio
     assert(assert(App.get(0)):isKept(item))
 end)
 
+test("a native player whose username settles later binds the final account preferences", function()
+    username = "Bob"
+    local provisional = assert(App.get(0))
+    same(provisional:labels(crate), {})
+    assert(provisional:setLabels(crate, { "native:ModdedCategory" }))
+    username = "Alice:one"
+    local settled = assert(App.get(0))
+    same(settled:labels(crate), { supplies, "native:Food" })
+    assert(settled:rememberVehicle({}))
+    App.reset()
+    settled = assert(App.get(0))
+    same(settled:labels(crate), { supplies, "native:Food" })
+    assert(settled.state.vehicle.id == 1)
+end)
+
 test("failed native writes leave active labels and Keep unchanged", function()
     local app = assert(App.get(0))
     denied = true
