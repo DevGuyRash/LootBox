@@ -19,6 +19,8 @@ W.colors = {
     success = { r = 0.569, g = 0.745, b = 0.655, a = 1 },
     danger = { r = 0.851, g = 0.51, b = 0.471, a = 1 },
     custom = { r = 0.59, g = 0.77, b = 0.82, a = 1 },
+    item = { r = 0.62, g = 0.81, b = 0.88, a = 1 },
+    warning = { r = 0.94, g = 0.75, b = 0.43, a = 1 },
     border = { r = 0.38, g = 0.45, b = 0.46, a = 0.9 },
 }
 
@@ -144,6 +146,8 @@ function W.check(parent, x, y, width, text, selected, target, callback, tooltip)
 end
 
 local function fit(text, width, font)
+    if width <= 0 then return "" end
+    if getTextManager():MeasureStringX(font, "...") > width then return "" end
     if getTextManager():MeasureStringX(font, text) <= width then return text end
     local low, high = 0, #text
     while low < high do
@@ -200,14 +204,28 @@ function W.list(parent, x, y, width, height, target, onSelect, selection)
                 self:drawRect(2, first - self:getYScroll(), 3, last - first, 1,
                     W.colors.accent.r, W.colors.accent.g, W.colors.accent.b)
             end
-            local prefix = row.item.badge and (row.item.badge .. "  ") or ""
             local available = self.width - textX - (self:isVScrollBarVisible() and 20 or 10)
-            local text = prefix .. row.text
-            if row.fittedWidth ~= available or row.fittedText ~= text then
-                row.fittedWidth, row.fittedText = available, text
-                row.displayText = fit(text, available, self.font)
+            local segments = row.item.segments
+            if not segments then
+                segments = {}
+                if row.item.badge then segments[#segments + 1] = { text = row.item.badge, tone = row.item.tone or "muted" } end
+                segments[#segments + 1] = { text = row.text, tone = row.item.tone or (checked and "success" or "text") }
             end
-            self:drawText(row.displayText, textX, textY, color.r, color.g, color.b, 1, self.font)
+            local gap = getTextManager():MeasureStringX(self.font, "   ")
+            local totalWidth = available
+            for _, segment in ipairs(segments) do
+                local text = tostring(segment.text or "")
+                if text ~= "" then
+                    local columnWidth = segment.share and math.floor(totalWidth * segment.share) or available
+                    local shown = fit(text, math.min(available, columnWidth), self.font)
+                    local tint = W.colors[segment.tone or "text"] or W.colors.text
+                    self:drawText(shown, textX, textY, tint.r, tint.g, tint.b, 1, self.font)
+                    if shown ~= text and not segment.share then break end
+                    local used = segment.share and (columnWidth + gap) or (getTextManager():MeasureStringX(self.font, shown) + gap)
+                    textX, available = textX + used, available - used
+                    if available <= 0 then break end
+                end
+            end
         end
         return rowY + self.itemheight
     end

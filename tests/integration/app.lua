@@ -2,7 +2,7 @@ package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.pat
 
 -- World/action boundaries are doubles. The actual App, category graph, catalog,
 -- and data-only Store run together; native file I/O has a separate smoke check.
-local files, denied, jobState = {}, false, "idle"
+local files, denied, jobState, resumeCalls, resumeError = {}, false, "idle", 0, nil
 function getFileReader(path)
     if not files[path] then return nil end
     local read = false
@@ -39,7 +39,12 @@ package.loaded["LootBox/World"] = { new = function(_, state)
 end }
 package.loaded["LootBox/Jobs"] = { new = function()
     return { status = function() return { state = jobState } end, cancel = function() return true end,
-        tick = function() end, start = function() return true end }
+        tick = function() end, start = function() return true end, resume = function()
+            resumeCalls = resumeCalls + 1
+            if resumeError then return nil, resumeError end
+            jobState = "running"
+            return true
+        end }
 end }
 local App = require "LootBox/App"
 local Store = require "LootBox/Store"
@@ -138,6 +143,16 @@ test("a job paused for bin review keeps its category selection stable", function
     jobState = "idle"
     id = assert(App.saveCategory({ name = "Cleanup finished", types = {}, includes = {} }))
     assert(App.category(id).name == "Cleanup finished")
+end)
+
+test("Resume forwards success and a current native refusal to the existing job", function()
+    local app = assert(App.get(0))
+    jobState, resumeError = "cancelled", "Stop aiming before resuming"
+    local ok, err = app:resume()
+    assert(ok == nil and err == resumeError and resumeCalls == 1 and app:status().state == "cancelled")
+    resumeError = nil
+    assert(app:resume() and resumeCalls == 2 and app:status().state == "running")
+    jobState = "idle"
 end)
 
 test("a validly encoded malformed category document remains read-only", function()

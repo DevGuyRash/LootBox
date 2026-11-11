@@ -9,7 +9,7 @@ local modules = {
 }
 for _, name in ipairs(modules) do package.preload[name] = function() return true end end
 
-local clock, client, allowTrash, requests, transfers, corpseQueries, queues, rehydrate, loadedSquares, nearestRequests, nearestChoice
+local clock, client, allowTrash, requests, transfers, corpseQueries, queues, rehydrate, loadedSquares, nearestRequests, nearestChoice, floorDropSquare
 local passed, failures = 0, {}
 
 local function equal(actual, expected, message)
@@ -31,7 +31,7 @@ local function list(items)
 end
 
 local function square(x, y, z)
-    local value = { x = x, y = y, z = z or 0, reachable = true, worldObjects = {} }
+    local value = { x = x, y = y, z = z or 0, reachable = true, dropAllowed = true, worldObjects = {} }
     function value:getX() return self.x end
     function value:getY() return self.y end
     function value:getZ() return self.z end
@@ -97,14 +97,23 @@ end
 
 local function player()
     local value = { location = square(0, 0), inventory = container("inventory") }
-    function value:isDead() return false end
-    function value:isAsleep() return false end
+    function value:isDead() return self.dead == true end
+    function value:isAsleep() return self.asleep == true end
+    function value:pressedMovement() return self.movementInput == true end
+    function value:isPlayerMoving() return self.moving == true end
+    function value:pressedAim() return self.aimInput == true end
+    function value:isAiming() return self.aiming == true end
+    function value:isAttacking() return self.attacking == true end
+    function value:isPerformingShoveAnimation() return self.shoving == true end
+    function value:isRunning() return self.running == true end
+    function value:isSprinting() return self.sprinting == true end
+    function value:pressedCancelAction() return self.cancelInput == true end
     function value:getInventory() return self.inventory end
     function value:getCurrentSquare() return self.location end
     function value:getX() return self.location.x + 0.5 end
     function value:getY() return self.location.y + 0.5 end
     function value:getZ() return self.location.z end
-    function value:getCharacterActions() return list(queues[self] and queues[self].queue or {}) end
+    function value:getCharacterActions() return list(self.characterActions or (queues[self] and queues[self].queue or {})) end
     function value:getVehicle() return self.vehicle end
     function value:getPrimaryHandItem() return self.primary end
     function value:getSecondaryHandItem() return self.secondary end
@@ -179,7 +188,7 @@ end
 function ISInventoryTransferUtil.newInventoryTransferAction(character, selected, source, destination)
     transfers = transfers + 1
     if selected.corpse then character.equipmentChanged = true end
-    return action(character, "transfer", function()
+    local transfer = action(character, "transfer", function()
         if selected.world then
             local objects = selected.world:getSquare().worldObjects
             for index, object in ipairs(objects) do
@@ -195,12 +204,14 @@ function ISInventoryTransferUtil.newInventoryTransferAction(character, selected,
         end
         put(current, destination)
         if destination:getType() == "floor" then
-            local square = character:getCurrentSquare()
+            local square = floorDropSquare or character:getCurrentSquare()
             local object = { getSquare = function() return square end, getItem = function() return current end }
             current.world = object
             square.worldObjects[#square.worldObjects + 1] = object
         end
     end)
+    function transfer:canDropOnFloor(target) return target and target.dropAllowed == true end
+    return transfer
 end
 
 ISPathFindAction = {}
@@ -318,7 +329,7 @@ end
 
 local function case(name, run)
     clock, client, allowTrash, requests, transfers, corpseQueries, queues, rehydrate = 0, false, true, {}, 0, 0, {}, false
-    loadedSquares, nearestRequests, nearestChoice = {}, {}, 1
+    loadedSquares, nearestRequests, nearestChoice, floorDropSquare = {}, {}, 1, nil
     local ok, err = pcall(run)
     if ok then passed = passed + 1; print("PASS " .. name)
     else failures[#failures + 1] = name .. ": " .. tostring(err); print("FAIL " .. failures[#failures]) end
@@ -361,9 +372,12 @@ case("Native rejection is a failure and leaves the item in its source", function
     local adapter = Native.new(actor)
     assert(adapter:begin({ kind = "transfer", item = selected, source = actor.inventory, destination = destination }))
     queues[actor].current:reject()
-    local done, reason = adapter:poll()
+    equal(adapter:poll(), nil)
+    clock = 2001
+    local done, reason, code = adapter:poll()
     equal(done, false)
-    includes(reason, "rejected")
+    includes(reason, "stopped")
+    equal(code, nil)
     equal(selected:getContainer(), actor.inventory)
     equal(adapter:isBusy(), false)
 end)
@@ -454,23 +468,21 @@ case("Multiplayer floor drop and pickup resolve recreated objects in the exact s
     equal(#actor.location.worldObjects, 0)
 end)
 
-case("An item on an adjacent floor square is not completion at the chosen destination", function()
+case("A native-permitted adjacent floor fallback completes at the original drop zone", function()
     local actor = player()
     local floor, adjacent = container("floor", actor:getCurrentSquare()), square(1, 0)
+    actor.location.dropAllowed = false
+    floorDropSquare = adjacent
     local original = item(206, actor.inventory)
     local operation = { kind = "transfer", item = original, source = actor.inventory, destination = floor }
     local adapter = Native.new(actor)
     assert(adapter:begin(operation))
-    queues[actor]:onCompleted(queues[actor].current)
-    put(original, nil)
-    local other = item(206, floor)
-    local world = { getSquare = function() return adjacent end, getItem = function() return other end }
-    other.world = world
-    adjacent.worldObjects[1] = world
-    equal(adapter:poll(), nil)
-    clock = 2001
-    equal(adapter:poll(), false)
-    equal(operation.resultItem, nil)
+    equal(adapter:transferResult(operation, 206, "Base.Nails"), nil)
+    queues[actor].current:complete()
+    equal(adapter:transferResult(operation, 206, "Base.Nails"), original)
+    equal(adapter:poll(), true)
+    equal(operation.resultItem, original)
+    equal(original:getWorldItem():getSquare(), adjacent)
 end)
 
 case("A stale floor view cannot hide a physically completed pickup", function()
@@ -486,6 +498,7 @@ case("A stale floor view cannot hide a physically completed pickup", function()
     queues[actor]:onCompleted(queues[actor].current)
     actor.location.worldObjects = {}
     local current = item(207, actor.inventory)
+    actor.location = square(8, 0)
     equal(floor:containsID(207), true)
     equal(adapter:poll(), true)
     equal(operation.resultItem, current)
@@ -628,12 +641,20 @@ case("Cancel preserves foreign pending actions by reference, order, and executio
     equal(selected:getContainer(), actor.inventory)
 end)
 
-case("Begin refuses existing player actions without stopping the current action", function()
+case("Busy admission preserves the current player action and the untouched operation", function()
     local actor = player()
     local foreign = action(actor, "foreign")
     ISTimedActionQueue.add(foreign)
     local adapter = Native.new(actor)
-    assertRejected(adapter, { kind = "approach", container = actor.inventory }, "current player action")
+    local priorTravel = { distance = 9 }
+    local operation = { kind = "approach", container = actor.inventory, travel = priorTravel }
+    local accepted, reason, code = adapter:begin(operation)
+    equal(accepted, nil)
+    includes(reason, "current action")
+    equal(code, "busy")
+    equal(adapter:isBusy(), false)
+    equal(operation.travel, priorTravel)
+    equal(adapter:isPlayerBusy(), true)
     equal(adapter:cancel(), true)
     equal(queues[actor].current, foreign)
     equal(foreign.stops, nil)
@@ -826,7 +847,7 @@ case("Cancelling a sampled walk publishes no completed-route observation", funct
     equal(operation.travel, nil)
 end)
 
-case("A foreign action interrupts walking without being cancelled or learned", function()
+case("A foreign action yields walking without being cancelled or learned", function()
     local actor = player()
     local operation = {kind = "approach", location = {x = 5, y = 0, z = 1}}
     local adapter = Native.new(actor)
@@ -835,9 +856,10 @@ case("A foreign action interrupts walking without being cancelled or learned", f
     equal(adapter:poll(), nil)
     local foreign = action(actor, "user action")
     queues[actor]:addToQueue(foreign)
-    local done, reason = adapter:poll()
+    local done, reason, code = adapter:poll()
     equal(done, false)
-    includes(reason, "player action")
+    includes(reason, "queued action")
+    equal(code, "yielded")
     equal(operation.travel, nil)
     equal(queues[actor].current, foreign)
     equal(foreign.cancellations, 0)
@@ -920,6 +942,449 @@ case("Continued walking cannot extend one approach beyond ten minutes", function
     equal(adapter:isBusy(), false)
     equal(walking.stops, 1)
     equal(operation.travel, nil)
+end)
+
+case("Held gentle movement waits before admission without becoming a takeover", function()
+    local actor = player()
+    actor.movementInput, actor.moving = true, true
+    local adapter = Native.new(actor)
+    local operation = {kind = "vehicle", vehicle = vehicle()}
+    equal(adapter:takeoverReason(), nil)
+    equal(adapter:isPlayerBusy(), true)
+    local accepted, _, code = adapter:begin(operation)
+    equal(accepted, nil)
+    equal(code, "busy")
+    equal(operation.vehicleOrigin, nil)
+    equal(adapter:isBusy(), false)
+    equal(#ISTimedActionQueue.getTimedActionQueue(actor).queue, 0)
+    actor.movementInput, actor.moving = false, false
+    equal(adapter:isPlayerBusy(), false)
+    assert(adapter:begin(operation))
+    equal(queues[actor].current.kind, "path")
+end)
+
+case("Native character actions outside the Lua queue also defer admission", function()
+    local actor = player()
+    local foreign = {kind = "native character action"}
+    actor.characterActions = {foreign}
+    local adapter = Native.new(actor)
+    local accepted, _, code = adapter:begin({kind = "approach", container = actor.inventory})
+    equal(accepted, nil)
+    equal(code, "busy")
+    equal(adapter:isBusy(), false)
+    equal(actor.characterActions[1], foreign)
+    equal(#queues[actor].queue, 0)
+end)
+
+case("Explicit takeover distinguishes aiming combat and manual running from ordinary input", function()
+    for _, entry in ipairs({
+        {"aimInput", "Aiming"}, {"aiming", "Aiming"},
+        {"attacking", "Attacking"}, {"shoving", "shoving"},
+        {"dead", "died"}, {"asleep", "Sleeping"},
+    }) do
+        local actor = player()
+        actor[entry[1]] = true
+        includes(Native.new(actor):takeoverReason(), entry[2])
+    end
+    for _, state in ipairs({"running", "sprinting"}) do
+        local actor = player()
+        actor[state], actor.moving, actor.cancelInput = true, true, true
+        local adapter = Native.new(actor)
+        equal(adapter:takeoverReason(), nil, "Automatic motion and Escape must not imply manual takeover")
+        actor.movementInput = true
+        includes(adapter:takeoverReason(), "Running or sprinting")
+    end
+end)
+
+case("Arbitrary queued preparation consumption and restoration yield in original order", function()
+    local actor, destination, executed = player(), container("crate", square(0, 0)), {}
+    local selected = item(300, actor.inventory)
+    local adapter = Native.new(actor)
+    local operation = {kind = "transfer", item = selected, source = actor.inventory, destination = destination}
+    assert(adapter:begin(operation))
+    local foreign = {}
+    for _, name in ipairs({"modded preparation", "consume", "restore equipment"}) do
+        local label = name
+        local entry = action(actor, label, function() executed[#executed + 1] = label end)
+        foreign[#foreign + 1] = entry
+        ISTimedActionQueue.add(entry)
+    end
+    local done, _, code = adapter:poll()
+    equal(done, false)
+    equal(code, "yielded")
+    equal(adapter:isBusy(), false)
+    equal(selected:getContainer(), actor.inventory)
+    for index, entry in ipairs(foreign) do
+        equal(queues[actor].queue[index], entry)
+        equal(entry.cancellations, 0)
+        equal(entry.stops, nil)
+    end
+    local accepted, _, admissionCode = adapter:begin(operation)
+    equal(accepted, nil)
+    equal(admissionCode, "busy")
+    for _, entry in ipairs(foreign) do entry:complete() end
+    equal(table.concat(executed, ","), "modded preparation,consume,restore equipment")
+    clock = 1000000
+    assert(adapter:begin(operation))
+    queues[actor].current:complete()
+    equal(adapter:poll(), true)
+    equal(selected:getContainer(), destination)
+end)
+
+case("A movement-stopped native action yields without recording a failed or completed walk", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 9, y = 0, z = 0}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    clock, actor.location, actor.movementInput, actor.moving = 1000, square(2, 0), true, true
+    queues[actor].current:forceStop()
+    actor.movementInput, actor.moving = false, false
+    local done, _, code = adapter:poll()
+    equal(done, false)
+    equal(code, "yielded")
+    equal(operation.travel, nil)
+    equal(adapter:isBusy(), false)
+    assert(adapter:begin(operation))
+    queues[actor].current:complete()
+    equal(adapter:poll(), true)
+    equal(actor.location.x, 9)
+end)
+
+case("A genuine path failure stays a failure even when foreign work arrives", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 9, y = 0, z = 0}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    queues[actor].current:reject()
+    local foreign = action(actor, "unrelated user action")
+    ISTimedActionQueue.add(foreign)
+    local done, reason, code = adapter:poll()
+    equal(done, false)
+    includes(reason, "path")
+    equal(code, nil)
+    equal(operation.travel, nil)
+    equal(queues[actor].current, foreign)
+    equal(foreign.stops, nil)
+    equal(foreign.cancellations, 0)
+end)
+
+case("A stopped multiplayer transfer waits for a late immutable-ID result before yielding", function()
+    client = true
+    local actor, destination = player(), container("crate", square(0, 0))
+    local original = item(301, actor.inventory)
+    local operation = {kind = "transfer", item = original, source = actor.inventory, destination = destination}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    actor.movementInput = true
+    queues[actor].current:forceStop()
+    actor.movementInput = false
+    equal(adapter:poll(), nil)
+    clock = 1500
+    put(original, nil)
+    local current = item(301, destination)
+    local done, _, code = adapter:poll()
+    equal(done, true)
+    equal(code, nil)
+    equal(operation.resultItem, current)
+    equal(transfers, 1)
+end)
+
+case("A stopped multiplayer transfer yields only after its observation window settles", function()
+    client = true
+    local actor, destination = player(), container("crate", square(0, 0))
+    local selected = item(302, actor.inventory)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "transfer", item = selected, source = actor.inventory, destination = destination}))
+    actor.movementInput = true
+    queues[actor].current:forceStop()
+    actor.movementInput = false
+    equal(adapter:poll(), nil)
+    clock = 1999
+    equal(adapter:poll(), nil)
+    clock = 2001
+    local done, _, code = adapter:poll()
+    equal(done, false)
+    equal(code, "yielded")
+    equal(selected:getContainer(), actor.inventory)
+    equal(adapter:isBusy(), false)
+end)
+
+case("A completed transfer wins over cancellation and is not transferred twice", function()
+    client, rehydrate = true, true
+    local actor, destination = player(), container("crate", square(0, 0))
+    local original = item(303, actor.inventory)
+    local operation = {kind = "transfer", item = original, source = actor.inventory, destination = destination}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    queues[actor].current:complete()
+    assert(adapter:cancel())
+    equal(adapter:poll(), true)
+    local current = operation.resultItem
+    assert(current ~= original)
+    equal(current:getID(), 303)
+    assert(adapter:begin(operation))
+    equal(adapter:poll(), true)
+    equal(transfers, 1)
+    equal(destination:getItems():size(), 1)
+end)
+
+case("Completed work and the following foreign action are both preserved", function()
+    local actor, destination = player(), container("crate", square(0, 0))
+    local selected = item(304, actor.inventory)
+    local operation = {kind = "transfer", item = selected, source = actor.inventory, destination = destination}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    local foreign = action(actor, "food preparation")
+    ISTimedActionQueue.add(foreign)
+    queues[actor].current:complete()
+    equal(adapter:poll(), true)
+    equal(operation.resultItem, selected)
+    equal(queues[actor].current, foreign)
+    equal(foreign.starts, 1)
+    equal(foreign.stops, nil)
+    equal(foreign.cancellations, 0)
+end)
+
+case("An original floor destination is not silently replaced by the player's new tile", function()
+    local actor = player()
+    local origin = actor.location
+    local floor, selected = container("floor", origin), item(305, actor.inventory)
+    actor.location = square(3, 0)
+    local operation = {kind = "transfer", item = selected, source = actor.inventory, destination = floor,
+        destinationPoint = {x = origin.x, y = origin.y, z = origin.z}}
+    assertRejected(Native.new(actor), operation, "selected floor location")
+    equal(transfers, 0)
+    equal(selected:getContainer(), actor.inventory)
+    equal(#actor.location.worldObjects, 0)
+    equal(#origin.worldObjects, 0)
+end)
+
+case("A completed floor drop is recognized at its original tile after the player moves away", function()
+    local actor = player()
+    local origin = actor.location
+    local floor, selected = container("floor", origin), item(306, actor.inventory)
+    local operation = {kind = "transfer", item = selected, source = actor.inventory, destination = floor,
+        destinationPoint = {x = origin.x, y = origin.y, z = origin.z}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    queues[actor].current:complete()
+    actor.location = square(8, 0)
+    assert(adapter:cancel())
+    equal(adapter:poll(), true)
+    equal(operation.resultItem:getWorldItem():getSquare(), origin)
+    assert(adapter:begin(operation))
+    equal(adapter:poll(), true)
+    equal(transfers, 1)
+    equal(#origin.worldObjects, 1)
+    equal(#actor.location.worldObjects, 0)
+end)
+
+case("Floor completion rejects remote wrong-floor forbidden and mismatched identity outcomes", function()
+    for _, outcome in ipairs({"remote", "wrong floor", "native policy denied", "source still owns ID", "wrong item type"}) do
+        clock = 0
+        local actor = player()
+        local origin = actor.location
+        local candidate = square(outcome == "remote" and 2 or 1, 0, outcome == "wrong floor" and 1 or 0)
+        if outcome == "native policy denied" then candidate.dropAllowed = false end
+        local floor, original = container("floor", origin), item(309, actor.inventory)
+        local operation = {kind = "transfer", item = original, source = actor.inventory, destination = floor,
+            destinationPoint = {x = origin.x, y = origin.y, z = origin.z}}
+        local adapter = Native.new(actor)
+        assert(adapter:begin(operation))
+        queues[actor]:onCompleted(queues[actor].current)
+        if outcome ~= "source still owns ID" then put(original, nil) end
+        local other = item(309, floor)
+        if outcome == "wrong item type" then other.fullType = "Base.WrongType" end
+        local world = {getSquare = function() return candidate end, getItem = function() return other end}
+        other.world, candidate.worldObjects[1] = world, world
+        equal(adapter:transferResult(operation, 309, "Base.Nails"), nil, outcome)
+        equal(adapter:poll(), nil)
+        clock = 2001
+        local done, _, code = adapter:poll()
+        equal(done, false, outcome)
+        equal(code, nil)
+        equal(operation.resultItem, nil)
+    end
+end)
+
+case("An admitted adjacent floor result stays bound to its original zone after movement", function()
+    local actor = player()
+    local origin, adjacent = actor.location, square(1, 1)
+    local floor, selected = container("floor", origin), item(310, actor.inventory)
+    origin.dropAllowed, floorDropSquare = false, adjacent
+    local operation = {kind = "transfer", item = selected, source = actor.inventory, destination = floor,
+        destinationPoint = {x = origin.x, y = origin.y, z = origin.z}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    queues[actor].current:complete()
+    actor.location, adjacent.dropAllowed = square(8, 0), false
+    equal(adapter:transferResult(operation, 310, "Base.Nails"), selected)
+    assert(adapter:cancel())
+    equal(adapter:poll(), true)
+    equal(operation.resultItem, selected)
+    assert(adapter:begin(operation))
+    equal(adapter:poll(), true)
+    equal(transfers, 1)
+    equal(#adjacent.worldObjects, 1)
+    equal(#actor.location.worldObjects, 0)
+end)
+
+case("An issued trash command remains under observation while unrelated work runs", function()
+    local actor, bin = player(), trash(square(0, 0))
+    item(307, bin)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "trash", container = bin, approved = {["307"] = true}}))
+    local foreign = action(actor, "drink and restore container")
+    ISTimedActionQueue.add(foreign)
+    equal(adapter:poll(), nil)
+    equal(adapter:isBusy(), true)
+    equal(#requests, 1)
+    equal(queues[actor].current, foreign)
+    equal(foreign.stops, nil)
+    equal(foreign.cancellations, 0)
+    bin.items = {}
+    equal(adapter:poll(), true)
+    equal(#requests, 1)
+    equal(queues[actor].current, foreign)
+    foreign:complete()
+    equal(#requests, 1)
+end)
+
+case("A cancelled trash command observes a completed empty without issuing another command", function()
+    local actor, bin = player(), trash(square(0, 0))
+    item(308, bin)
+    local operation = {kind = "trash", container = bin, approved = {["308"] = true}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    assert(adapter:cancel())
+    bin.items = {}
+    equal(adapter:poll(), true)
+    assert(adapter:begin(operation))
+    equal(adapter:poll(), true)
+    equal(#requests, 1)
+end)
+
+case("Vehicle retries keep the original outside or passenger-seat restoration target", function()
+    for _, originalSeat in ipairs({-1, 1}) do
+        local actor, selected = player(), vehicle()
+        if originalSeat >= 0 then actor.vehicle, actor.seat, selected.occupants[originalSeat] = selected, originalSeat, actor end
+        local operation = {kind = "vehicle", vehicle = selected}
+        local adapter = Native.new(actor)
+        assert(adapter:begin(operation))
+        for _ = 1, 20 do
+            local queue = queues[actor]
+            if queue.current then queue.current:complete() end
+            adapter:poll()
+            if actor.vehicle == selected and actor.seat == 0 and queue.current then break end
+        end
+        equal(actor:getVehicle(), selected)
+        equal(actor.seat, 0)
+        local foreign = action(actor, "eat before restoring seat")
+        ISTimedActionQueue.add(foreign)
+        local done, _, code = adapter:poll()
+        equal(done, false)
+        equal(code, "yielded")
+        equal(queues[actor].current, foreign)
+        equal(foreign.cancellations, 0)
+        foreign:complete()
+        clock = clock + 200000
+        assert(adapter:begin(operation))
+        local result, reason
+        for _ = 1, 40 do
+            local queue = queues[actor]
+            if queue.current then queue.current:complete() end
+            result, reason = adapter:poll()
+            clock = clock + 10
+            if not adapter:isBusy() then break end
+        end
+        equal(result, true, reason)
+        if originalSeat < 0 then equal(actor:getVehicle(), nil)
+        else equal(actor:getVehicle(), selected); equal(actor.seat, originalSeat) end
+        equal(selected.trunk.door.locked, false)
+        equal(selected.driver.door.open, false)
+    end
+end)
+
+case("Vehicle cancellation waits for foreign work before restoring the original outside state", function()
+    local actor, selected = player(), vehicle()
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "vehicle", vehicle = selected}))
+    for _ = 1, 20 do
+        local queue = queues[actor]
+        if queue.current then queue.current:complete() end
+        adapter:poll()
+        if actor.vehicle == selected and actor.seat == 0 and queue.current then break end
+    end
+    equal(actor:getVehicle(), selected)
+    local foreign = action(actor, "finish drinking")
+    ISTimedActionQueue.add(foreign)
+    assert(adapter:cancel())
+    equal(adapter:poll(), nil)
+    clock = 200000
+    equal(adapter:poll(), nil)
+    equal(actor:getVehicle(), selected)
+    equal(queues[actor].current, foreign)
+    equal(foreign.stops, nil)
+    equal(foreign.cancellations, 0)
+    foreign:complete()
+    local done, reason
+    for _ = 1, 40 do
+        done, reason = adapter:poll()
+        local queue = queues[actor]
+        if queue.current then queue.current:complete() end
+        if not adapter:isBusy() then break end
+    end
+    equal(done, false)
+    includes(reason, "Cancelled")
+    equal(actor:getVehicle(), nil)
+    equal(selected.driver.door.open, false)
+end)
+
+case("Cancelling a yielded vehicle operation restores its retained outside or passenger state", function()
+    for _, originalSeat in ipairs({-1, 1}) do
+        local actor, selected = player(), vehicle()
+        if originalSeat >= 0 then actor.vehicle, actor.seat, selected.occupants[originalSeat] = selected, originalSeat, actor end
+        local operation = {kind = "vehicle", vehicle = selected}
+        local adapter = Native.new(actor)
+        assert(adapter:begin(operation))
+        for _ = 1, 20 do
+            local queue = queues[actor]
+            if queue.current then queue.current:complete() end
+            adapter:poll()
+            if actor.vehicle == selected and actor.seat == 0 and queue.current then break end
+        end
+        equal(actor:getVehicle(), selected)
+        equal(actor.seat, 0)
+        local foreign = action(actor, "finish food preparation")
+        ISTimedActionQueue.add(foreign)
+        local done, _, code = adapter:poll()
+        equal(done, false)
+        equal(code, "yielded")
+        equal(adapter:isBusy(), false)
+        assert(adapter:cancel(operation))
+        equal(adapter:isBusy(), true)
+        equal(adapter:poll(), nil)
+        clock = clock + 200000
+        equal(adapter:poll(), nil)
+        equal(actor:getVehicle(), selected)
+        equal(actor.seat, 0)
+        equal(queues[actor].current, foreign)
+        equal(foreign.stops, nil)
+        equal(foreign.cancellations, 0)
+        foreign:complete()
+        local reason
+        for _ = 1, 40 do
+            done, reason = adapter:poll()
+            local queue = queues[actor]
+            if queue.current then queue.current:complete() end
+            if not adapter:isBusy() then break end
+        end
+        equal(done, false)
+        includes(reason, "Cancelled")
+        if originalSeat < 0 then equal(actor:getVehicle(), nil)
+        else equal(actor:getVehicle(), selected); equal(actor.seat, originalSeat) end
+        equal(selected.driver.door.open, false)
+    end
 end)
 
 print(tostring(passed) .. " native adapter boundary-double cases passed")

@@ -435,6 +435,7 @@ function Instance:start(plan)
     return self.jobs:start(plan)
 end
 function Instance:cancel() return self.jobs:cancel() end
+function Instance:resume() return self.jobs:resume() end
 function Instance:status() return self.jobs:status() end
 function Instance:reviewBin() return self.jobs:reviewBin() end
 function Instance:approveBin(review) return self.jobs:approveBin(review) end

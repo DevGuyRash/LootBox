@@ -30,6 +30,15 @@ local function hasForeign(self, state)
     return false
 end
 
+local function playerFlag(player, name, ...)
+    local method = player and player[name]
+    return method and method(player, ...) == true or false
+end
+
+local function manualMovement(player)
+    return playerFlag(player, "pressedMovement", false) or playerFlag(player, "isPlayerMoving")
+end
+
 local function nearSquare(player, square)
     local current = player:getCurrentSquare()
     return current and square and current:getZ() == square:getZ()
@@ -178,18 +187,26 @@ local function worldItem(square, state)
     end
 end
 
-local function transferred(state)
+local function transferred(self, state)
+    local item = self:transferResult(state.op, state.itemId, state.fullType)
+    if not item then return false end
     local op = state.op
-    if op.source == op.destination then return false end
-    if state.sourceSquare then
-        if worldItem(state.sourceSquare, state) then return false end
-    elseif op.source:containsID(state.itemId) then return false end
-    local item
-    if state.destinationSquare then item = worldItem(state.destinationSquare, state)
-    else item = op.destination:getItemWithID(state.itemId) end
-    if not sameItem(item, state) then return false end
     op.resultItem = item
     return true
+end
+
+local function freezeFloorDestinations(op, action)
+    local point = op.destinationPoint
+    local result = {}
+    for dy = -1, 1 do
+        for dx = -1, 1 do
+            local square = getCell():getGridSquare(point.x + dx, point.y + dy, point.z)
+            if square and action:canDropOnFloor(square) then
+                result[#result + 1] = {x = point.x + dx, y = point.y + dy, z = point.z}
+            end
+        end
+    end
+    op.floorDestinations = result
 end
 
 local function restoreDescription(self, state)
@@ -204,13 +221,14 @@ local function restoreDescription(self, state)
     return ""
 end
 
-local function finish(self, state, success, reason)
-    if success and state.op.kind == "approach" and state.walkObservation then
+local function finish(self, state, success, reason, code)
+    if success and state.op.kind == "approach" and state.walkObservation and not state.cancelled
+        and not state.stepStopped and not state.yieldReason and not state.pathFailed then
         state.op.travel = state.walkObservation
     end
     self.active = nil
     if success then return true end
-    return false, (reason or "The native action failed") .. restoreDescription(self, state)
+    return false, (reason or "The native action failed") .. restoreDescription(self, state), code
 end
 
 local function stopOwned(self, state)
@@ -239,6 +257,7 @@ local function submit(self, state, action, check, nextPhase)
                 pending[#pending + 1] = candidate
             end
         end
+        state.stepYielded = state.stepYielded or #pending > 0 or manualMovement(self.player)
         -- Native stop resets its queue. Temporarily detach only foreign pending work.
         for _, candidate in ipairs(pending) do queue:removeFromQueue(candidate) end
         local ok, err = pcall(nativeStop, stopped)
@@ -251,6 +270,7 @@ local function submit(self, state, action, check, nextPhase)
     state.check = check
     state.nextPhase = nextPhase
     state.stepStopped = false
+    state.stepYielded = false
     state.actionGoneAt = nil
     state.pathFailed = false
     ISTimedActionQueue.add(action)
@@ -276,8 +296,6 @@ end
 local function observeAction(self, state)
     if not state.action then return true end
     if queueFor(self):indexOf(state.action) >= 0 then return nil end
-    if state.pathFailed then return false, "No path to the destination" end
-    if state.stepStopped then return false, "The native action was interrupted or rejected" end
     if state.check() then
         state.walking = nil
         state.action = nil
@@ -285,6 +303,13 @@ local function observeAction(self, state)
         return true
     end
     state.actionGoneAt = state.actionGoneAt or now()
+    if state.stepStopped and state.op.kind == "transfer" and isClient()
+        and now() - state.actionGoneAt < 2000 then return nil end
+    if state.pathFailed then return false, "No path to the destination" end
+    if state.stepStopped then
+        if state.stepYielded then return false, "Waiting for your movement or queued action to finish", "yielded" end
+        return false, "The game stopped the native action before completing it"
+    end
     if now() - state.actionGoneAt < 2000 then return nil end
     return false, "The native action ended without the expected result"
 end
@@ -523,12 +548,62 @@ function Native:isBusy()
     return self.active ~= nil
 end
 
+function Native:transferResult(op, itemId, fullType)
+    if not op or (op.source and op.source == op.destination) then return nil end
+    local identity = {itemId = itemId, fullType = fullType}
+    if op.sourcePoint then
+        local point = location(op.sourcePoint)
+        if not point then return nil end
+        local square = getCell():getGridSquare(point.x, point.y, point.z)
+        if not square or worldItem(square, identity) then return nil end
+    elseif not op.source or op.source:containsID(itemId) then return nil end
+    if op.destinationPoint then
+        local origin = location(op.destinationPoint)
+        if not origin then return nil end
+        local points = op.floorDestinations or {origin}
+        for _, candidate in ipairs(points) do
+            local point = location(candidate)
+            if point and point.z == origin.z and math.abs(point.x - origin.x) <= 1 and math.abs(point.y - origin.y) <= 1 then
+                local item = worldItem(getCell():getGridSquare(point.x, point.y, point.z), identity)
+                if item then return item end
+            end
+        end
+        return nil
+    end
+    local item = op.destination and op.destination:getItemWithID(itemId)
+    return sameItem(item, identity) and item or nil
+end
+
+function Native:isPlayerBusy()
+    if not self.player then return false end
+    if self.active then return hasForeign(self, self.active) end
+    return playerFlag(self.player, "pressedMovement", false) or #queueFor(self).queue > 0
+        or not self.player:getCharacterActions():isEmpty()
+end
+
+function Native:takeoverReason()
+    local player = self.player
+    if not player then return "The player is no longer available" end
+    if playerFlag(player, "isDead") then return "The player died" end
+    if playerFlag(player, "isAsleep") then return "Sleeping stopped the job" end
+    if playerFlag(player, "pressedAim") or playerFlag(player, "isAiming") then
+        return "Aiming stopped the job"
+    end
+    if playerFlag(player, "isAttacking") or playerFlag(player, "isPerformingShoveAnimation") then
+        return "Attacking or shoving stopped the job"
+    end
+    if playerFlag(player, "pressedMovement", false)
+        and (playerFlag(player, "isRunning") or playerFlag(player, "isSprinting")) then
+        return "Running or sprinting stopped the job"
+    end
+end
+
 function Native:begin(op)
     if self.active then return nil, "A native operation is already running" end
     if not self.player or self.player:isDead() or self.player:isAsleep() then return nil, "The player cannot act" end
     if type(op) ~= "table" or not timeouts[op.kind] then return nil, "Unknown native operation" end
-    if #queueFor(self).queue > 0 or not self.player:getCharacterActions():isEmpty() then
-        return nil, "Finish the current player action first"
+    if self:isPlayerBusy() then
+        return nil, "Waiting for your current action to finish", "busy"
     end
     local state = { op = op, owned = {}, deadline = now() + timeouts[op.kind], phase = "prepare" }
     self.active = state
@@ -543,9 +618,25 @@ function Native:begin(op)
             op.resultItem = nil
             state.itemId, state.fullType = op.item:getID(), tostring(op.item:getFullType())
             local world = op.item:getWorldItem()
-            if op.source:getType() == "floor" and world then state.sourceSquare = world:getSquare() end
-            if op.destination:getType() == "floor" then state.destinationSquare = self.player:getCurrentSquare() end
-            if transferred(state) then state.phase = "done"; return true end
+            if op.source:getType() == "floor" and world and not op.sourcePoint then
+                local square = world:getSquare()
+                op.sourcePoint = {x = square:getX(), y = square:getY(), z = square:getZ()}
+            end
+            if op.destination:getType() == "floor" then
+                if not op.destinationPoint then
+                    local square = self.player:getCurrentSquare()
+                    if not square then return nil, "The destination floor is no longer loaded" end
+                    op.destinationPoint = {x = square:getX(), y = square:getY(), z = square:getZ()}
+                end
+                local point = location(op.destinationPoint)
+                if not point then return nil, "The destination floor coordinates are invalid" end
+                state.destinationSquare = getCell():getGridSquare(point.x, point.y, point.z)
+                if not state.destinationSquare then return nil, "The destination floor is no longer loaded" end
+            end
+            if transferred(self, state) then state.phase = "done"; return true end
+            if state.destinationSquare and not onSquare(self.player, state.destinationSquare) then
+                return nil, "Return to the selected floor location before placing this item"
+            end
             local current = op.source:getItemWithID(state.itemId)
             if not sameItem(current, state) then return nil, "The item is no longer in its selected source" end
             op.item = current
@@ -566,9 +657,9 @@ function Native:begin(op)
             if not op.source:isRemoveItemAllowed(op.item) or not op.destination:isItemAllowed(op.item) or op.destination:isInside(op.item) then
                 return nil, "The native container rules refuse this item"
             end
-            return submit(self, state,
-                ISInventoryTransferUtil.newInventoryTransferAction(self.player, op.item, op.source, op.destination),
-                function() return transferred(state) end, "done")
+            local action = ISInventoryTransferUtil.newInventoryTransferAction(self.player, op.item, op.source, op.destination)
+            if op.destinationPoint then freezeFloorDestinations(op, action) end
+            return submit(self, state, action, function() return transferred(self, state) end, "done")
         elseif op.kind == "trash" then
             local object, err = trashObject(self, state)
             if not object then return nil, err end
@@ -586,11 +677,19 @@ function Native:begin(op)
             return true
         elseif op.kind == "vehicle" then
             if not op.vehicle then return nil, "No vehicle was selected" end
-            state.originalVehicle = self.player:getVehicle()
+            local origin = op.vehicleOrigin
+            if origin and origin.target ~= op.vehicle then return nil, "The selected vehicle changed during this operation" end
+            if not origin then
+                local vehicle = self.player:getVehicle()
+                if vehicle and vehicle ~= op.vehicle then return nil, "Exit your current vehicle first" end
+                local part = driverDoor(op.vehicle)
+                origin = {target = op.vehicle, vehicle = vehicle, seat = vehicle and vehicle:getSeat(self.player),
+                    driverDoorWasOpen = part and part:getDoor():isOpen() or false}
+                op.vehicleOrigin = origin
+            end
+            state.originalVehicle = origin.vehicle
             if state.originalVehicle and state.originalVehicle ~= op.vehicle then return nil, "Exit your current vehicle first" end
-            state.originalSeat = state.originalVehicle and op.vehicle:getSeat(self.player) or nil
-            local part = driverDoor(op.vehicle)
-            state.driverDoorWasOpen = part and part:getDoor():isOpen() or false
+            state.originalSeat, state.driverDoorWasOpen = origin.seat, origin.driverDoorWasOpen
             return vehicleStep(self, state)
         end
     end)
@@ -602,8 +701,15 @@ function Native:begin(op)
     return true
 end
 
-function Native:cancel()
+function Native:cancel(op)
     local state = self.active
+    if not state and op and op.kind == "vehicle" and op.vehicleOrigin then
+        local origin = op.vehicleOrigin
+        if origin.target ~= op.vehicle then return false, "The selected vehicle changed before restoration" end
+        state = {op = op, owned = {}, phase = "restore", deadline = now() + 30000,
+            originalVehicle = origin.vehicle, originalSeat = origin.seat, driverDoorWasOpen = origin.driverDoorWasOpen}
+        self.active = state
+    end
     if not state then return true end
     state.cancelled = true
     state.failure = state.failure or "Cancelled"
@@ -614,25 +720,38 @@ end
 
 local function poll(self, state)
     if self.player:isDead() then return finish(self, state, false, "The player died") end
+    if state.op.kind == "trash" and state.phase == "trashPending" then
+        local object = trashObject(self, state)
+        if object and state.op.container:isEmpty() then return finish(self, state, true) end
+    end
     if now() > state.deadline then
         state.failure = state.failure or "The native operation timed out"
         stopOwned(self, state)
-        if state.op.kind ~= "vehicle" or state.restoring then return finish(self, state, false, state.failure) end
     end
-    if hasForeign(self, state) then
+    local foreign = hasForeign(self, state)
+    if foreign and state.op.kind ~= "trash" then
+        if not state.cancelled and not state.failure then
+            state.yieldReason = "Waiting for your queued action to finish"
+        end
         stopOwned(self, state)
-        if state.action and queueFor(self):indexOf(state.action) >= 0 then return nil end
-        return finish(self, state, false, state.failure or "Another player action interrupted this operation")
     end
-    observeWalk(self, state)
-    local observed, reason = observeAction(self, state)
+    if not foreign then observeWalk(self, state) end
+    local observed, reason, code = observeAction(self, state)
     if observed == nil then return nil end
+    if observed and state.phase == "done" and (not state.failure or state.op.kind ~= "vehicle") then
+        return finish(self, state, true)
+    end
+    if not state.cancelled and not state.failure and not state.pathFailed
+        and (state.yieldReason or code == "yielded") then
+        return finish(self, state, false, state.yieldReason or reason, "yielded")
+    end
     if observed == false then
         state.failure = state.failure or reason
         state.action = nil
     end
     if state.failure then
         if state.op.kind ~= "vehicle" then return finish(self, state, false, state.failure) end
+        if foreign then return nil end
         if not state.restoring then
             state.restoring = true
             state.phase = "restore"
@@ -671,8 +790,8 @@ end
 function Native:poll()
     local state = self.active
     if not state then return true end
-    local ok, result, reason = pcall(poll, self, state)
-    if ok then return result, reason end
+    local ok, result, reason, code = pcall(poll, self, state)
+    if ok then return result, reason, code end
     pcall(stopOwned, self, state)
     return finish(self, state, false, "Native operation error: " .. tostring(result))
 end

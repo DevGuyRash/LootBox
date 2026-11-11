@@ -28,8 +28,8 @@ function ISScrollingListBox:new(x, y, width, height)
     function object:drawRectBorder(dx, dy, dw, dh)
         self.draws[#self.draws + 1] = { kind = "border", x = dx, y = dy + self.scroll, width = dw, height = dh }
     end
-    function object:drawText(text, dx, dy)
-        self.draws[#self.draws + 1] = { kind = "text", text = text, x = dx,
+    function object:drawText(text, dx, dy, r, g, b)
+        self.draws[#self.draws + 1] = { kind = "text", text = text, x = dx, r = r, g = g, b = b,
             y = dy + self.scroll, height = fontHeight, width = #text * 7 }
     end
     return object
@@ -190,8 +190,10 @@ test("long labels leave room for the native scrollbar", function()
     local found
     for _, row in ipairs(widget.draws) do
         if row.kind == "text" then
-            found = row
-            assert(row.text:sub(-3) == "...")
+            if row.text ~= "Mine" then
+                found = row
+                assert(row.text:sub(-3) == "...")
+            end
             assert(row.x + row.width <= widget.width - 20)
         end
     end
@@ -210,6 +212,79 @@ test("font-height changes cannot leak a label above or below the list", function
         end
     end
     fontHeight = 16
+end)
+
+local function texts(widget)
+    local result = {}
+    for _, row in ipairs(widget.draws) do if row.kind == "text" then result[#result + 1] = row end end
+    return result
+end
+
+local function hasColor(draw, color)
+    return draw.r == color.r and draw.g == color.g and draw.b == color.b
+end
+
+local function decision()
+    return {segments = {
+        {text = string.rep("Very long item name ", 20), tone = "item", share = .32},
+        {text = "Protected", tone = "warning", share = .20},
+        {text = "Bag contains items", tone = "text"},
+    }}
+end
+
+test("long item names preserve a separately colored status and normal explanation", function()
+    for _, width in ipairs({520, 640, 950}) do
+        local widget = newList()
+        widget.width, widget.scrollbar = width, true
+        draw(widget, 0, "Long item   Protected   Bag contains items", decision())
+        local submitted = texts(widget)
+        assert(#submitted == 3)
+        assert(submitted[1].text:sub(-3) == "..." and hasColor(submitted[1], Widgets.colors.item))
+        assert(submitted[2].text == "Protected" and hasColor(submitted[2], Widgets.colors.warning))
+        assert(submitted[3].text == "Bag contains items" and hasColor(submitted[3], Widgets.colors.text))
+        assert(submitted[1].x + submitted[1].width < submitted[2].x)
+        assert(submitted[2].x + submitted[2].width < submitted[3].x)
+        assert(submitted[3].x + submitted[3].width <= width - 20)
+        contained(widget)
+    end
+end)
+
+test("resizing a decision list refits its names without losing the semantic status", function()
+    local widget, row = newList(), decision()
+    widget.width = 520
+    draw(widget, 0, "Full item name and reason", row)
+    local narrow = texts(widget)
+    widget.width, widget.draws = 950, {}
+    draw(widget, 0, "Full item name and reason", row)
+    local wide = texts(widget)
+    assert(#wide[1].text > #narrow[1].text and wide[2].text == narrow[2].text)
+    assert(wide[3].text == "Bag contains items")
+    contained(widget)
+end)
+
+test("each colored segment keeps the same top and bottom viewport protection", function()
+    for _, height in ipairs({12, 20, 32}) do
+        fontHeight = height
+        for offset = -70, 70 do
+            local widget = newList()
+            widget.width, widget.scroll = 520, offset
+            for y = 0, 168, Widgets.H do draw(widget, y, "Full decision", decision()) end
+            contained(widget)
+        end
+    end
+    fontHeight = 16
+end)
+
+test("category badges and names have separate colors without removing selection markers", function()
+    local widget = newList({["custom:1"] = true})
+    draw(widget, 0, "Run supplies", {key = "custom:1", segments = {
+        {text = "My", tone = "custom"}, {text = "Run supplies", tone = "item"},
+    }})
+    local submitted = texts(widget)
+    assert(#submitted == 2 and submitted[1].text == "My" and submitted[2].text == "Run supplies")
+    assert(hasColor(submitted[1], Widgets.colors.custom) and hasColor(submitted[2], Widgets.colors.item))
+    assert(count(widget, "border") == 1)
+    contained(widget)
 end)
 
 print(passed .. " widget viewport cases passed (explicit native drawing boundary doubles)")
