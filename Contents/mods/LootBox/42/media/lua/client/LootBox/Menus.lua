@@ -239,7 +239,7 @@ local function worldActions(menu, playerIndex, context, app)
     workflow("Current room...", "loot-room", false, not room and "Stand inside the room, or choose an area." or nil)
     add(loot, "Current building...", function()
         quick(playerIndex, context, request("building", "inventory", app:getChecklist(), context))
-    end, "Inspect sources belonging to your current building. Only loaded, permitted locations can be searched.",
+    end, "Walk and inspect your building section by section across its floors. Blocked and unloaded sections remain reported as unsearched.",
         not building and "Stand inside the building, or choose an area." or nil)
     workflow("Select an area...", "loot-area", true)
     local clean = submenu(menu, "Clean and delete", "map_exclamation")
@@ -247,6 +247,10 @@ local function worldActions(menu, playerIndex, context, app)
         quick(playerIndex, context, request("room", "trash", allItems(), context))
     end, "Select all unprotected items in the current room. Carried items are excluded. Review includes existing bin contents.",
         not room and "Stand inside the room, or use Clean an area." or nil)
+    add(clean, "Clean current building...", function()
+        quick(playerIndex, context, request("building", "trash", allItems(), context))
+    end, "Search this building across its floors, then haul unprotected items to eligible trash cans. Carried items are excluded. Deletion needs a fresh review.",
+        not building and "Stand inside the building, or choose an area." or nil)
     add(clean, "Clean an area...", function()
         quick(playerIndex, context, request("area", "trash", allItems(), context), true)
     end, "Choose two corners on the current floor, then review unprotected items and whole-bin deletion contents.")

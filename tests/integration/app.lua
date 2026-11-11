@@ -2,7 +2,7 @@ package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.pat
 
 -- World/action boundaries are doubles. The actual App, category graph, catalog,
 -- and data-only Store run together; native file I/O has a separate smoke check.
-local files, denied = {}, false
+local files, denied, jobState = {}, false, "idle"
 function getFileReader(path)
     if not files[path] then return nil end
     local read = false
@@ -38,7 +38,7 @@ package.loaded["LootBox/World"] = { new = function(_, state)
         end }
 end }
 package.loaded["LootBox/Jobs"] = { new = function()
-    return { status = function() return { state = "idle" } end, cancel = function() return true end,
+    return { status = function() return { state = jobState } end, cancel = function() return true end,
         tick = function() end, start = function() return true end }
 end }
 local App = require "LootBox/App"
@@ -126,6 +126,18 @@ test("deleting a category never reuses its identity for a different category", f
     App.reset()
     local replacement = assert(App.saveCategory({ name = "New", types = {}, includes = {} }))
     assert(replacement ~= obsolete)
+end)
+
+test("a job paused for bin review keeps its category selection stable", function()
+    assert(App.get(0))
+    local before = #assert(App.catalog()).categories
+    jobState = "needs_review"
+    local id, reason = App.saveCategory({ name = "Wait for cleanup", types = {}, includes = {} })
+    assert(id == nil and reason:find("current job", 1, true))
+    assert(#assert(App.catalog()).categories == before)
+    jobState = "idle"
+    id = assert(App.saveCategory({ name = "Cleanup finished", types = {}, includes = {} }))
+    assert(App.category(id).name == "Cleanup finished")
 end)
 
 test("a validly encoded malformed category document remains read-only", function()
