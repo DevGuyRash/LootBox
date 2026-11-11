@@ -87,7 +87,7 @@ local function saveDefinitions(nextDefinitions)
     if loadError then return nil, "Category storage needs repair: " .. loadError end
     for _, instance in pairs(sessions) do
         local state = instance:status().state
-        if state == "running" or state == "cancelling" then return nil, "Finish or cancel the current job before editing categories" end
+        if state == "running" or state == "cancelling" or state == "needs_review" then return nil, "Finish or cancel the current job before editing categories" end
     end
     local nextGraph, err = Categories.new(nextDefinitions)
     if not nextGraph then return nil, err end
@@ -436,6 +436,9 @@ function Instance:start(plan)
 end
 function Instance:cancel() return self.jobs:cancel() end
 function Instance:status() return self.jobs:status() end
+function Instance:reviewBin() return self.jobs:reviewBin() end
+function Instance:approveBin(review) return self.jobs:approveBin(review) end
+function Instance:rejectBin(review) return self.jobs:rejectBin(review) end
 
 function App.tick()
     local stamp = getTimestampMs()

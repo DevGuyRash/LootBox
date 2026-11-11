@@ -16,7 +16,7 @@ import zipfile
 from build import build
 
 
-def run(game: Path, evidence: Path, resume: bool = False, luabuddy_runtime: Path | None = None) -> int:
+def run(game: Path, evidence: Path, resume: bool = False, luabuddy_runtime: Path | None = None, debug: bool = False) -> int:
     game, evidence = game.resolve(), evidence.expanduser().resolve()
     if not (game / "projectzomboid.jar").is_file() or not (game / "jre64/bin/java").is_file():
         raise ValueError("--game must contain projectzomboid.jar and jre64/bin/java")
@@ -98,12 +98,14 @@ def run(game: Path, evidence: Path, resume: bool = False, luabuddy_runtime: Path
             if adapter is not None:
                 command[1:1] = [f"-agentpath:{adapter['snapshot']}", f"-Dluabuddy.config={adapter['profiles']}",
                                 f"-Dluabuddy.templates={adapter['templates']}"]
+            if debug:
+                command.append("-debug")
             client = subprocess.Popen(command, cwd=game, env=env, stdin=subprocess.DEVNULL,
                                       stdout=client_log, stderr=subprocess.STDOUT)
             processes.append(client)
             state = {"ownerPid": os.getpid(), "clientPid": client.pid, "displayPid": display.pid,
                      "display": display_name, "cache": str(cache), "game": str(game), "launch": launch,
-                     "adapter": adapter}
+                     "adapter": adapter, "debug": debug}
             (evidence / "session.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
             print(json.dumps(state), flush=True)
             return client.wait()
@@ -124,6 +126,7 @@ if __name__ == "__main__":
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--resume", action="store_true", help="Restart a stopped owned session, retaining its disposable saves/preferences")
     parser.add_argument("--luabuddy-runtime", type=Path, help="Snapshot an installed LuaBuddy runtime and use an isolated ID-only local-mod profile")
+    parser.add_argument("--debug", action="store_true", help="Enable the game's own debug tools in this disposable session")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    raise SystemExit(run(args.game, args.evidence, args.resume, args.luabuddy_runtime))
+    raise SystemExit(run(args.game, args.evidence, args.resume, args.luabuddy_runtime, args.debug))

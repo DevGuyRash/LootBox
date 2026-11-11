@@ -2,10 +2,12 @@ local Guides = {}
 
 Guides.tasks = {
     { id = "loot-room", title = "Loot this room", summary = "Bring the supplies you choose into your carried storage.", guide = "looting" },
+    { id = "loot-building", title = "Loot this building", summary = "Walk and search its rooms and floors for your selected supplies.", guide = "buildings" },
     { id = "loot-area", title = "Loot a selected area", summary = "Choose two corners, then collect your selected supplies.", guide = "looting" },
     { id = "sort-carried", title = "Sort my carried items", summary = "Put eligible items into storage with matching labels.", guide = "sorting" },
     { id = "haul-car", title = "Haul supplies to my car", summary = "Fill your remembered vehicle, starting with the trunk.", guide = "vehicles" },
     { id = "clean-room", title = "Clean this room", summary = "Review and haul unprotected items to real trash cans for deletion.", guide = "cleaning" },
+    { id = "clean-building", title = "Clean this building", summary = "Search its rooms and floors, then haul approved items to trash cans.", guide = "buildings" },
     { id = "clean-area", title = "Clean a selected area", summary = "Choose an area and review its unprotected items for deletion.", guide = "cleaning" },
 }
 
@@ -33,22 +35,46 @@ Guides.list = {
     {
         id = "looting", title = "Loot a room, building, or area",
         summary = "Collect a checklist without marking every container you visit.",
-        prerequisites = "Choose the supplies you want. Only loaded, permitted locations can be inspected.",
+        prerequisites = "Choose the supplies you want. The character must be able to walk to the selected sources and inspect them through native actions.",
         steps = {
-            "Open Actions and choose Loot. Choose This room, This building, Within reach, or An area as the source.",
+            "Open Actions and choose Loot matching items. Choose Current room, Current building, Within reach, or A selected area as the source.",
             "For an area, choose Select area and click two opposite corners on the current floor. Escape or right-click cancels selection.",
             "Select one or more categories or item types. A custom category can combine a complete loot-run checklist.",
             "Choose My carried storage, or use Move if you want a different destination. Include my carried items is separate from the world source and is optional.",
             "Review before starting. Unopened containers may need an approach and native inspection; locally empty multiplayer sources can remain unconfirmed.",
             "Start, watch progress, and check left-behind reasons. Save the setup to reuse its selection and routing.",
         },
-        expected = "The job makes finite trips through the selected loaded scope. It collects observed matching items and reports anything it could not move.",
+        expected = "The job makes finite trips through the selected scope. Building jobs walk and inspect small sections across the building's floors. The item count grows as matching contents are observed.",
         troubleshooting = {
-            "The building is not a remote scan: unloaded rooms and floors cannot be inspected.",
+            "A building job must walk before inspecting distant sections. Blocked routes and sections that do not load remain unsearched in progress and the result.",
             "A selected area is tied to its saved world coordinates and floor. Review those bounds before reusing it.",
             "A job does not wait for future loot respawns. Run it again when you want another pass.",
         },
         task = "loot-area",
+    },
+    {
+        id = "buildings", title = "Search or clean a whole multi-floor building",
+        summary = "Walk through a large building in sections and keep track of areas the job could not search.",
+        prerequisites = "Stand inside the building with a safe route through its doors and stairs. Cleanup also needs an accessible native bin and multiplayer TrashDeleteAll permission. A detached garage or neighboring building is a separate scope.",
+        steps = {
+            "Choose Loot this building or Clean this building on Home. The floor context menu also offers Loot supplies > Current building and Clean and delete > Clean current building.",
+            "Check Current building under Where to look. Choose your item types or categories, or All unprotected items for a broad cleanup. Carried items are separate and remain excluded unless you enable them.",
+            "Review the observed items and the number of rooms to survey. The room count is an itinerary, not a claim that every container has already been searched.",
+            "Start the reviewed job. The character walks through small sections on each room's floor and inspects sources as those locations load. Large buildings do not need a single complete tile scan before starting.",
+            "Watch Rooms processed, Sections searched, and Unsearched in Current job. Read the unsearched-room rows for the room, floor, and blocking reason. Cancel job returns control when a route becomes unsafe.",
+            "During cleanup, a bin may be outside or on another floor. Bin choice compares travel, carrying trips, and bin emptyings. Travel starts as an estimate and improves from completed walks; the biggest bin is not always the least work.",
+            "If a destination needs inspection, the character approaches it and the job pauses. Choose Review bin in Current job. Approve bin and continue retains this building search and item selection; Try another bin skips that destination.",
+            "Check the final result and actual storage. Resolve blocked stairs, permissions, or unavailable sections before another pass. A multiplayer source reported as unconfirmed is not certified empty.",
+        },
+        expected = "Accessible building sections are inspected in a finite pass across the native building's rooms and floors. Observed matching items are handled, while unsearched sections and unconfirmed sources remain visible.",
+        troubleshooting = {
+            "Rooms processed means their geometry has been attempted. Check Sections unsearched and the reason rows before treating a building as searched.",
+            "Bin discovery identifies native bins in nearby loaded locations on the ground and the current building's floors. Finding a static bin does not approve its contents. If no bin can be found or reached, approach one before another pass.",
+            "New or uninspected bins need an in-person contents review before use. Protected observed items block approval. Use Try another bin to keep the job and choose another destination.",
+            "The bin review shows client-observed contents. Multiplayer does not acknowledge empty replies to Lua, and a client mod cannot make deletion atomic against concurrent shared-bin changes.",
+            "A route estimate is not an independent native path query. Failed routes are avoided during the job; changed doors, stairs, capacity, and contents are checked again during movement and transfer.",
+        },
+        task = "loot-building",
     },
     {
         id = "categories", title = "Build a reusable custom category",
@@ -128,21 +154,24 @@ Guides.list = {
         task = "haul-car",
     },
     {
-        id = "cleaning", title = "Clean a room or area in batches",
+        id = "cleaning", title = "Clean a room, building, or area in batches",
         summary = "Haul approved items to real trash cans, fill them, then delete a batch.",
         prerequisites = "Locate an accessible native trash can. Begin with throwaway items and an empty bin. Multiplayer must allow TrashDeleteAll.",
         steps = {
-            "Right-click the floor and open LootBox > Clean and delete > Clean current room or Clean an area. Actions also offers Clean with narrower category or item-type filters.",
-            "Check the scope carefully. Room and area shortcuts select all unprotected items in that world scope; carried inventory is not included automatically.",
-            "Read the cleanup review. The native trash command empties the entire bin, so existing bin contents are included in the approval.",
+            "Right-click the floor and open LootBox > Clean and delete > Clean current room, Clean current building, or Clean an area. Actions also offers Clean and delete items with narrower category or item-type filters.",
+            "Check the scope carefully. Room, building, and area shortcuts select all unprotected items in that world scope; carried inventory is not included automatically. A selected area covers one floor.",
+            "Read the cleanup review. The native trash command empties the entire bin, so listed existing bin contents are included in the approval. Static bin discovery does not approve unseen contents.",
             "Choose Start cleanup and delete only after checking the items and warnings. A saved setup never reuses an old deletion approval.",
-            "The job collects a carrying load, fills an eligible bin, deletes the approved batch, and repeats. It empties approved contents before concluding a bin cannot fit an item.",
-            "Inspect the result. Another known bin is tried for an item that cannot fit in an empty one. Missing or inaccessible bins, protected contents, and changed unapproved contents are reported.",
+            "When an uninspected destination is found, the job approaches it and pauses. Choose Review bin in Current job. Check the observed contents, then choose Approve bin and continue or Try another bin. Back leaves the job paused, and Cancel job stops it.",
+            "The job collects a carrying load and compares eligible bins using travel, carrying trips, and bin emptyings. It fills the selected bin, empties approved batches, and repeats.",
+            "Inspect the result. An eligible full bin can be emptied and reused. An item too large for its empty capacity needs another bin. Missing or inaccessible bins, protected contents, and changed unapproved contents are reported.",
         },
-        expected = "Items are deleted in capacity-filled batches rather than one deletion command per item. Protected possessions and unapproved new bin contents block deletion.",
+        expected = "Items are deleted in capacity-filled batches rather than one deletion command per item. Observed protected possessions and unapproved new bin contents block deletion. A bin review continues the existing job without requiring another item selection.",
         troubleshooting = {
             "Cancel cannot recall a deletion command already sent to the host.",
-            "A bin can be outside the source room, but it must remain loaded and accessible. Observed missing bins are retired.",
+            "A bin can be outside the room or on another floor. The job approaches a remembered location and revalidates the real bin before use. Blocked stairs, missing bins, and locations that do not load remain reported failures.",
+            "Initial travel costs are estimates; completed native walks improve later choices. A new bin requires its own contents review, even when no existing items are observed.",
+            "A multiplayer bin review shows client observations. Empty replies are not acknowledged to Lua, and concurrent shared-bin changes cannot be made atomic by a client mod. The review cannot certify that unseen server contents are absent.",
             "Cleanup does not change loot-respawn settings or guarantee that a room will respawn loot.",
         },
         task = "clean-room",
@@ -191,6 +220,7 @@ Guides.list = {
             "Compare the proposed source and destination with the actual target names before starting.",
             "Read left-behind reasons. Keep, favorites, held or equipped items, attachments, nonempty bags, full storage, and permission failures are deliberate exclusions.",
             "Unopened containers can require native inspection after approach. An unconfirmed multiplayer response does not establish an empty container or a fully cleared room.",
+            "For building jobs, rooms processed counts attempted geometry. Sections searched and unsearched, plus the unsearched-room rows, show which floors and locations still need attention.",
             "During a job, Cancel stops owned work and lets any required restoration settle. Closing a progress window only hides the panel; it does not cancel the job.",
             "If a destination or source changes during a job, the next native action is checked again. No direct inventory mutation is used to force a rejected transfer.",
             "Check the real inventories and the final moved and left-behind counts. Resolve the reported cause before retrying.",
@@ -206,10 +236,12 @@ Guides.list = {
 
 local taskRequests = {
     ["loot-room"] = { scope = "room", kind = "inventory" },
+    ["loot-building"] = { scope = "building", kind = "inventory" },
     ["loot-area"] = { scope = "area", kind = "inventory" },
     ["sort-carried"] = { scope = "inventory", kind = "labels", all = true },
     ["haul-car"] = { scope = "inventory", kind = "vehicle" },
     ["clean-room"] = { scope = "room", kind = "trash", all = true },
+    ["clean-building"] = { scope = "building", kind = "trash", all = true },
     ["clean-area"] = { scope = "area", kind = "trash", all = true },
 }
 

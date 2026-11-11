@@ -9,7 +9,7 @@ local modules = {
 }
 for _, name in ipairs(modules) do package.preload[name] = function() return true end end
 
-local clock, client, allowTrash, requests, transfers, corpseQueries, queues, rehydrate
+local clock, client, allowTrash, requests, transfers, corpseQueries, queues, rehydrate, loadedSquares, nearestRequests, nearestChoice
 local passed, failures = 0, {}
 
 local function equal(actual, expected, message)
@@ -37,6 +37,7 @@ local function square(x, y, z)
     function value:getZ() return self.z end
     function value:canReachTo(other) return self.reachable and other.reachable end
     function value:getWorldObjects() return list(self.worldObjects) end
+    if loadedSquares then loadedSquares[x .. ":" .. y .. ":" .. value.z] = value end
     return value
 end
 
@@ -102,6 +103,7 @@ local function player()
     function value:getCurrentSquare() return self.location end
     function value:getX() return self.location.x + 0.5 end
     function value:getY() return self.location.y + 0.5 end
+    function value:getZ() return self.location.z end
     function value:getCharacterActions() return list(queues[self] and queues[self].queue or {}) end
     function value:getVehicle() return self.vehicle end
     function value:getPrimaryHandItem() return self.primary end
@@ -205,6 +207,15 @@ ISPathFindAction = {}
 function ISPathFindAction:pathToLocationF(character, x, y, z)
     return action(character, "path", function() character.location = square(math.floor(x), math.floor(y), z) end)
 end
+function ISPathFindAction:pathToNearest(character, locations)
+    local copy = {}
+    for index, value in ipairs(locations) do copy[index] = value end
+    nearestRequests[#nearestRequests + 1] = copy
+    return action(character, "path", function()
+        local first = (nearestChoice - 1) * 3 + 1
+        character.location = square(math.floor(locations[first]), math.floor(locations[first + 1]), locations[first + 2])
+    end)
+end
 function ISPathFindAction:pathAdjacentToMultiTileObject(character, object)
     local target = object:getSquare()
     return self:pathToLocationF(character, target:getX() + 0.5, target:getY() + 0.5, target:getZ())
@@ -247,6 +258,9 @@ ISLockDoors = { new = function(_, character, vehicle, locked)
 end }
 
 getTimestampMs = function() return clock end
+getCell = function()
+    return {getGridSquare = function(_, x, y, z) return loadedSquares[x .. ":" .. y .. ":" .. z] end}
+end
 isClient = function() return client end
 getServerOptions = function() return { getBoolean = function() return allowTrash end } end
 instanceof = function(object, class) return object.class == class end
@@ -304,6 +318,7 @@ end
 
 local function case(name, run)
     clock, client, allowTrash, requests, transfers, corpseQueries, queues, rehydrate = 0, false, true, {}, 0, 0, {}, false
+    loadedSquares, nearestRequests, nearestChoice = {}, {}, 1
     local ok, err = pcall(run)
     if ok then passed = passed + 1; print("PASS " .. name)
     else failures[#failures + 1] = name .. ": " .. tostring(err); print("FAIL " .. failures[#failures]) end
@@ -695,6 +710,216 @@ case("A denied safehouse blocks trash deletion at the final native command bound
     includes(reason, "Safehouse")
     equal(#requests, 0)
     equal(selected:getContainer(), destination)
+end)
+
+case("A coordinate approach can start unloaded and records the completed cross-floor walk", function()
+    local actor, operation = player(), {kind = "approach", location = {x = 5, y = 0, z = 1}}
+    local adapter = Native.new(actor)
+    equal(getCell():getGridSquare(5, 0, 1), nil)
+    assert(adapter:begin(operation))
+    clock, actor.location = 500, square(2, 0, 0)
+    equal(adapter:poll(), nil)
+    equal(operation.travel, nil)
+    clock = 1500
+    queues[actor].current:complete()
+    equal(adapter:poll(), true)
+    equal(actor:getCurrentSquare():getZ(), 1)
+    equal(operation.travel.from.x, 0.5)
+    equal(operation.travel.from.z, 0)
+    equal(operation.travel.to.x, 5.5)
+    equal(operation.travel.to.z, 1)
+    assert(math.abs(operation.travel.distance - (2 + math.sqrt(10))) < 0.000001)
+    equal(operation.travel.elapsedMs, 1500)
+end)
+
+case("Frontier approaches pass every centered native XYZ goal and accept an alternate arrival", function()
+    local actor = player()
+    square(5, 3, 1)
+    square(8, 4, 0)
+    nearestChoice = 2
+    local operation = {kind = "approach", locations = {{x = 5, y = 3, z = 1}, {x = 8, y = 4, z = 0}}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    equal(#nearestRequests, 1)
+    local expected = {5.5, 3.5, 1, 8.5, 4.5, 0}
+    equal(#nearestRequests[1], #expected)
+    for index, value in ipairs(expected) do equal(nearestRequests[1][index], value) end
+    clock = 1000
+    queues[actor].current:complete()
+    equal(adapter:poll(), true)
+    equal(actor:getCurrentSquare():getX(), 8)
+    equal(actor:getCurrentSquare():getY(), 4)
+    equal(actor:getCurrentSquare():getZ(), 0)
+end)
+
+case("A coordinate target does not complete on the wrong floor or without native reach", function()
+    for _, result in ipairs({"wrong floor", "out of reach", "blocked reach", "unloaded"}) do
+        local actor = player()
+        local operation = {kind = "approach", location = {x = 3, y = 0, z = 1}}
+        local adapter = Native.new(actor)
+        clock = 0
+        assert(adapter:begin(operation))
+        queues[actor].current:complete()
+        if result == "wrong floor" then actor.location = square(3, 0, 0)
+        elseif result == "out of reach" then actor.location = square(8, 0, 1)
+        elseif result == "blocked reach" then actor.location.reachable = false
+        else loadedSquares["3:0:1"] = nil end
+        equal(adapter:poll(), nil)
+        clock = 2101
+        local done, reason = adapter:poll()
+        equal(done, false, result)
+        includes(reason, "expected result")
+        equal(operation.travel, nil)
+    end
+end)
+
+case("An exact coordinate approach walks onto an adjacent target", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 1, y = 0, z = 0}, exact = true}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    equal(adapter:poll(), nil)
+    equal(actor:getCurrentSquare():getX(), 0)
+    assert(queues[actor].current)
+    clock = 500
+    queues[actor].current:complete()
+    equal(adapter:poll(), true)
+    equal(actor:getCurrentSquare():getX(), 1)
+end)
+
+case("Coordinate and frontier inputs reject invalid numbers mixed targets and unloaded candidates", function()
+    local actor = player()
+    local adapter = Native.new(actor)
+    for _, field in ipairs({"x", "y", "z"}) do
+        for _, invalid in ipairs({0 / 0, math.huge, 2147483648, 1.5, "1", false}) do
+            local point = {x = 0, y = 0, z = 0}
+            point[field] = invalid
+            assertRejected(adapter, {kind = "approach", location = point}, "coordinates")
+        end
+    end
+    local point = {x = 0, y = 0, z = 0}
+    for _, operation in ipairs({
+        {kind = "approach", location = point, square = actor.location},
+        {kind = "approach", location = point, container = actor.inventory},
+        {kind = "approach", location = point, locations = {point}},
+    }) do assertRejected(adapter, operation, "one approach") end
+    assertRejected(adapter, {kind = "approach", locations = {}}, "sixteen")
+    local tooMany = {}
+    for index = 1, 17 do tooMany[index] = point end
+    assertRejected(adapter, {kind = "approach", locations = tooMany}, "sixteen")
+    assertRejected(adapter, {kind = "approach", locations = {[1] = point, [3] = point}}, "dense")
+    assertRejected(adapter, {kind = "approach", locations = {{x = 5, y = 0, z = 1}}}, "no longer loaded")
+    equal(#nearestRequests, 0)
+end)
+
+case("Cancelling a sampled walk publishes no completed-route observation", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 5, y = 0, z = 1}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    clock, actor.location = 500, square(2, 0, 0)
+    equal(adapter:poll(), nil)
+    assert(adapter:cancel())
+    local done, reason = adapter:poll()
+    equal(done, false)
+    includes(reason, "Cancelled")
+    equal(operation.travel, nil)
+end)
+
+case("A foreign action interrupts walking without being cancelled or learned", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 5, y = 0, z = 1}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    clock, actor.location = 500, square(2, 0, 0)
+    equal(adapter:poll(), nil)
+    local foreign = action(actor, "user action")
+    queues[actor]:addToQueue(foreign)
+    local done, reason = adapter:poll()
+    equal(done, false)
+    includes(reason, "player action")
+    equal(operation.travel, nil)
+    equal(queues[actor].current, foreign)
+    equal(foreign.cancellations, 0)
+    equal(foreign.starts, 1)
+end)
+
+case("A rejected native path does not create a successful travel observation", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 5, y = 0, z = 1}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    clock, actor.location = 500, square(2, 0, 0)
+    equal(adapter:poll(), nil)
+    queues[actor].current:reject()
+    local done, reason = adapter:poll()
+    equal(done, false)
+    includes(reason, "path")
+    equal(operation.travel, nil)
+end)
+
+case("A walk making sampled progress can finish after more than sixty seconds", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 200, y = 0, z = 0}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    local walking = queues[actor].current
+    for step = 1, 3 do
+        clock, actor.location = step * 30000, square(step * 10, 0)
+        equal(adapter:poll(), nil)
+        equal(adapter:isBusy(), true)
+        equal(queues[actor].current, walking)
+        equal(operation.travel, nil)
+    end
+    clock = 120000
+    walking:complete()
+    equal(adapter:poll(), true)
+    equal(adapter:isBusy(), false)
+    equal(actor:getCurrentSquare():getX(), 200)
+    equal(operation.travel.elapsedMs, 120000)
+    assert(operation.travel.distance > 0)
+    equal(walking.stops, nil)
+end)
+
+case("Sixty seconds without walking progress stops owned work without learning it", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 200, y = 0, z = 0}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    local walking = queues[actor].current
+    clock, actor.location = 30000, square(10, 0)
+    equal(adapter:poll(), nil)
+    clock = 89999
+    equal(adapter:poll(), nil)
+    clock = 90001
+    local done, reason = adapter:poll()
+    equal(done, false)
+    includes(reason, "timed out")
+    equal(adapter:isBusy(), false)
+    equal(#queues[actor].queue, 0)
+    equal(walking.stops, 1)
+    equal(operation.travel, nil)
+end)
+
+case("Continued walking cannot extend one approach beyond ten minutes", function()
+    local actor = player()
+    local operation = {kind = "approach", location = {x = 2000, y = 0, z = 0}}
+    local adapter = Native.new(actor)
+    assert(adapter:begin(operation))
+    local walking = queues[actor].current
+    for step = 1, 19 do
+        clock, actor.location = step * 30000, square(step * 10, 0)
+        equal(adapter:poll(), nil)
+    end
+    clock, actor.location = 599999, square(200, 0)
+    equal(adapter:poll(), nil)
+    clock, actor.location = 600001, square(201, 0)
+    local done, reason = adapter:poll()
+    equal(done, false)
+    includes(reason, "timed out")
+    equal(adapter:isBusy(), false)
+    equal(walking.stops, 1)
+    equal(operation.travel, nil)
 end)
 
 print(tostring(passed) .. " native adapter boundary-double cases passed")

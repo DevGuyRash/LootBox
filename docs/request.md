@@ -52,6 +52,14 @@ The user reported scrolling text clipping and asked for clearer workflows, visua
 
 "assume new people won't have luabuddy so this needs to hold on it's own too"
 
+## Building and destination follow-up
+
+"does it work in multi-floor houses if the trash can is outside and the person is on the 2f? can it identify a "whole building" and not just current room (even multi-floor)? what about an enormous building? etc"
+
+"and is it smart enough to know when to go to the closest vs next closest but biggest?"
+
+"implement the features please"
+
 ## References supplied by the user
 
 - [Area Tasks](https://steamcommunity.com/sharedfiles/filedetails/?id=3793163745)
