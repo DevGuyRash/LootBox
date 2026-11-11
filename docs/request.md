@@ -40,6 +40,18 @@ These are excerpts of the user's own words from the creation request in the Code
 
 When told that earlier instructions required Claude for UI code, the user explicitly changed that requirement for this work: "no claude for this. Not needed".
 
+## Usability follow-up
+
+The user reported scrolling text clipping and asked for clearer workflows, visuals, tooltips, and more ways to act alongside the full manager.
+
+"There's no help menu, there's no guides for how to do several different workflows. All this should be built in, basically. It should explain how to do complete workflows, not just one-off things."
+
+"we should be able to control those with options if we want to be able to disable them or not."
+
+"But these are not to replace the menu. These are just adding more ways to work with it that are a bit more immersive. We don't want just a single way, and I think we should keep the menu and improve it, but also add more ways to interact and use this."
+
+"assume new people won't have luabuddy so this needs to hold on it's own too"
+
 ## References supplied by the user
 
 - [Area Tasks](https://steamcommunity.com/sharedfiles/filedetails/?id=3793163745)

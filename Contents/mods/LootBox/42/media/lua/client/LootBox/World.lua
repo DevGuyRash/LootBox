@@ -267,7 +267,10 @@ function World:name(container)
     local bag = call(container, "getContainingItem")
     if bag then return tostring(call(bag, "getName") or "Bag") end
     local part = call(container, "getVehiclePart")
-    if part then return tostring(call(part, "getId") or "Vehicle storage") end
+    if part then
+        local id = tostring(call(part, "getId") or "Vehicle storage")
+        return (getTextOrNull and getTextOrNull("IGUI_VehiclePart" .. id)) or id
+    end
     local kind = tostring(call(container, "getType") or "Container")
     local translated = getTextOrNull and getTextOrNull("IGUI_ContainerTitle_" .. kind)
     return translated or kind
