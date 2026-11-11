@@ -6,7 +6,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 ## Install locally
 
-Extract the built `LootBox-0.3.0.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.4.0.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -14,13 +14,17 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.3.0.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
+The archive is `dist/LootBox-0.4.0.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
 
 ## Start with a workflow
 
 Open **Options > Mods > LootBox > Open LootBox**, or choose **LootBox > Open LootBox** from a right-click menu. Home offers room and area looting, carried-item sorting, vehicle hauling, and room or area cleanup. Each opens the detailed Actions page with the source and destination prepared. Nothing runs until you choose a selection and review the job.
 
 Home also offers **Loot this building** and **Clean this building**. A building search follows the game's room metadata on each actual floor and walks through small sections as needed. It loads sources through normal movement instead of making one enormous tile query. Progress distinguishes rooms processed, sections searched, and sections left unsearched. A blocked stairway, missing geometry, denied permission, or unstreamed section remains visible in the result. Buildings have no 16,384-tile scan cap; the existing room and drawn-area limits remain. A drawn area still covers one floor.
+
+Drag the lower-right corner or bottom edge to resize the manager, quick review, bin review, or progress window. Existing text drafts, selected items and labels, and scroll positions stay in place. Item names, decision statuses, and explanations use separate colors; the full explanation remains available in the row tooltip.
+
+Closing any LootBox window keeps its job running. Ordinary walking and queued player actions temporarily yield control, then the job continues automatically. Aiming, attacking or shoving, deliberate running or sprinting, and **Cancel job** stop it. **Resume job** continues the same job in the current session after the takeover ends, retaining its progress and original locations while checking current items and storage again. Starting another job replaces the stopped checkpoint; disconnecting or returning to the main menu ends it. Resumed cleanup requires a fresh bin contents review.
 
 Help is available from the main menu and in game. Its complete walkthroughs include prerequisites, numbered steps, expected results, troubleshooting, and a **Set up this workflow** button for runnable workflows. Categories and Settings also work before entering a world.
 
@@ -44,7 +48,7 @@ Storage rules mean "these categories belong here" and can contain multiple label
 
 Choose an item checklist, a source, and a destination in the action composer. Sources include carried inventory, a selected container, within reach, the current room, the current building, a visually selected area on one floor, or known containers with a chosen label. Including carried inventory and traversing bags are explicit options. Save and load a reusable checklist without changing the source or destination.
 
-Destinations include carried storage, a selected container, a chosen floor location, the remembered vehicle, matching labeled storage, and known trash cans. Preview shows observed moves, exclusions, pending exploration, and deletion warnings. Start runs a finite job. The progress window shows moved items, items left behind, reasons, and Cancel. Hauling fills available carried capacity before making delivery trips; it preserves unrelated carried items. A full destination leaves an item behind with a reason unless the player explicitly chose the floor.
+Destinations include carried storage, a selected container, a chosen floor location, the remembered vehicle, matching labeled storage, and known trash cans. Preview shows observed moves, exclusions, pending exploration, and deletion warnings. Start runs a finite job. The progress window separates moved items, retained or unconfirmed items, their reasons, and job controls. A bin review identifies the actual bin, floor, coordinates, observed contents weight, capacity and free space before asking for whole-bin deletion approval. Hauling fills available carried capacity before making delivery trips; it preserves unrelated carried items. A full destination leaves an item behind with a reason. Native floor dropping can use an adjacent permitted tile when the original tile is blocked or full; the job retains that original drop area if the player moves away during an interruption.
 
 Automatic pickup respects the character's normal weighted carrying limit, rather than filling main inventory to its higher admission limit. With bag traversal enabled, carried storage with the best actual weight reduction is preferred. Only an equipped outer bag's reduction affects nested contents; unequipped bags still count at full carried weight. Preview shares one character-mass reservation across all bags, and runtime checks each pickup again. Items that cannot fit within these limits stay in place with a reason. Unloading and weight-reducing rearrangement remain available when the character is already overloaded.
 

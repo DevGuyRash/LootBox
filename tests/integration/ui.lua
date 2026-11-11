@@ -7,52 +7,123 @@ local function derive(parent)
     class.__index = class
     return setmetatable(class, { __index = parent })
 end
-ISCollapsableWindow = { derive = derive, update = function() end, createChildren = function(window)
-    window.collapseButton = { setVisible = function() end }
-end }
-ISPanel = { derive = derive }
-
 local current
-package.loaded["LootBox/App"] = {
+local function geometry(widget, x, y, width, height)
+    widget.x, widget.y, widget.width, widget.height = x or 0, y or 0, width or 0, height or 28
+    function widget:setX(v) self.x = v end
+    function widget:setY(v) self.y = v end
+    function widget:setWidth(v) self.width = v; self.textDirty = true end
+    function widget:setHeight(v) self.height = v; self.textDirty = true end
+    function widget:getYScroll() return self.scroll or 0 end
+    function widget:setYScroll(v) self.scroll = v end
+    return widget
+end
+local NativePanel = { derive = derive }
+function NativePanel:new(x, y, width, height)
+    return setmetatable(geometry({ controls = {}, children = {} }, x, y, width, height), { __index = self })
+end
+function NativePanel:initialise() end
+function NativePanel:addChild(child) self.children[#self.children + 1] = child end
+function NativePanel:removeChild(child)
+    for i, value in ipairs(self.children) do if value == child then table.remove(self.children, i); return end end
+end
+function NativePanel:setVisible(value) self.visible = value end
+function NativePanel:removeFromUIManager() self.removed = true end
+function NativePanel:addToUIManager() self.registered = true end
+function NativePanel:bringToTop() end
+function NativePanel:titleBarHeight() return 18 end
+ISPanel = NativePanel
+ISCollapsableWindow = setmetatable({ derive = derive }, { __index = NativePanel })
+function ISCollapsableWindow:createChildren()
+    self.collapseButton = { setVisible = function() end }
+    self.resizeWidget, self.resizeWidget2 = {}, {}
+end
+function ISCollapsableWindow:setResizable(value) self.resizable = value end
+function ISCollapsableWindow:resizeWidgetHeight() return 10 end
+function ISCollapsableWindow:onResize() self.nativeResizes = (self.nativeResizes or 0) + 1 end
+function ISCollapsableWindow:update() end
+
+local App = {
     get = function() return current.app end,
     getPreferences = function() return current.preferences end,
+    catalog = function() return current.catalog end,
 }
-package.loaded["LootBox/Categories"] = {}
-local function control(parent, text)
-    local widget = { text = text, enabled = true, visible = true }
+package.loaded["LootBox/App"] = App
+local function control(parent, text, x, y, width, height)
+    local widget = geometry({ text = text, enabled = true, visible = true }, x, y, width, height)
     function widget:setEnable(enabled) self.enabled = enabled end
+    function widget:setEnabled(enabled) self.enabled = enabled end
     function widget:setTooltip(tooltip) self.tooltip = tooltip end
     function widget:setVisible(visible) self.visible = visible end
     function widget:setName(name) self.text = name end
+    function widget:setTitle(name) self.text = name end
+    function widget:setText(text) self.text = text end
+    function widget:getText() return self.text end
+    function widget:setEditable(editable) self.editable = editable end
+    function widget:isFocused() return self.focused == true end
     parent.controls = parent.controls or {}
     parent.controls[#parent.controls + 1] = widget
     return widget
 end
-local Widgets = { H = 28, GAP = 10, colors = { accent = {r = 1, g = 1, b = 1},
-    success = {r = 1, g = 1, b = 1}, danger = {r = 1, g = 1, b = 1} },
-    unfocus = function(body) current.unfocused = body end }
-function Widgets.button(parent, _, _, _, text, target, callback)
-    local widget = control(parent, text)
+local Widgets = { H = 28, GAP = 10, colors = { accent = {r = .8, g = .7, b = .4},
+    success = {r = .5, g = .7, b = .6}, danger = {r = .8, g = .5, b = .4},
+    item = {r = .5, g = .8, b = .9}, warning = {r = .9, g = .7, b = .3} },
+    unfocus = function(body) current.unfocused = body end,
+    color = function(name) return {name = name} end,
+    escape = function(text) return tostring(text or "") end }
+function Widgets.button(parent, x, y, width, text, target, callback)
+    local widget = control(parent, text, x, y, width, Widgets.H)
     widget.target, widget.callback = target, callback
     return widget
 end
-function Widgets.label(parent, _, _, text) return control(parent, text) end
-function Widgets.heading(parent, _, _, text) return control(parent, text) end
-function Widgets.text(parent, _, _, _, _, text) return control(parent, text) end
-function Widgets.setText(panel, text) panel.text = text end
-function Widgets.list(parent)
-    local widget = control(parent, "")
-    widget.items = {}
-    function widget:addItem(text, data)
-        local row = { text = text, item = data }
+function Widgets.label(parent, x, y, text) return control(parent, text, x, y, 0, Widgets.H) end
+function Widgets.heading(parent, x, y, text) return control(parent, text, x, y, 0, Widgets.H) end
+function Widgets.text(parent, x, y, width, height, text)
+    return control(parent, text, x, y, width, height)
+end
+function Widgets.setText(panel, text)
+    if panel.text ~= text then panel.text = text; panel.scroll = 0 end
+end
+function Widgets.entry(parent, x, y, width, text) return control(parent, text or "", x, y, width, Widgets.H) end
+function Widgets.check(parent, x, y, width, text, selected)
+    local widget = control(parent, text, x, y, width, Widgets.H)
+    widget.checked = selected == true
+    function widget:setSelected(_, v) self.checked = v end
+    function widget:isSelected() return self.checked end
+    return widget
+end
+function Widgets.combo(parent, x, y, width)
+    local widget = control(parent, "", x, y, width, Widgets.H)
+    widget.options, widget.selected = {}, 0
+    function widget:addOptionWithData(text, data, tooltip)
+        self.options[#self.options + 1] = {text = text, data = data, tooltip = tooltip}
+        if self.selected == 0 then self.selected = 1 end
+    end
+    function widget:selectData(data)
+        for i, option in ipairs(self.options) do if option.data == data then self.selected = i; return end end
+    end
+    function widget:getOptionData(i) return self.options[i] and self.options[i].data end
+    function widget:clear() self.options, self.selected = {}, 0 end
+    return widget
+end
+function Widgets.list(parent, x, y, width, height, target, callback, selection)
+    local widget = control(parent, "", x, y, width, height)
+    widget.items, widget.target, widget.callback, widget.selection = {}, target, callback, selection
+    function widget:addItem(text, data, tooltip)
+        local row = { text = text, item = data, tooltip = tooltip, index = #self.items + 1 }
         self.items[#self.items + 1] = row
         return row
     end
-    function widget:clear() self.items = {} end
+    function widget:clear() self.items, self.selected, self.scroll = {}, 0, 0 end
     return widget
 end
 package.loaded["LootBox/Widgets"] = Widgets
+function getCore() return {getScreenWidth = function() return 1280 end, getScreenHeight = function() return 900 end} end
+function getText(key) return key end
+function getTextOrNull() return nil end
+function getItemNameFromFullType(id) return id end
 local UI = require "LootBox/UI"
+local realReviewNew = UI.QuickReview.new
 
 local function fakeReview(_, playerIndex, context, request, plan, notice)
     current.review = { playerIndex = playerIndex, context = context, request = request, plan = plan, notice = notice,
@@ -87,6 +158,27 @@ local function fixture()
     }
     f.binPlan = { moves = {}, skipped = {}, warnings = {}, pending = 0, canApprove = true,
         bin = { name = "Outside bin", point = { x = 4, y = 3, z = 0 } } }
+    f.catalog = { items = {
+        {fullType = "Base.Bandage", name = "Bandage", categoryId = "native:FirstAid"},
+        {fullType = "Base.Apple", name = "Apple", categoryId = "native:Food"},
+    }, categories = {
+        {id = "native:Food", name = "Food", kind = "native"},
+        {id = "native:FirstAid", name = "First aid", kind = "native"},
+        {id = "custom:1", name = "Run supplies", kind = "custom", types = {"Base.Bandage"}, includes = {}},
+    } }
+    f.app.getSetups = function() return {presets = {}} end
+    f.app.lastSetup = function() return nil end
+    f.app.knownVehicles = function() return {} end
+    f.app.labels = function() return {} end
+    f.app.itemLabels = function() return {} end
+    f.app.isKept = function() return false end
+    f.app.cancel = function() f.cancelled = true; return true end
+    f.app.resume = function()
+        f.resumes = (f.resumes or 0) + 1
+        if f.resumeError then return nil, f.resumeError end
+        f.jobStatus.state, f.jobStatus.canResume = "running", false
+        return true
+    end
     f.activeJob, f.paused = {}, true
     f.player = {}
     function getSpecificPlayer() return f.player end
@@ -137,13 +229,13 @@ local function setupWindow(f, chosen, loaded)
 end
 
 local function reviewWindow(f, plan, context)
-    local window = setmetatable({ playerIndex = 0, width = 650, height = 520, plan = plan or f.binPlan,
+    local window = setmetatable(geometry({ controls = {}, children = {}, playerIndex = 0, width = 650, height = 520, plan = plan or f.binPlan,
         context = context or { binReview = f.binPlan }, request = { scope = "inventory",
             filter = { all = true, ids = {}, types = {} }, destination = { kind = "trash" } },
         titleBarHeight = function() return 18 end,
         setVisible = function(self, visible) self.visible = visible end,
         removeFromUIManager = function(self) self.removed = true end,
-    }, { __index = UI.QuickReview })
+    }, 0, 0, 650, 520), { __index = UI.QuickReview })
     UI.QuickReview.createChildren(window)
     return window
 end
@@ -165,11 +257,39 @@ local function progressWindow(f)
     f.jobStatus = {state = "needs_review", done = 0, total = 8, reasons = {}}
     f.app.status = function() return f.jobStatus end
     f.app.cancel = function() f.cancelled = true; return true end
-    local window = setmetatable({playerIndex = 0, width = 540, height = 440,
-        titleBarHeight = function() return 18 end}, {__index = UI.Progress})
+    local window = setmetatable(geometry({controls = {}, children = {}, playerIndex = 0, width = 540, height = 440,
+        titleBarHeight = function() return 18 end}, 0, 0, 540, 440), {__index = UI.Progress})
     UI.Progress.createChildren(window)
     UI.Progress.update(window)
     return window
+end
+
+local function manyCatalogRows(f)
+    for index = 1, 40 do
+        f.catalog.items[#f.catalog.items + 1] = {fullType = "Base.Bandage_" .. index,
+            name = "Medical draft Apple bandage " .. index, categoryId = "native:Food"}
+        f.catalog.categories[#f.catalog.categories + 1] = {id = "native:Food_" .. index,
+            name = "Food " .. index, kind = "native"}
+    end
+end
+
+local function managerWindow(f, mode, context)
+    local window = UI.Window:new(0, context or {}, mode or "home")
+    window:createChildren()
+    return window
+end
+
+local function resize(window, width, height, bottomOnly)
+    local grip = bottomOnly and window.resizeWidget2 or window.resizeWidget
+    assert(window.resizable and grip.resizeFunction, "The native frame must expose an operative resize grip")
+    grip.resizeFunction(window, math.max(width, window.minimumWidth or 0), math.max(height, window.minimumHeight or 0))
+end
+
+local function inside(widget, parent)
+    assert(widget.x >= 0 and widget.y >= 0, "A control escaped the top or left edge")
+    assert(widget.width > 0 and widget.height > 0, "A resized control lost its usable dimensions")
+    assert(widget.x + widget.width <= parent.width, "A control escaped the right edge")
+    assert(widget.y + widget.height <= parent.height, "A control escaped the bottom edge")
 end
 
 local passed = 0
@@ -416,6 +536,221 @@ test("building progress keeps unsearched floor details without duplicating them 
     f.jobStatus.state = "finished_with_skips"
     UI.Progress.update(window)
     assert(not window.cancelButton.enabled)
+end)
+
+test("the manager native grips resize without replacing an unfinished composer", function(f)
+    manyCatalogRows(f)
+    local window = managerWindow(f, "compose", {request = request("floor"), square = {}})
+    local body, search, name, selection, rows = window.body, window.search, window.setupName, window.selection, window.selectionList
+    search:setText("Medical draft"); search.focused = true
+    name:setText("After the loot run")
+    selection["Base.Apple"] = true
+    window:fillSelectionList()
+    assert(#rows.items > 20)
+    rows:setYScroll(-56); rows.selected = 2
+    local remembered = f.remembered
+    for _, size in ipairs({{760, 710}, {1200, 850}, {900, 760}}) do
+        resize(window, size[1], size[2])
+        assert(window.body == body and window.search == search and window.setupName == name and window.selectionList == rows)
+        assert(search:getText() == "Medical draft" and search.focused and name:getText() == "After the loot run")
+        assert(window.selection == selection and selection["Base.Apple"] and rows:getYScroll() == -56 and rows.selected == 2)
+        assert(rows.height >= Widgets.H)
+        inside(rows, body); inside(window.runButton or window.deleteSetupButton, body)
+    end
+    resize(window, 900, 820, true)
+    assert(f.remembered == remembered and f.starts == 0 and not f.cancelled and not f.unfocused)
+    assert(window.body.y + window.body.height <= window.height - window:resizeWidgetHeight() - 2)
+end)
+
+test("category resize retains unsaved name membership filters and scroll", function(f)
+    manyCatalogRows(f)
+    local window = managerWindow(f, "categories")
+    window.categoryName:setText("Weekend supply draft")
+    window.categorySearch:setText("Run")
+    window.memberSearch:setText("Apple")
+    window.memberKind:selectData("types")
+    window.editor.types["Base.Apple"] = true
+    window:fillMemberList()
+    assert(#window.memberList.items > 20)
+    window.memberList:setYScroll(-84)
+    local body, editor, field, members = window.body, window.editor, window.categoryName, window.memberList
+    resize(window, 760, 710)
+    assert(window.body == body and window.editor == editor and window.categoryName == field and window.memberList == members)
+    assert(field:getText() == "Weekend supply draft" and window.categorySearch:getText() == "Run")
+    assert(window.memberSearch:getText() == "Apple" and window.memberKind:getOptionData(window.memberKind.selected) == "types")
+    assert(editor.types["Base.Apple"] and members.selection == editor.types and members:getYScroll() == -84)
+    inside(members, body); inside(window.deleteCategoryButton, body)
+    assert(not f.cancelled and f.starts == 0 and f.remembered == 0)
+end)
+
+test("label resize preserves the chosen copy unsaved tags and Keep", function(f)
+    manyCatalogRows(f)
+    local selected = {getName = function() return "My hammer" end, getFullType = function() return "Base.Hammer" end}
+    local window = managerWindow(f, "labels", {item = selected, labelKind = "item"})
+    window.labelSelection["native:Food"] = true
+    window.keep:setSelected(1, true)
+    window.labelSearch:setText("Food")
+    window:fillLabelList()
+    assert(#window.labelList.items > 20)
+    window.labelList:setYScroll(-28)
+    local body, target, tags, keep = window.body, window.labelTarget:getOptionData(window.labelTarget.selected), window.labelSelection, window.keep
+    resize(window, 760, 710)
+    resize(window, 1150, 820)
+    assert(window.body == body and window.labelSelection == tags and window.keep == keep)
+    assert(window.labelTarget:getOptionData(window.labelTarget.selected) == target and target.ref == selected)
+    assert(tags["native:Food"] and keep:isSelected(1) and window.labelSearch:getText() == "Food")
+    assert(window.labelList.selection == tags and window.labelList:getYScroll() == -28)
+    inside(window.labelList, body); inside(window.saveLabelsButton, body)
+    assert(not f.cancelled and f.starts == 0)
+end)
+
+test("settings and Help resize retain unsaved choices and reading position", function(f)
+    f.preferences.contextMenus, f.preferences.showTips = true, true
+    local settings = managerWindow(f, "settings")
+    settings.preferenceWidgets.contextMenus:setSelected(1, false)
+    local body, checkbox = settings.body, settings.preferenceWidgets.contextMenus
+    resize(settings, 760, 710)
+    assert(settings.body == body and settings.preferenceWidgets.contextMenus == checkbox and not checkbox:isSelected(1))
+    assert(f.preferences.contextMenus == true)
+    local help = managerWindow(f, "help", {guide = "buildings"})
+    help.guideSearch:setText("building")
+    help.guidePanel:setYScroll(-140)
+    local panel, guide = help.guidePanel, help.currentGuide
+    resize(help, 760, 710); resize(help, 1200, 850)
+    assert(help.guidePanel == panel and help.currentGuide == guide and guide.id == "buildings")
+    assert(help.guideSearch:getText() == "building" and panel:getYScroll() == -140)
+    inside(help.guidePanel, help.body); inside(help.guideSetupButton, help.body)
+end)
+
+test("full job preview resizes its decision rows without changing its reviewed plan", function(f)
+    local window = managerWindow(f, "home")
+    window.request = request("trash")
+    window.plan = {moves = {{itemName = "Nails", from = "Upstairs", to = "Outside bin"}},
+        skipped = {{itemName = "My hammer", status = "Protected", reason = "Keep", tone = "warning"}}, pending = 0}
+    window:show("preview")
+    local body, token, button = window.body, window.plan, window.runButton
+    resize(window, 760, 710); resize(window, 1150, 850)
+    assert(window.body == body and window.plan == token and window.runButton == button)
+    local list
+    for _, widget in ipairs(body.controls) do if widget.items then list = widget end end
+    assert(#list.items == 2 and list.items[1].item.segments[1].text == "Nails")
+    local protected = list.items[2]
+    assert(protected.item.segments[1].tone == "item" and protected.item.segments[2].text == "Protected")
+    assert(protected.item.segments[2].tone == "warning" and protected.item.segments[3].text == "Keep" and protected.item.segments[3].tone == "text")
+    assert(protected.tooltip:find("My hammer", 1, true) and protected.tooltip:find("Keep", 1, true))
+    inside(list, body); inside(button, body)
+    assert(f.starts == 0 and not f.cancelled)
+end)
+
+test("bin review resize preserves approval token and shows destination identity capacity and scope", function(f)
+    f.binPlan.bin = {name = "Porch trash can", point = {x = 12, y = 34, z = 0}, capacity = 20, used = 7,
+        routing = "Two trips, one emptying; travel observed"}
+    f.binPlan.moves = {{itemName = "Broken bottle", from = "Existing bin contents", to = "Delete with approved cleanup"}}
+    local window = realReviewNew(UI.QuickReview, 0, {binReview = f.binPlan}, request("trash"), f.binPlan)
+    window:createChildren()
+    local rows, token, plan = window.rows, window.context.binReview, window.plan
+    resize(window, 540, 440); resize(window, 950, 700, true)
+    assert(window.rows == rows and window.context.binReview == token and window.plan == plan)
+    local text = ""
+    for _, widget in ipairs(window.controls) do text = text .. "\n" .. tostring(widget.text or "") end
+    assert(text:find("Porch trash can", 1, true) and text:find("Floor 0 at 12, 34", 1, true))
+    assert(text:find("7.0 / 20.0", 1, true) and text:find("Free 13.0", 1, true) and text:find("travel observed", 1, true))
+    assert(window.messagePanel.text:find("whole-bin deletion", 1, true))
+    local row = rows.items[1]
+    assert(row.item.segments[1].text == "Broken bottle" and row.item.segments[2].text == "Will be deleted")
+    assert(row.item.segments[2].tone == "danger" and row.item.segments[3].tone == "text")
+    assert(window.runButton.y + window.runButton.height < window.height - window:resizeWidgetHeight())
+    assert(f.starts == 0 and not f.approvals and not f.cancelled)
+    press(window, "Approve bin and continue")
+    assert(f.approvals == 1 and f.starts == 0)
+end)
+
+test("stopped progress exposes Resume and resizes without cancelling or duplicating notes", function(f)
+    local window = progressWindow(f)
+    f.jobStatus = {state = "cancelled", canResume = true, done = 13, total = 159, skipped = 1,
+        reasons = {{itemName = "Garbage Bag", status = "Protected", reason = "Bag contains items", tone = "warning"}}}
+    for index = 2, 25 do
+        f.jobStatus.reasons[index] = {itemName = "Kept item " .. index, status = "Protected", reason = "Keep", tone = "warning"}
+    end
+    window:update()
+    local rows, status = window.reasonsList, f.jobStatus
+    rows:setYScroll(-28)
+    resize(window, 520, 410); resize(window, 900, 650)
+    window:update()
+    assert(window.resumeButton.visible and window.resumeButton.enabled and not window.cancelButton.enabled)
+    assert(window.reasonsList == rows and #rows.items == 25 and rows:getYScroll() == -28)
+    assert(f.jobStatus == status and f.starts == 0 and not f.cancelled and not f.resumes)
+    local row = rows.items[1]
+    assert(row.item.segments[1].text == "Garbage Bag" and row.item.segments[1].tone == "item")
+    assert(row.item.segments[2].text == "Protected" and row.item.segments[2].tone == "warning")
+    assert(row.item.segments[3].text == "Bag contains items" and row.item.segments[3].tone == "text")
+    press(window, "Resume job")
+    assert(f.resumes == 1 and f.starts == 0 and f.jobStatus.state == "running")
+    window:update()
+    assert(not window.resumeButton.visible and window.cancelButton.enabled)
+end)
+
+test("a rejected Resume stays visible and temporary waiting never offers a second job", function(f)
+    local window = progressWindow(f)
+    f.jobStatus.state, f.jobStatus.canResume = "cancelled", true
+    f.resumeError = "Stop aiming before resuming"
+    window:update(); press(window, "Resume job"); window:update()
+    assert(window.reasonPanel.text:find(f.resumeError, 1, true) and window.resumeButton.visible)
+    f.jobStatus.state, f.jobStatus.canResume = "running", false
+    f.jobStatus.waiting = "Waiting for your current action to finish. This job will continue automatically."
+    window:update()
+    assert(window.statusLabel.text == "Waiting for your action" and window.reasonPanel.text:find("automatically", 1, true))
+    assert(not window.resumeButton.visible and window.cancelButton.enabled and f.starts == 0)
+end)
+
+test("closing progress and reviews cannot cancel or restart the active job", function(f)
+    local active = f.activeJob
+    local progress = progressWindow(f)
+    progress:close()
+    local review = reviewWindow(f)
+    review:close()
+    assert(f.activeJob == active and f.starts == 0 and not f.cancelled and not f.resumes and not f.approvals)
+    assert(progress.removed and review.removed)
+end)
+
+test("default and minimum frames retain a full decision row at larger font sizes", function()
+    local originalModule, originalH = package.loaded["LootBox/UI"], Widgets.H
+    for _, rowHeight in ipairs({28, 32, 44}) do
+        Widgets.H = rowHeight
+        package.loaded["LootBox/UI"] = nil
+        local scaled = require "LootBox/UI"
+        local f = fixture()
+        manyCatalogRows(f)
+        local manager = scaled.Window:new(0, {request = request("floor"), square = {}}, "compose")
+        manager:createChildren()
+        assert(manager.selectionList.height >= rowHeight, "The initial manager must show a complete selectable row")
+        resize(manager, manager.minimumWidth, manager.minimumHeight)
+        assert(manager.selectionList.height >= rowHeight, "The minimum manager must show a complete selectable row")
+        inside(manager.selectionList, manager.body)
+        assert(manager.selectionList.y + manager.selectionList.height < manager.setupName.y)
+        assert(manager.body.y + manager.body.height <= manager.height - manager:resizeWidgetHeight() - 2)
+        for _, binReview in ipairs({false, true}) do
+            local plan = binReview and f.binPlan or f.plan
+            local review = scaled.QuickReview:new(0, binReview and {binReview = plan} or {}, request("trash"), plan)
+            review:createChildren()
+            assert(review.rows.height >= rowHeight, "The initial review must show a complete decision row")
+            resize(review, review.minimumWidth, review.minimumHeight)
+            assert(review.rows.height >= rowHeight, "The minimum review must show a complete decision row")
+            assert(review.rows.y + review.rows.height < review.runButton.y)
+            assert(review.messagePanel.y + review.messagePanel.height <= review.height - review:resizeWidgetHeight() - 2)
+        end
+        f.jobStatus = {state = "needs_review", done = 0, total = 4, reasons = {}}
+        f.app.status = function() return f.jobStatus end
+        local progress = scaled.Progress:new(0)
+        progress:createChildren(); progress:update()
+        assert(progress.reasonsList.height >= rowHeight, "The initial progress must show a complete note row")
+        resize(progress, progress.minimumWidth, progress.minimumHeight)
+        assert(progress.reasonsList.height >= rowHeight, "The minimum progress must show a complete note row")
+        assert(progress.reasonsList.y + progress.reasonsList.height < progress.cancelButton.y)
+        assert(progress.footer.y + progress.footer.height <= progress.height - progress:resizeWidgetHeight() - 2)
+        assert(not f.cancelled and f.starts == 0 and not f.resumes)
+    end
+    Widgets.H, package.loaded["LootBox/UI"] = originalH, originalModule
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")

@@ -17,6 +17,7 @@ local function container(name, capacity, owned)
     function result:isEmpty() return #self.items == 0 end
     function result:contains(item) for _, entry in ipairs(self.items) do if entry == item then return true end end; return false end
     function result:getItemWithID(id) for _, entry in ipairs(self.items) do if entry:getID() == id then return entry end end end
+    function result:containsID(id) return self:getItemWithID(id) ~= nil end
     function result:getType() return self.kind or "crate" end
     function result:getEffectiveCapacity() return self.capacity end
     function result:getCapacityWeight()
@@ -77,8 +78,39 @@ function Native.new(player)
     return adapter
 end
 function Native:isBusy() return self.active ~= nil end
+function Native:isPlayerBusy() return active.playerBusy == true end
+function Native:takeoverReason() return active.takeover end
+function Native:transferResult(op, id, fullType)
+    if op.sourcePoint then
+        for _, value in ipairs(active.ground) do
+            local square = value:getWorldItem():getSquare()
+            if coordinateKey(square) == coordinateKey(op.sourcePoint) and value:getID() == id then return nil end
+        end
+    elseif op.source and op.source:containsID(id) then return nil end
+    if op.destinationPoint then
+        for _, value in ipairs(active.ground) do
+            local square, dropped = value:getWorldItem():getSquare(), active.floorDrops[id]
+            local original = coordinateKey(op.destinationPoint)
+            local admitted = coordinateKey(square) == original
+            for _, point in ipairs(op.floorDestinations or {}) do
+                if coordinateKey(point) == coordinateKey(square) then admitted = true end
+            end
+            if value:getID() == id and value:getFullType() == fullType
+                and admitted and (coordinateKey(square) == original or dropped and dropped.origin == original) then return value end
+        end
+    elseif op.destination then
+        local value = op.destination:getItemWithID(id)
+        if value and value:getFullType() == fullType then return value end
+    end
+end
 function Native:begin(op)
     assert(not self.active, "The job overlapped native operations")
+    if active.beginBusy then active.beginBusy = nil; return nil, "Another action is finishing", "busy" end
+    if active.rejectOnce then local reason = active.rejectOnce; active.rejectOnce = nil; return nil, reason end
+    if op.kind == "transfer" and op.destination.kind == "floor" then
+        op.floorDestinations = {op.destinationPoint}
+        if active.floorDropPoint then op.floorDestinations[#op.floorDestinations + 1] = active.floorDropPoint end
+    end
     active.operations[#active.operations + 1] = op
     if op.kind == "trash" then
         for _, entry in ipairs(op.container.items) do
@@ -100,9 +132,14 @@ function Native:poll()
         if state.cleanup > 0 then return nil end
         self.active = nil
         active.restored = true
+        if active.completeDuringCancel and state.effectDone then return true end
         return false, "Cancelled"
     end
     local op = state.op
+    if active.yieldOnce and (active.yieldOnce == true or active.yieldOnce == op.kind) then
+        active.yieldOnce, self.active = nil, nil
+        return false, "An ordinary action is using the queue", "yielded"
+    end
     if active.throwPoll and op.kind == "vehicle" and not active.thrown then
         active.thrown = true
         error("Simulated observation failure during vehicle entry")
@@ -154,9 +191,10 @@ function Native:poll()
         end
         op.resultItem = current
         if op.destination.kind == "floor" then
-            local square = active.squares[active.position]
+            local square = active.floorDropPoint or active.squares[active.position]
             current.world = { getSquare = function() return square end }
             active.ground[#active.ground + 1] = current
+            active.floorDrops[current.id] = {origin = coordinateKey(op.destinationPoint), square = square}
         end
         active.transfers[#active.transfers + 1] = { item = current, source = op.source, destination = op.destination }
         if active.onTransfer then active.onTransfer(op) end
@@ -169,6 +207,7 @@ function Native:poll()
         end
         active.deletions[#active.deletions + 1] = { bin = op.container, count = #op.container.items }
         op.container.items = {}
+        if active.holdTrashResult then state.effectDone = true; return nil end
     elseif op.kind ~= "vehicle" then error("Unknown native operation") end
     self.active = nil
     return true
@@ -195,7 +234,7 @@ end} end
 
 local function fixture(capacity)
     local f = { now = 0, position = "source", visits = {}, transfers = {}, deletions = {}, scheduled = {}, ground = {}, squares = {}, nearby = {},
-        grid = {}, unloaded = {}, blockedPositions = {}, approaches = {}, operations = {}, sourceLocations = {}, binLocations = {}, unloadedBins = {}, inspectedBins = {} }
+        grid = {}, unloaded = {}, blockedPositions = {}, approaches = {}, operations = {}, sourceLocations = {}, binLocations = {}, unloadedBins = {}, inspectedBins = {}, floorDrops = {} }
     local nextPosition = 0
     function f:ensureSquare(name, point)
         if self.squares[name] then
@@ -225,7 +264,9 @@ local function fixture(capacity)
     f.destination = container("destination", 100)
     f.floor = container("floor", 1000); f.floor.kind = "floor"
     f.sources, f.bins, f.groundSquares = { f.source }, {}, {}
-    f.player = { getPlayerNum = function() return 0 end }
+    f.player = { getPlayerNum = function() return 0 end,
+        isDead = function() return f.dead == true end, isAsleep = function() return f.asleep == true end,
+        getCurrentSquare = function() return f:ensureSquare(f.position) end }
     local world = {}
     function world:point()
         local current = f:ensureSquare(f.position)
@@ -235,6 +276,7 @@ local function fixture(capacity)
     function world:square(value) return f:ensureSquare(value.position) end
     function world:sourceAnchor(value)
         f.sourceLocations[value.name] = f.sourceLocations[value.name] or value
+        if self:owns(value) then return {key = value.name} end
         local point = self:square(value)
         return {key = value.name, point = {x = point.x, y = point.y, z = point.z}}
     end
@@ -370,7 +412,12 @@ local function fixture(capacity)
     function f.loot:checkExplored(source) source.explored = true; if source.reply then source.reply() end end
     function f.loot:refreshBackpacks()
         f.floor.items = {}
-        for _, value in ipairs(f.ground) do f.floor.items[#f.floor.items + 1] = value; value.container = f.floor end
+        for _, value in ipairs(f.ground) do
+            local here = value.world and value.world:getSquare()
+            if not f.floorOnlyHere or here == f.squares[f.position] then
+                f.floor.items[#f.floor.items + 1] = value; value.container = f.floor
+            end
+        end
     end
     f.world = world
     active = f
@@ -457,6 +504,22 @@ local function test(name, body)
     body()
     tests = tests + 1
     print("PASS " .. name)
+end
+
+local function awaitOperation(f, predicate)
+    for _ = 1, 1000 do
+        tick(f)
+        if f.adapter.active and predicate(f.adapter.active.op) then return f.adapter.active.op end
+        assert(f.jobs:status().state == "running", "The selected operation was never reached")
+    end
+    error("The selected operation did not start")
+end
+
+local function stopJob(f)
+    assert(f.jobs:cancel())
+    local stopped = finish(f)
+    assert(stopped.state == "cancelled" and stopped.canResume, "A settled cancellation must retain a resumable checkpoint")
+    return stopped
 end
 
 test("haul seven unit items in three capacity-limited trips", function()
@@ -1427,6 +1490,307 @@ test("nil cannot approve or reject a bin before a review token is issued", funct
     local review = assert(f.jobs:reviewBin())
     assert(not f.jobs:approveBin(nil) and not f.jobs:rejectBin(nil))
     assert(f.jobs:approveBin(review) and finish(f).done == 1)
+end)
+
+
+test("resume follows an accepted recreated source instead of its detached handle", function()
+    local f = fixture(3)
+    local original, selected = f.source, item(f.source)
+    start(f)
+    awaitOperation(f, function(op) return op.kind == "approach" and op.container == original end)
+    stopJob(f)
+    local current = container("source", 100)
+    local recreated = item(current); recreated.id = selected.id
+    original.items, selected.container = {}, nil
+    f.sourceLocations.source, f.source = current, current
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and current:isEmpty())
+    assert(f.destination:getItemWithID(selected.id) and #f.transfers == 2)
+end)
+
+test("resumed unknown-source exploration requests and reads the current container", function()
+    local f = fixture(3)
+    f.client, f.source.explored = true, false
+    local original = f.source
+    start(f)
+    awaitOperation(f, function(op) return op.kind == "approach" and op.container == original end)
+    stopJob(f)
+    local current = container("source", 100); current.explored = false
+    local selected = item(current)
+    f.sourceLocations.source, f.source = current, current
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and result.unconfirmedSources == 1)
+    assert(not original.requested and current.requested == 1 and f.destination:contains(selected))
+end)
+
+test("resumed delivery uses the current anchored destination", function()
+    local f = fixture(3)
+    local selected, original = item(f.source), f.destination
+    start(f)
+    awaitOperation(f, function(op) return op.kind == "approach" and op.container == original end)
+    stopJob(f)
+    local current = container("destination", 100)
+    f.sourceLocations.destination, f.destination = current, current
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and current:contains(selected) and original:isEmpty())
+end)
+
+test("a rejected source identity is never adopted on resume", function()
+    local f = fixture(3)
+    local selected = item(f.source)
+    start(f)
+    awaitOperation(f, function(op) return op.kind == "approach" and op.container == f.source end)
+    stopJob(f)
+    f.sourceLocations.source = nil
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 0 and result.skipped == 1 and f.source:contains(selected))
+    assert(#f.transfers == 0 and f.destination:isEmpty())
+end)
+
+test("admission contention waits and continues the same job", function()
+    local f = fixture(3)
+    item(f.source); item(f.source)
+    f.beginBusy = true
+    start(f)
+    local result = finish(f)
+    assert(result.state == "finished" and result.done == 2 and result.skipped == 0)
+    assert(not result.canResume and #f.destination.items == 2)
+end)
+
+test("an arbitrary queued action yields without cancelling or skipping work", function()
+    local f = fixture(3)
+    local selected = item(f.source)
+    start(f)
+    awaitOperation(f, function(op) return op.kind == "transfer" end)
+    f.yieldOnce, f.playerBusy = "transfer", true
+    tick(f)
+    for _ = 1, 20 do tick(f) end
+    local waiting = f.jobs:status()
+    assert(waiting.state == "running" and waiting.waiting and waiting.done == 0 and waiting.skipped == 0)
+    assert(f.source:contains(selected) and #f.transfers == 0)
+    f.playerBusy = false
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and #f.transfers == 2)
+end)
+
+test("failure wording cannot imply user cancellation", function()
+    local f = fixture(3)
+    item(f.source)
+    f.rejectOnce = "Another player action interrupted and stopped this native operation"
+    start(f)
+    local result = finish(f)
+    assert(result.state == "finished_with_skips" and result.skipped == 1 and result.done == 0 and not result.canResume)
+end)
+
+test("explicit takeover stops pending work until the user resumes", function()
+    local f = fixture(3)
+    item(f.source); item(f.source)
+    start(f)
+    awaitOperation(f, function(op) return op.kind == "transfer" end)
+    f.takeover = "Aiming stopped the job"
+    local stopped = finish(f)
+    assert(stopped.state == "cancelled" and stopped.canResume and #f.transfers == 0)
+    assert(not f.jobs:resume())
+    for _ = 1, 10 do tick(f) end
+    assert(#f.transfers == 0)
+    f.takeover = nil
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 2 and result.skipped == 0 and #f.destination.items == 2)
+end)
+
+test("a completed pickup during cancellation is counted exactly once after resume", function()
+    local f = fixture(3)
+    local selected = item(f.source)
+    f.holdTransferResult, f.completeDuringCancel = true, true
+    start(f, request("inventory"))
+    for _ = 1, 100 do tick(f); if #f.transfers == 1 then break end end
+    assert(#f.transfers == 1 and f.inventory:contains(selected))
+    local stopped = stopJob(f)
+    assert(stopped.done == 0)
+    f.holdTransferResult = false
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 1 and result.total == 1 and result.skipped == 0 and #f.transfers == 1)
+end)
+
+test("protection and normal carrying limits are checked after a stop", function()
+    for _, change in ipairs({"protection", "capacity"}) do
+        local f = fixture(3)
+        local selected = item(f.source, "Base.Selected", 2)
+        start(f, request("inventory"))
+        awaitOperation(f, function(op) return op.kind == "transfer" end)
+        stopJob(f)
+        if change == "protection" then selected.protected = true else f.normalLimit = 1 end
+        assert(f.jobs:resume())
+        local result = finish(f)
+        assert(result.done == 0 and result.skipped == 1 and f.source:contains(selected) and #f.transfers == 0)
+        if change == "protection" then assert(result.reasons[1].status == "Protected") end
+    end
+end)
+
+test("resuming a floor pickup returns before refreshing its shared floor view", function()
+    local f = fixture(3)
+    f.onlyGround, f.floorOnlyHere, f.groundSquares = true, true, {f.squares.source}
+    local selected = item(f.floor)
+    selected.world = {getSquare = function() return f.squares.source end}
+    f.ground = {selected}
+    start(f, request("inventory"))
+    awaitOperation(f, function(op) return op.kind == "transfer" end)
+    stopJob(f)
+    f.position = "destination"; f.loot:refreshBackpacks()
+    assert(f.floor:isEmpty())
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and f.inventory:contains(selected))
+    assert(f.transfers[1].source.kind == "floor" and f.position == "source")
+end)
+
+test("resuming a floor delivery keeps its original destination point", function()
+    local f = fixture(3)
+    local selected = item(f.inventory)
+    f.sources = {f.inventory}
+    local target = f.squares.destination
+    start(f, request("floor", target))
+    awaitOperation(f, function(op) return op.kind == "transfer" end)
+    stopJob(f)
+    f.position = "source"
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and selected:getWorldItem():getSquare() == target)
+    assert(f.position == "destination")
+end)
+
+test("resume retires a bin token and requires fresh approval", function()
+    local f = fixture(3)
+    local bin = container("reviewed bin", 4); bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local selected = item(f.source)
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    local old = assert(f.jobs:reviewBin())
+    stopJob(f)
+    assert(not f.jobs:approveBin(old) and not f.jobs:rejectBin(old))
+    assert(f.jobs:resume())
+    awaitState(f, "needs_review")
+    local fresh = assert(f.jobs:reviewBin())
+    assert(fresh ~= old and not f.jobs:approveBin(old))
+    assert(f.jobs:approveBin(fresh))
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and not selected:getContainer())
+end)
+
+test("resume after an observed empty still reviews the next deposit", function()
+    local f = fixture(3)
+    local bin = container("full reviewed bin", 1); bin.trash, f.bins = true, {bin}
+    item(bin); local selected = item(f.source)
+    f.holdTrashResult, f.completeDuringCancel = true, true
+    start(f, request("trash"))
+    for _ = 1, 200 do tick(f); if #f.deletions == 1 then break end end
+    assert(#f.deletions == 1 and bin:isEmpty())
+    stopJob(f)
+    f.holdTrashResult = false
+    assert(f.jobs:resume())
+    awaitState(f, "needs_review")
+    assert(#f.deletions == 1 and not bin:contains(selected))
+    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
+    local result = finish(f)
+    assert(result.done == 1 and bin:isEmpty() and #f.deletions == 2)
+end)
+
+test("resumed final cleanup cannot silently reuse its old bin approval", function()
+    local f = fixture(3)
+    local bin = container("final reviewed bin", 4); bin.trash, f.bins = true, {bin}
+    item(f.source)
+    start(f, request("trash"))
+    awaitOperation(f, function(op) return op.kind == "trash" end)
+    assert(#f.deletions == 0)
+    stopJob(f)
+    assert(f.jobs:resume())
+    awaitState(f, "needs_review")
+    assert(#f.deletions == 0)
+    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
+    local result = finish(f)
+    assert(result.done == 1 and #f.deletions == 1 and bin:isEmpty())
+end)
+
+
+test("a resumed native adjacent floor result is counted without a duplicate drop", function()
+    local f = fixture(3)
+    local selected = item(f.inventory)
+    f.sources = {f.inventory}
+    local target = f.squares.destination
+    local adjacent = f:addSquare(square("native adjacent floor", target.x + 1, target.y, target.z))
+    f.floorDropPoint, f.holdTransferResult = adjacent, true
+    start(f, request("floor", target))
+    for _ = 1, 100 do tick(f); if #f.transfers == 1 then break end end
+    assert(#f.transfers == 1 and selected:getWorldItem():getSquare() == adjacent)
+    stopJob(f)
+    f.holdTransferResult, f.position = false, "source"
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and #f.transfers == 1)
+    assert(selected:getWorldItem():getSquare() == adjacent)
+end)
+
+test("resuming a building walk retains its pending section and earlier rooms", function()
+    local f = fixture(3)
+    local upper = container("upper source", 100); local selected = item(upper)
+    f:addSquare(square(upper.position, 30, 0, 1))
+    local input = building(f, {
+        {roomId = "empty", roomName = "Empty room", z = 0, target = f.squares.source, sources = {}},
+        {roomId = "upper", roomName = "Upstairs", z = 1, target = f.squares[upper.position], sources = {upper}},
+    })
+    f.unloaded[upper.position] = true
+    start(f, input)
+    awaitOperation(f, function(op) return op.kind == "approach" and op.location and op.location.z == 1 end)
+    local stopped = stopJob(f)
+    assert(stopped.survey.roomsDone == 1)
+    assert(f.jobs:resume())
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and result.survey.roomsDone == 2)
+    assert(result.survey.sectionsSearched == 2 and f.destination:contains(selected))
+end)
+
+test("a protected item added while stopped blocks resumed whole-bin approval", function()
+    local f = fixture(3)
+    local bin = container("changed reviewed bin", 4); bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    item(f.source)
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    local old = assert(f.jobs:reviewBin())
+    stopJob(f)
+    local kept = item(bin); kept.protected = true
+    assert(f.jobs:resume())
+    awaitState(f, "needs_review")
+    local review = assert(f.jobs:reviewBin())
+    assert(not review.canApprove and #review.skipped == 1 and review.skipped[1].status == "Protected")
+    assert(not f.jobs:approveBin(old) and not f.jobs:approveBin(review))
+    assert(bin:contains(kept) and #f.deletions == 0 and #f.transfers == 0)
+end)
+
+test("resumed cleanup follows the reacquired bin through approval and capacity updates", function()
+    local f = fixture(3)
+    local bin = container("reloaded bin", 4); bin.trash, f.bins = true, {bin}
+    local selected = item(f.source)
+    start(f, request("trash"))
+    awaitOperation(f, function(op) return op.kind == "approach" and op.container == bin end)
+    stopJob(f)
+    local current = container("reloaded bin", 2); current.trash = true
+    local existing = item(current)
+    f.sourceLocations[current.name], f.binLocations[current.name], f.bins[1] = current, current, current
+    assert(f.jobs:resume())
+    awaitState(f, "needs_review")
+    local review = assert(f.jobs:reviewBin())
+    assert(review.bin.capacity == 2 and review.bin.used == 1)
+    assert(f.jobs:approveBin(review))
+    local result = finish(f)
+    assert(result.done == 1 and result.skipped == 0 and #f.deletions == 1)
+    assert(f.deletions[1].bin == current and f.deletions[1].count == 2)
+    assert(not selected:getContainer() and not existing:getContainer() and current:isEmpty())
 end)
 
 print("PASS " .. tests .. " Jobs integration scenarios")

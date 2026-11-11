@@ -66,3 +66,11 @@ The user reported scrolling text clipping and asked for clearer workflows, visua
 - [Easy Drop'n'Loot](https://steamcommunity.com/sharedfiles/filedetails/?id=2871469707)
 - [LootSense: QuickStack](https://steamcommunity.com/sharedfiles/filedetails/?id=3733862305)
 - [LootSense: Storage](https://steamcommunity.com/sharedfiles/filedetails/?id=3733326180)
+
+## Window and job control follow-up
+
+"Make sure the window can be resized too andt hat you can exit out of the menu and it still functions unless cancelled by the user (explicit action  like aiming; some actions are allowed like slight movement and trying to eat/drink, etc. I don't want to list all allowed; I'd rather list disallowed like aiming and other explicit things that might indicate the user wants to stop)"
+
+"also make better use of colors too for all this. Like here we can highlight the item one, the status anothER (like Protected), leave description normal, etc. apply this kind of change throughout though and not only in one place. Also make this easier to understand, the planning easier to understand, the bin itself when it finds one and asks for approval, etc"
+
+"and add a resume button too"
