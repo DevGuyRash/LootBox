@@ -16,7 +16,7 @@ local H, GAP, C = W.H, W.GAP, W.colors
 local button, entry, combo, check, list, wrapped = W.button, W.entry, W.combo, W.check, W.list, W.text
 local states = { idle = "Ready for a job", running = "Working", cancelling = "Stopping and restoring access",
     needs_review = "Review bin before continuing",
-    cancelled = "Cancelled", failed = "Stopped after an error", complete = "Finished",
+    cancelled = "Stopped - ready to resume", failed = "Stopped after an error", complete = "Finished",
     finished = "Finished", finished_with_skips = "Finished with notes" }
 local sourceNames = { inventory = "my carried items", reach = "within reach", room = "the current room",
     building = "the current building", area = "the selected area", labeled = "labeled containers", container = "the selected container" }
@@ -25,6 +25,37 @@ local destinationNames = { inventory = "my carried storage", floor = "the floor"
 
 local function label(parent, x, y, text, dim)
     return W.label(parent, x, y, text, dim and "muted" or "text")
+end
+
+local function place(widget, x, y, width, height)
+    if not widget then return end
+    if x ~= nil and widget.x ~= x then widget:setX(x) end
+    if y ~= nil and widget.y ~= y then widget:setY(y) end
+    if width ~= nil and widget.width ~= width then widget:setWidth(math.max(1, width)) end
+    if height ~= nil and widget.height ~= height then widget:setHeight(math.max(1, height)) end
+end
+
+local function resizeFrame(target, width, height)
+    target:setWidth(width)
+    target:setHeight(height)
+    target:onResize()
+end
+
+local function enableResize(window)
+    window:setResizable(true)
+    window.resizeWidget.resizeFunction = resizeFrame
+    window.resizeWidget2.resizeFunction = resizeFrame
+end
+
+local function bottomInset(window)
+    return math.max(GAP, window:resizeWidgetHeight() + 2)
+end
+
+local function detailRow(widget, itemName, status, description, tone)
+    itemName, status, description = tostring(itemName or "Item"), tostring(status or ""), tostring(description or "")
+    local text = itemName .. (status ~= "" and ("   " .. status) or "") .. (description ~= "" and ("   " .. description) or "")
+    return widget:addItem(text, { segments = { { text = itemName, tone = "item", share = 0.32 },
+        { text = status, tone = tone or "warning", share = 0.20 }, { text = description, tone = "text" } } }, text)
 end
 
 local function value(widget)
@@ -127,8 +158,9 @@ end
 local function addCategoryRow(widget, row, data)
     data = data or {}
     data.key = row.id
-    data.tone = row.kind == "custom" and "custom" or "text"
-    data.badge = row.kind == "custom" and "My" or "Game"
+    data.tone = row.kind == "custom" and "custom" or "muted"
+    data.segments = { { text = row.kind == "custom" and "My category" or "Game category", tone = data.tone },
+        { text = row.name, tone = "item" } }
     widget:addItem(row.name, data, row.name .. "\n" .. (row.kind == "custom" and "Custom reusable category." or "Game or mod category.")
         .. "\nID: " .. row.id)
 end
@@ -168,34 +200,37 @@ end
 local function reviewRows(widget, plan)
     local rooms = plan.building and plan.building.roomsTotal or 0
     if rooms > 0 then
-        widget:addItem(tostring(rooms) .. " building rooms will be searched across their floors", { tone = "accent" },
-            "The character walks through small building sections. Item counts grow as sources are inspected. Blocked or unloaded sections remain unsearched.")
+        detailRow(widget, tostring(rooms) .. " building rooms", "To search", "The job walks through their floors and adds matching items as it finds them.", "accent")
     end
     local pending = math.max(0, (plan.pending or 0) - rooms)
     if pending > 0 then
-        widget:addItem(tostring(pending) .. " sources need approach and native exploration", { tone = "accent" },
-            "These sources will be approached. An unacknowledged empty multiplayer response remains unconfirmed.")
-    end
-    for _, warning in ipairs(plan.warnings or {}) do
-        widget:addItem("Notice: " .. tostring(warning), { tone = "danger" }, tostring(warning))
+        detailRow(widget, tostring(pending) .. " sources", "To inspect", "Contents will be checked after approach. Empty multiplayer replies can remain unconfirmed.", "accent")
     end
     for _, row in ipairs(plan.moves or {}) do
-        local text = tostring(row.itemName or "Item") .. "   " .. tostring(row.from or "Source") .. " -> " .. tostring(row.to or "Destination")
-        widget:addItem(text, { tone = "success" }, text)
+        detailRow(widget, row.itemName, plan.bin and "Will be deleted" or "Planned", tostring(row.from or "Source") .. " -> " .. tostring(row.to or "Destination"),
+            plan.bin and "danger" or "success")
     end
     for _, row in ipairs(plan.skipped or {}) do
-        local text = "Left: " .. tostring(row.itemName or "Item") .. "   " .. tostring(row.reason or "No destination")
-        widget:addItem(text, { tone = "muted" }, text)
+        detailRow(widget, row.itemName, row.status or "Stays here", row.reason or "No destination", row.tone or "warning")
+    end
+    for _, warning in ipairs(plan.warnings or {}) do
+        local text = "Notice   " .. tostring(warning)
+        widget:addItem(text, { segments = { { text = "Notice", tone = "warning" }, { text = warning, tone = "text" } } }, text)
     end
 end
 
 function Window:new(playerIndex, context, mode)
     local width = math.min(1080, getCore():getScreenWidth() - 40)
-    local height = math.min(790, getCore():getScreenHeight() - 40)
+    local availableHeight = getCore():getScreenHeight() - 40
+    local height = math.min(790, availableHeight)
     local o = ISCollapsableWindow.new(self, (getCore():getScreenWidth() - width) / 2,
         (getCore():getScreenHeight() - height) / 2, width, height)
     o.playerIndex, o.context, o.mode = playerIndex, context or {}, mode or "home"
-    o.resizable, o.title, o.backgroundColor = false, "LootBox", W.color("base")
+    o.resizable, o.title, o.backgroundColor = true, "LootBox", W.color("base")
+    local minimumHeight = math.max(710, o:titleBarHeight() + 14 * H + 7 * GAP + 20 + bottomInset(o))
+    o.minimumWidth, o.minimumHeight = math.min(760, width), math.min(minimumHeight, availableHeight)
+    o:setHeight(math.max(height, o.minimumHeight))
+    o:setY((getCore():getScreenHeight() - o.height) / 2)
     o.borderColor = W.color("border")
     local app = getSpecificPlayer(playerIndex) and App.get(playerIndex)
     local request
@@ -232,6 +267,7 @@ end
 
 function Window:createChildren()
     ISCollapsableWindow.createChildren(self)
+    enableResize(self)
     self.collapseButton:setVisible(false)
     local navY, x = self:titleBarHeight() + GAP, GAP
     self.nav = {}
@@ -248,6 +284,14 @@ function Window:createChildren()
     self.jobTab:setEnable(self:app() ~= nil)
     self.contentY = navY + H + GAP
     self:show(self.mode)
+end
+
+function Window:onResize()
+    ISCollapsableWindow.onResize(self)
+    if not self.body then return end
+    place(self.jobTab, self.width - 135 - GAP)
+    place(self.body, GAP, self.contentY, self.width - 2 * GAP, self.height - self.contentY - bottomInset(self))
+    if self.body.layout then self.body.layout() end
 end
 
 function Window:rememberDraft()
@@ -279,7 +323,7 @@ function Window:show(mode)
     end
     if self.body then W.unfocus(self.body); self:removeChild(self.body) end
     self.mode = mode
-    self.body = ISPanel:new(GAP, self.contentY, self.width - 2 * GAP, self.height - self.contentY - GAP)
+    self.body = ISPanel:new(GAP, self.contentY, self.width - 2 * GAP, self.height - self.contentY - bottomInset(self))
     self.body:initialise()
     self.body.background = false
     self:addChild(self.body)
@@ -331,25 +375,21 @@ function Window:useTask(id)
 end
 
 function Window:buildHome()
-    local body, width, app = self.body, self.body.width, self:app()
+    local body, app = self.body, self:app()
     W.heading(body, 0, 0, "What would you like to do?")
-    wrapped(body, 0, H + 2, width, H + 8, "Choose a workflow, continue a saved setup, or use right-click shortcuts in the world.")
-    local leftWidth, rightX = math.floor(width * 0.57), math.floor(width * 0.57) + 2 * GAP
-    local rightWidth = width - rightX
-    local y = 2 * H + GAP
-    local taskStep = math.max(H + 5, math.min(2 * H + 5, math.floor((body.height - 4 * H - GAP) / #Guides.tasks)))
+    local introduction = wrapped(body, 0, H + 2, body.width, H + 8, "Choose a workflow, continue a saved setup, or use right-click shortcuts in the world.")
+    local tasks = {}
     for _, task in ipairs(Guides.tasks) do
         local id = task.id
-        local action = button(body, 0, y, leftWidth, task.title, self, function(s) s:useTask(id) end, task.summary, "accent")
+        local action = button(body, 0, 0, 100, task.title, self, function(s) s:useTask(id) end, task.summary, "accent")
         action:setEnable(app ~= nil)
-        if taskStep >= 2 * H + 3 then wrapped(body, 8, y + H, leftWidth - 8, H + 3, task.summary) end
-        y = y + taskStep
+        tasks[#tasks + 1] = { action = action, summary = wrapped(body, 8, 0, 100, H + 3, task.summary) }
     end
-    W.heading(body, rightX, 2 * H + GAP, "Your saved setups")
+    local savedHeading = W.heading(body, 0, 2 * H + GAP, "Your saved setups")
     local saved, savedError
     if app then saved, savedError = app:getSetups() else saved = { presets = {} } end
     local presets = saved and saved.presets or {}
-    self.homeSetupList = list(body, rightX, 3 * H + GAP, rightWidth, 5 * H, self, function(s, row)
+    self.homeSetupList = list(body, 0, 3 * H + GAP, 100, 5 * H, self, function(s, row)
         s.selectedSetupId, s.setupNameDraft = row.id, row.name
         local request, err = s:app():loadSetup(row.id, s.context)
         if request then s:setRequest(request) end
@@ -358,26 +398,51 @@ function Window:buildHome()
     end)
     for _, preset in ipairs(presets) do self.homeSetupList:addItem(preset.name, preset,
         "Load this complete setup. Clicked containers bind to the current context; vehicles use your remembered car.") end
+    local empty
     if #presets == 0 then
-        wrapped(body, rightX + 10, 3 * H + GAP + 10, rightWidth - 20, 4 * H,
+        empty = wrapped(body, 0, 3 * H + GAP + 10, 100, 4 * H,
             app and "No saved setups yet. Configure an action, give it a name, and choose Save new setup."
                 or "Enter a game to save complete action setups. Categories and workflow guides are available now.")
     end
-    local continueButton = button(body, rightX, 8 * H + 2 * GAP, rightWidth, "Continue last setup", self, function(s)
+    local continueButton = button(body, 0, 8 * H + 2 * GAP, 100, "Continue last setup", self, function(s)
         local request, err = s:app():lastSetup(s.context)
         if not request then s:messageText(err or "No previous setup has been saved yet."); return end
         s:setRequest(request); s:show("compose")
     end, "Restore your last source, destination, item selection, and bag options.")
     continueButton:setEnable(app ~= nil and saved ~= nil and saved.lastSetup ~= nil)
-    button(body, rightX, 9 * H + 3 * GAP, rightWidth, "Read the first-run guide", self,
+    local firstRun = button(body, 0, 9 * H + 3 * GAP, 100, "Read the first-run guide", self,
         function(s) s:openHelp("first-run") end, "A complete introduction with expected results and where to start.", "custom")
-    button(body, rightX, 10 * H + 4 * GAP, rightWidth, "Manage categories", self,
+    local categories = button(body, 0, 10 * H + 4 * GAP, 100, "Manage categories", self,
         function(s) s:show("categories") end, "Create reusable item groups and combine nested categories.")
+    local tips
     if App.getPreferences().showTips then
-        wrapped(body, rightX, 11 * H + 5 * GAP, rightWidth, 3 * H,
+        tips = wrapped(body, 0, 11 * H + 5 * GAP, 100, 3 * H,
             "Quick actions use the same planner as the full window. Cleanup always asks you to review deletion.")
     end
-    self.messagePanel = wrapped(body, 0, body.height - 2 * H, width, 2 * H, "")
+    self.messagePanel = wrapped(body, 0, 0, body.width, 2 * H, "")
+    body.layout = function()
+        local width = body.width
+        local leftWidth, rightX = math.floor(width * 0.57), math.floor(width * 0.57) + 2 * GAP
+        local rightWidth = width - rightX
+        place(introduction, 0, H + 2, width)
+        local step = math.max(H + 5, math.min(2 * H + 5, math.floor((body.height - 4 * H - GAP) / #tasks)))
+        local y = 2 * H + GAP
+        for _, task in ipairs(tasks) do
+            place(task.action, 0, y, leftWidth)
+            place(task.summary, 8, y + H, leftWidth - 8)
+            task.summary:setVisible(step >= 2 * H + 3)
+            y = y + step
+        end
+        place(savedHeading, rightX)
+        place(self.homeSetupList, rightX, nil, rightWidth)
+        place(empty, rightX + 10, nil, rightWidth - 20)
+        place(continueButton, rightX, nil, rightWidth)
+        place(firstRun, rightX, nil, rightWidth)
+        place(categories, rightX, nil, rightWidth)
+        place(tips, rightX, nil, rightWidth, math.max(H, body.height - (11 * H + 5 * GAP) - 2 * H))
+        place(self.messagePanel, 0, body.height - 2 * H, width)
+    end
+    body.layout()
     if savedError then self:messageText(savedError) end
 end
 
@@ -385,7 +450,7 @@ function Window:buildComposer()
     local body, width = self.body, self.body.width
     self:catalog()
     W.heading(body, 0, 0, self.taskTitle or "Move, loot or clean")
-    button(body, width - 120, 0, 120, "Workflow help", self, function(s) s:openHelp(s.taskGuide or "first-run") end,
+    local workflowHelp = button(body, width - 120, 0, 120, "Workflow help", self, function(s) s:openHelp(s.taskGuide or "first-run") end,
         "Read complete workflows and expected results.", "custom")
     local app = self:app()
     local saved, savedError = app:getSetups()
@@ -394,13 +459,13 @@ function Window:buildComposer()
     self.setupPicker:addOptionWithData("Choose a saved setup", false)
     for _, preset in ipairs(saved and saved.presets or {}) do self.setupPicker:addOptionWithData(preset.name, preset.id) end
     self.setupPicker:selectData(self.selectedSetupId or false)
-    button(body, math.floor(width * 0.65) + GAP, H + GAP, 110, "Load setup", self, Window.loadNamedSetup,
+    local loadSetup = button(body, math.floor(width * 0.65) + GAP, H + GAP, 110, "Load setup", self, Window.loadNamedSetup,
         "Load the selected setup and bind any clicked container to this context.")
     local col = math.floor((width - 2 * GAP) / 3)
     local headingY, rowY = 2 * H + 2 * GAP, 3 * H + 2 * GAP
     label(body, 0, headingY, "Task", true)
-    label(body, col + GAP, headingY, "Where to look", true)
-    label(body, 2 * (col + GAP), headingY, "Where items go", true)
+    local sourceHeading = label(body, col + GAP, headingY, "Where to look", true)
+    local destinationHeading = label(body, 2 * (col + GAP), headingY, "Where items go", true)
     self.operation = combo(body, 0, rowY, col, self, function(s, widget)
         if value(widget) == "loot" then s.destination:selectData("inventory")
         elseif value(widget) == "clean" then s.destination:selectData("trash") end
@@ -481,7 +546,7 @@ function Window:buildComposer()
     self.setupName = entry(body, 0, saveY, math.max(190, width - 620), self.setupNameDraft or "", nil, nil,
         "Name a reusable setup, for example Food to storage. Container targets bind to the container you click next time.", "Setup name, e.g. Food to storage")
     local saveX = self.setupName.width + GAP
-    button(body, saveX, saveY, 140, "Save new setup", self, function(s) s:saveNamedSetup(false) end,
+    local saveSetup = button(body, saveX, saveY, 140, "Save new setup", self, function(s) s:saveNamedSetup(false) end,
         "Remember this whole workflow, not only the selected items.", "custom")
     self.updateSetupButton = button(body, saveX + 150, saveY, 105, "Update setup", self, function(s) s:saveNamedSetup(true) end,
         "Replace the selected saved setup with the current workflow.")
@@ -489,13 +554,46 @@ function Window:buildComposer()
     self.deleteSetupButton = button(body, saveX + 265, saveY, 95, "Delete setup", self, Window.deleteNamedSetup,
         "Delete this saved setup only. Items and categories are unchanged.")
     self.deleteSetupButton:setEnable(self.selectedSetupId ~= nil)
-    button(body, width - 160, saveY, 160, "Preview job", self, Window.preview,
+    local preview = button(body, width - 160, saveY, 160, "Preview job", self, Window.preview,
         "Inspect destinations, exclusions, capacity and deletion warnings before starting.", "accent")
-    button(body, 0, saveY + H + 5, 160, "Save loot checklist", self, Window.saveChecklist,
+    local saveChecklist = button(body, 0, saveY + H + 5, 160, "Save loot checklist", self, Window.saveChecklist,
         "Remember only the item selection for Loot room and Loot area shortcuts.")
-    button(body, 170, saveY + H + 5, 160, "Load loot checklist", self, Window.loadChecklist,
+    local loadChecklist = button(body, 170, saveY + H + 5, 160, "Load loot checklist", self, Window.loadChecklist,
         "Replace the item selection while preserving the source and destination.")
     self.messagePanel = wrapped(body, 0, saveY + 2 * H + 8, width, 2 * H - 8, "")
+    body.layout = function()
+        local w, colWidth = body.width, math.floor((body.width - 2 * GAP) / 3)
+        place(workflowHelp, w - 120)
+        place(self.setupPicker, 0, nil, math.floor(w * 0.65))
+        place(loadSetup, math.floor(w * 0.65) + GAP)
+        place(sourceHeading, colWidth + GAP)
+        place(destinationHeading, 2 * (colWidth + GAP))
+        place(self.operation, 0, nil, colWidth)
+        place(self.scope, colWidth + GAP, nil, colWidth)
+        place(self.destination, 2 * (colWidth + GAP), nil, colWidth)
+        place(self.includeInventory, 0, nil, colWidth)
+        place(self.includeBags, colWidth + GAP, nil, colWidth)
+        place(self.endpoint, 2 * (colWidth + GAP), nil, colWidth)
+        place(self.areaSummary, 220, nil, 2 * colWidth + GAP - 220)
+        place(self.sourceEndpoint, 0, nil, 2 * colWidth + GAP)
+        place(self.sourceLabel, 0, nil, 2 * colWidth + GAP)
+        place(self.search, 370, nil, w - 370)
+        local footer = body.height - 5 * H - GAP
+        place(self.selectionList, 0, listY, w, footer - listY - GAP)
+        place(self.countLabel, 0, footer)
+        place(self.allItems, w - 260, footer)
+        local save = footer + H
+        place(self.setupName, 0, save, math.max(190, w - 620))
+        local sx = self.setupName.width + GAP
+        place(saveSetup, sx, save)
+        place(self.updateSetupButton, sx + 150, save)
+        place(self.deleteSetupButton, sx + 265, save)
+        place(preview, w - 160, save)
+        place(saveChecklist, 0, save + H + 5)
+        place(loadChecklist, 170, save + H + 5)
+        place(self.messagePanel, 0, save + 2 * H + 8, w)
+    end
+    body.layout()
     self:fillSelectionList()
     self:onScopeChanged()
     self:onDestinationChanged()
@@ -550,7 +648,7 @@ function Window:fillSelectionList()
     if kind == "items" then
         for _, row in ipairs(self.catalogData.items) do
             if matchesSearch(row.name .. " " .. row.fullType, query) then
-                self.selectionList:addItem(row.name, { key = row.fullType }, row.name .. "\nExact item type: " .. row.fullType .. "\nSelects every eligible copy of this type.")
+                self.selectionList:addItem(row.name, { key = row.fullType, segments = { { text = row.name, tone = "item" }, { text = row.fullType, tone = "muted" } } }, row.name .. "\nExact item type: " .. row.fullType .. "\nSelects every eligible copy of this type.")
             end
         end
     else
@@ -688,16 +786,16 @@ function Window:buildPreview()
     local body, plan = self.body, self.plan
     local moves, skipped = plan.moves or {}, plan.skipped or {}
     W.heading(body, 0, 0, self.request.destination.kind == "trash" and "Review cleanup and deletion" or "Review this job")
-    label(body, 0, H + 4, tostring(#moves) .. (plan.building and " observed items planned   " or " items planned   ")
-        .. tostring(#skipped) .. " left behind   " .. pendingSummary(plan))
-    wrapped(body, 0, 2 * H + 8, body.width, 2 * H,
+    local summary = label(body, 0, H + 4, tostring(#moves) .. (plan.building and " observed moves   " or " planned moves   ")
+        .. tostring(#skipped) .. " stay here   " .. pendingSummary(plan))
+    local description = wrapped(body, 0, 2 * H + 8, body.width, 2 * H,
         routeText(self.request) .. (self.request.destination.kind == "trash"
             and " The native trash command deletes the entire bin, including approved existing contents."
             or " Live capacity, access and item ownership are checked again during execution."))
     local rows = list(body, 0, 4 * H + GAP, body.width, body.height - 8 * H - 2 * GAP, self)
     reviewRows(rows, plan)
     local y = body.height - 3 * H
-    button(body, 0, y, 140, "Adjust setup", self, function(s) s:show("compose") end, "Return to the same source, item selection and destination.")
+    local adjust = button(body, 0, y, 140, "Adjust setup", self, function(s) s:show("compose") end, "Return to the same source, item selection and destination.")
     self.runButton = button(body, body.width - 250, y, 250, self.request.destination.kind == "trash" and "Start cleanup and delete" or "Start job", self, function(s)
         local ok, err = s:app():start(s.plan)
         if not ok then s:messageText(err); return end
@@ -707,6 +805,16 @@ function Window:buildPreview()
     self.runButton:setEnable(#moves > 0 or (plan.pending or 0) > 0)
     if #moves == 0 and (plan.pending or 0) == 0 then self.runButton:setTooltip("Nothing eligible is planned. Read the exclusion reasons or adjust your setup.") end
     self.messagePanel = wrapped(body, 0, y + H + 5, body.width, 2 * H - 5, "")
+    body.layout = function()
+        place(summary, 0, nil, body.width)
+        place(description, 0, nil, body.width)
+        place(rows, 0, 4 * H + GAP, body.width, body.height - 8 * H - 2 * GAP)
+        local footer = body.height - 3 * H
+        place(adjust, 0, footer)
+        place(self.runButton, body.width - 250, footer)
+        place(self.messagePanel, 0, footer + H + 5, body.width)
+    end
+    body.layout()
 end
 
 function Window:buildCategories()
@@ -715,7 +823,7 @@ function Window:buildCategories()
     local rightX, rightWidth = leftWidth + GAP, width - leftWidth - GAP
     self:catalog()
     W.heading(body, 0, 0, "Reusable categories")
-    button(body, width - 140, 0, 140, "Category guide", self, function(s) s:openHelp("categories") end,
+    local categoryGuide = button(body, width - 140, 0, 140, "Category guide", self, function(s) s:openHelp("categories") end,
         "Learn how to combine item types and nested categories.", "custom")
     self.categoryGroup = combo(body, 0, H + GAP, leftWidth, self, function(s) s:fillCategoryList() end)
     addGroups(self.categoryGroup)
@@ -725,9 +833,9 @@ function Window:buildCategories()
     self.categoryList = list(body, 0, listY, leftWidth, body.height - listY - H - GAP, self, function(s, row)
         s:editCategory(row.definition)
     end)
-    button(body, 0, body.height - H, leftWidth, "New custom category", self, function(s) s:editCategory(nil) end,
+    local newCategory = button(body, 0, body.height - H, leftWidth, "New custom category", self, function(s) s:editCategory(nil) end,
         "Create a reusable union of item types and categories. A clicked item type is included automatically.", "custom")
-    label(body, rightX, H + GAP, "Name your category", true)
+    local nameLabel = label(body, rightX, H + GAP, "Name your category", true)
     self.categoryName = entry(body, rightX, 2 * H + 2 * GAP, rightWidth, self.editor.name or "", self,
         function(s) s:updateMemberCount() end, "Use a name that describes your workflow, for example Run supplies.")
     self.memberKind = combo(body, rightX, listY, math.floor(rightWidth * 0.43), self, function(s) s:fillMemberList() end)
@@ -748,6 +856,27 @@ function Window:buildCategories()
     self.deleteCategoryButton = button(body, rightX + 160, footerY + H, 150, "Delete category", self, Window.deleteCategory,
         "Delete only an unused custom category. Referenced categories must be unlinked first.")
     self.messagePanel = wrapped(body, rightX, footerY + 2 * H + 4, rightWidth, 2 * H - 4, "")
+    body.layout = function()
+        local w, left = body.width, math.floor(body.width * 0.3)
+        local right, available = left + GAP, w - left - GAP
+        place(categoryGuide, w - 140)
+        place(self.categoryGroup, 0, nil, left)
+        place(self.categorySearch, 0, nil, left)
+        place(self.categoryList, 0, listY, left, body.height - listY - H - GAP)
+        place(newCategory, 0, body.height - H, left)
+        place(nameLabel, right)
+        place(self.categoryName, right, nil, available)
+        local picker = math.floor(available * 0.43)
+        place(self.memberKind, right, nil, picker)
+        place(self.memberSearch, right + picker + GAP, nil, available - picker - GAP)
+        local footer = body.height - 4 * H - GAP
+        place(self.memberList, right, memberY, available, footer - memberY - GAP)
+        place(self.memberCount, right, footer)
+        place(self.saveCategoryButton, right, footer + H)
+        place(self.deleteCategoryButton, right + 160, footer + H)
+        place(self.messagePanel, right, footer + 2 * H + 4, available)
+    end
+    body.layout()
     self:fillCategoryList()
     self:editCategory(self.editorDefinition)
     if self.catalogData.error then self:messageText(self.catalogData.error) end
@@ -797,7 +926,7 @@ function Window:fillMemberList()
         local key = kind == "types" and row.fullType or row.id
         if key ~= self.editor.id and (not self.editor.native or row.categoryId == self.editor.id)
             and matchesSearch(row.name .. " " .. key, query) then
-            if kind == "types" then self.memberList:addItem(row.name, { key = key }, row.name .. "\nExact item type: " .. key)
+            if kind == "types" then self.memberList:addItem(row.name, { key = key, segments = { { text = row.name, tone = "item" }, { text = key, tone = "muted" } } }, row.name .. "\nExact item type: " .. key)
             else addCategoryRow(self.memberList, row) end
         end
     end
@@ -844,9 +973,16 @@ end
 function Window:buildLabels()
     local body, width, app = self.body, self.body.width, self:app()
     W.heading(body, 0, 0, "Storage rules and item tags")
-    button(body, width - 130, 0, 130, "Label guide", self, function(s) s:openHelp("sorting") end,
+    local labelGuide = button(body, width - 130, 0, 130, "Label guide", self, function(s) s:openHelp("sorting") end,
         "A complete sorting workflow and the difference between types, copies, and Keep.", "custom")
-    if not app then wrapped(body, 0, 2 * H, width, 3 * H, "Enter a game and open LootBox from a container or item to edit its labels."); return end
+    if not app then
+        local explanation = wrapped(body, 0, 2 * H, width, 3 * H, "Enter a game and open LootBox from a container or item to edit its labels.")
+        body.layout = function()
+            place(labelGuide, body.width - 130)
+            place(explanation, 0, nil, body.width)
+        end
+        return
+    end
     local containers = self.context.containers or {}
     if #containers == 0 and self.context.container then containers = { self.context.container } end
     self.labelContainers = containers
@@ -876,18 +1012,36 @@ function Window:buildLabels()
         "Keep applies to this individual item. Other copies can still be moved. Equipped, held and favorite items are also protected.")
     self.saveLabelsButton = button(body, 0, footerY + 2 * H, 180, "Save labels and Keep", self, Window.saveLabels,
         "Save checked category memberships and the Keep flag for the selected target.", "custom")
+    local rememberVehicle, typeCategory
     if self.context.vehicle then
-        button(body, 190, footerY + 2 * H, 230, "Remember this vehicle", self, function(s)
+        rememberVehicle = button(body, 190, footerY + 2 * H, 230, "Remember this vehicle", self, function(s)
             local ok, err = app:rememberVehicle(s.context.vehicle)
             s:messageText(ok and "Vehicle remembered. Hauling prefers its trunk, then available native storage." or err)
         end, "Save this car as the destination of future hauling setups.", "accent")
     end
     if self.context.item then
-        button(body, width - 260, footerY + H, 260, "Category for every copy of this type", self, function(s)
+        typeCategory = button(body, width - 260, footerY + H, 260, "Category for every copy of this type", self, function(s)
             s.editorDefinition = nil; s:show("categories")
         end, "Create a custom category prefilled with this exact item type, instead of tagging copies one by one.")
     end
     self.messagePanel = wrapped(body, 0, footerY + 3 * H + 4, width, 2 * H - 4, "")
+    body.layout = function()
+        local w, kindWidth = body.width, math.floor(body.width * 0.38)
+        place(labelGuide, w - 130)
+        place(self.labelKind, 0, nil, kindWidth)
+        place(self.labelTarget, kindWidth + GAP, nil, w - kindWidth - GAP)
+        place(self.labelExplanation, 0, nil, w)
+        place(self.labelSearch, 250, nil, w - 250)
+        local footer = body.height - 5 * H - GAP
+        place(self.labelList, 0, listY, w, footer - listY - GAP)
+        place(self.labelCount, 0, footer)
+        place(self.keep, 0, footer + H, w - 280)
+        place(self.saveLabelsButton, 0, footer + 2 * H)
+        place(rememberVehicle, 190, footer + 2 * H)
+        place(typeCategory, w - 260, footer + H)
+        place(self.messagePanel, 0, footer + 3 * H + 4, w)
+    end
+    body.layout()
     self:catalog(); self:fillLabelTargets()
     if self.catalogData.error then self:messageText(self.catalogData.error) end
 end
@@ -985,6 +1139,15 @@ function Window:buildHelp()
     self.guideSetupButton = button(body, rightX, body.height - H, width - rightX, "Set up this workflow", self, function(s)
         if s.currentGuide and s.currentGuide.task then s:useTask(s.currentGuide.task) end
     end, "Open the action composer with this workflow prepared. Nothing runs until you review and start it.", "accent")
+    body.layout = function()
+        local left = math.floor(body.width * 0.3)
+        local right = left + GAP
+        place(self.guideSearch, 0, nil, left)
+        place(self.guideList, 0, 3 * H + 2 * GAP, left, body.height - 3 * H - 2 * GAP)
+        place(self.guidePanel, right, 2 * H + GAP, body.width - right, body.height - 4 * H - 2 * GAP)
+        place(self.guideSetupButton, right, body.height - H, body.width - right)
+    end
+    body.layout()
     self:fillGuideList()
     self:selectGuide(self.context.guide or "first-run")
 end
@@ -1027,22 +1190,39 @@ function Window:buildSettings()
     local body, width = self.body, self.body.width
     local preferences, err = App.getPreferences()
     W.heading(body, 0, 0, "Make LootBox fit your play style")
-    wrapped(body, 0, H + 4, width, 2 * H, "Choose which contextual shortcuts appear and how repeated workflows are remembered. These preferences are local to you.")
+    local introduction = wrapped(body, 0, H + 4, width, 2 * H, "Choose which contextual shortcuts appear and how repeated workflows are remembered. These preferences are local to you.")
     local leftWidth, rightX = math.floor((width - 2 * GAP) * 0.57), math.floor((width - 2 * GAP) * 0.57) + 2 * GAP
     W.label(body, 0, 3 * H, "Right-click shortcuts", "custom")
-    W.label(body, rightX, 3 * H, "Review and reuse", "custom")
+    local reuseHeading = W.label(body, rightX, 3 * H, "Review and reuse", "custom")
     self.preferenceWidgets = {}
+    local explanations = {}
     for index, row in ipairs(preferenceRows) do
         local left = index <= 6
         local x, rowIndex, colWidth = left and 0 or rightX, left and index - 1 or index - 7, left and leftWidth or width - rightX
         local y = 4 * H + rowIndex * (2 * H + 12)
         self.preferenceWidgets[row.key] = check(body, x, y, colWidth, row.title, preferences[row.key], self, nil, row.description)
-        wrapped(body, x + 28, y + H, colWidth - 28, H + 12, row.description)
+        explanations[row.key] = wrapped(body, x + 28, y + H, colWidth - 28, H + 12, row.description)
     end
     local y = body.height - 3 * H
-    button(body, 0, y, 180, "Save preferences", self, Window.savePreferences,
+    local save = button(body, 0, y, 180, "Save preferences", self, Window.savePreferences,
         "Save only LootBox preferences. Other mods' Options settings are not reloaded.", "accent")
     self.messagePanel = wrapped(body, 0, y + H + 5, width, 2 * H - 5, err or "Changes apply to the next right-click menu you open.")
+    body.layout = function()
+        local left = math.floor((body.width - 2 * GAP) * 0.57)
+        local right = left + 2 * GAP
+        place(introduction, 0, nil, body.width)
+        place(reuseHeading, right)
+        for index, row in ipairs(preferenceRows) do
+            local onLeft = index <= 6
+            local x, available = onLeft and 0 or right, onLeft and left or body.width - right
+            place(self.preferenceWidgets[row.key], x, nil, available)
+            place(explanations[row.key], x + 28, nil, available - 28)
+        end
+        local footer = body.height - 3 * H
+        place(save, 0, footer)
+        place(self.messagePanel, 0, footer + H + 5, body.width)
+    end
+    body.layout()
 end
 
 function Window:savePreferences()
@@ -1157,30 +1337,47 @@ function AreaPicker:finish(area, restore)
 end
 
 function QuickReview:new(playerIndex, context, request, plan, notice)
-    local width, height = math.min(650, getCore():getScreenWidth() - 40), math.min(520, getCore():getScreenHeight() - 80)
+    local availableHeight = getCore():getScreenHeight() - 80
+    local width, height = math.min(650, getCore():getScreenWidth() - 40), math.min(520, availableHeight)
     local o = ISCollapsableWindow.new(self, (getCore():getScreenWidth() - width) / 2,
         (getCore():getScreenHeight() - height) / 2, width, height)
     o.playerIndex, o.context, o.request, o.plan, o.notice = playerIndex, context, request, plan, notice
     o.title = context.binReview and "LootBox - review bin contents"
         or (request.destination.kind == "trash" and "LootBox - review deletion" or "LootBox - quick action")
-    o.resizable, o.backgroundColor, o.borderColor = false, W.color("base"), W.color("border")
+    o.resizable, o.backgroundColor, o.borderColor = true, W.color("base"), W.color("border")
+    local minimumHeight = math.max(440, o:titleBarHeight() + (context.binReview and 10 or 9) * H + 3 * GAP + bottomInset(o))
+    o.minimumWidth, o.minimumHeight = math.min(540, width), math.min(minimumHeight, availableHeight)
+    o:setHeight(math.max(height, o.minimumHeight))
+    o:setY((getCore():getScreenHeight() - o.height) / 2)
     return o
 end
 
 function QuickReview:createChildren()
     ISCollapsableWindow.createChildren(self)
+    enableResize(self)
     self.collapseButton:setVisible(false)
     local y, width = self:titleBarHeight() + GAP, self.width - 2 * GAP
     local moves, skipped, pending = #(self.plan.moves or {}), #(self.plan.skipped or {}), self.plan.pending or 0
     local binReview = self.context.binReview
-    W.heading(self, GAP, y, binReview and (tostring(moves + skipped) .. " observed existing items")
-        or (tostring(moves) .. (self.plan.building and " observed items planned" or " items planned")))
-    label(self, GAP, y + H, binReview and (skipped > 0 and "Protected contents block approval." or "Your current job is paused.")
-        or (tostring(skipped) .. " left behind   " .. pendingSummary(self.plan)), true)
-    local description = binReview and ("Review " .. tostring(self.plan.bin.name) .. " on floor " .. tostring(self.plan.bin.point.z)
-        .. " before continuing the current job.") or routeText(self.request)
-    wrapped(self, GAP, y + 2 * H, width, 2 * H, description)
-    local listY, footerY = y + 4 * H + GAP, self.height - 4 * H - GAP
+    local heading = W.heading(self, GAP, y, binReview and ("Use " .. tostring(self.plan.bin.name) .. " for cleanup?")
+        or (tostring(moves) .. (self.plan.building and " observed moves" or " planned moves")))
+    if binReview then heading.r, heading.g, heading.b = C.item.r, C.item.g, C.item.b end
+    local summary = label(self, GAP, y + H, binReview and (tostring(moves + skipped) .. " existing items observed   "
+        .. (skipped > 0 and tostring(skipped) .. " protected - approval blocked" or "Job waiting for your choice"))
+        or (tostring(skipped) .. " stay here   " .. pendingSummary(self.plan)), true)
+    if binReview and skipped > 0 then summary.r, summary.g, summary.b = C.warning.r, C.warning.g, C.warning.b end
+    local description = routeText(self.request)
+    if binReview then
+        local bin, point = self.plan.bin, self.plan.bin.point
+        description = "Floor " .. tostring(point.z) .. " at " .. tostring(point.x) .. ", " .. tostring(point.y)
+        if bin.capacity and bin.used then
+            description = description .. string.format("   Observed load %.1f / %.1f   Free %.1f", bin.used, bin.capacity, math.max(0, bin.capacity - bin.used))
+        end
+        description = description .. "\n" .. (bin.routing or "Approve this destination, or try another bin while keeping the current job.")
+    end
+    local descriptionHeight = binReview and 3 * H or 2 * H
+    local descriptionPanel = wrapped(self, GAP, y + 2 * H, width, descriptionHeight, description)
+    local listY, footerY = y + 2 * H + descriptionHeight + GAP, self.height - 4 * H - bottomInset(self)
     self.rows = list(self, GAP, listY, width, footerY - listY - GAP, self)
     reviewRows(self.rows, self.plan)
     if moves == 0 and pending == 0 and skipped == 0 then
@@ -1189,9 +1386,9 @@ function QuickReview:createChildren()
                 or "Adjust the item selection or source. Unopened multiplayer sources may remain unconfirmed.")
     end
     local trash = self.request.destination.kind == "trash"
-    button(self, GAP, footerY, 100, binReview and "Back" or "Cancel", self, function(s) s:close() end,
+    local backButton = button(self, GAP, footerY, 100, binReview and "Back" or "Cancel", self, function(s) s:close() end,
         binReview and "Close this window and leave the current job paused for review." or "Close this review without starting a job.")
-    button(self, GAP + 110, footerY, binReview and 145 or 115, binReview and "Try another bin" or "Adjust setup", self, function(s)
+    local adjustButton = button(self, GAP + 110, footerY, binReview and 145 or 115, binReview and "Try another bin" or "Adjust setup", self, function(s)
         if s.context.binReview then
             local app, problem = App.get(s.playerIndex)
             if not app then W.setText(s.messagePanel, problem); return end
@@ -1219,9 +1416,27 @@ function QuickReview:createChildren()
         or (trash and "Approve whole-bin deletion of the reviewed items, including the listed existing contents." or "Start this reviewed native job."), trash and "danger" or "accent")
     self.runButton:setEnable(binReview and self.plan.canApprove == true or (not binReview and (moves > 0 or pending > 0)))
     self.messagePanel = wrapped(self, GAP, footerY + H + 5, width, 3 * H - 5,
-        self.notice or (binReview and "Deletion is permanent. Approval continues this job with its existing item selection and building search. Observed protected or newly unapproved contents block approval."
+        self.notice or (binReview and "Approve permits whole-bin deletion of the observed contents above and items this job delivers. The job keeps its selection and search progress. Protected or changed contents block approval. Back leaves the job waiting."
             or (trash and "Deletion is permanent. The native trash command empties the entire bin; protected or new unapproved contents block deletion."
             or "Capacity, access and item ownership are rechecked while the job runs.")))
+    self.layout = function()
+        local w = self.width - 2 * GAP
+        local footer = self.height - 4 * H - bottomInset(self)
+        place(heading, GAP, nil, w)
+        place(summary, GAP, nil, w)
+        place(descriptionPanel, GAP, nil, w)
+        place(self.rows, GAP, listY, w, footer - listY - GAP)
+        place(backButton, GAP, footer)
+        place(adjustButton, GAP + 110, footer)
+        place(self.runButton, self.width - GAP - 240, footer)
+        place(self.messagePanel, GAP, footer + H + 5, w)
+    end
+    self.layout()
+end
+
+function QuickReview:onResize()
+    ISCollapsableWindow.onResize(self)
+    if self.layout then self.layout() end
 end
 
 function QuickReview:close()
@@ -1230,50 +1445,82 @@ function QuickReview:close()
 end
 
 function Progress:new(playerIndex)
-    local width, height = math.min(540, getCore():getScreenWidth() - 40), math.min(440, getCore():getScreenHeight() - 100)
+    local availableHeight = getCore():getScreenHeight() - 100
+    local width, height = math.min(640, getCore():getScreenWidth() - 40), math.min(480, availableHeight)
     local o = ISCollapsableWindow.new(self, 20, 80, width, height)
-    o.playerIndex, o.title, o.resizable = playerIndex, "LootBox - current job", false
+    o.playerIndex, o.title, o.resizable = playerIndex, "LootBox - current job", true
+    local minimumHeight = math.max(410, o:titleBarHeight() + 10 * H + 3 * GAP + bottomInset(o))
+    o.minimumWidth, o.minimumHeight = math.min(520, width), math.min(minimumHeight, availableHeight)
+    o:setHeight(math.max(height, o.minimumHeight))
     o.backgroundColor, o.borderColor = W.color("base"), W.color("border")
     return o
 end
 
 function Progress:createChildren()
     ISCollapsableWindow.createChildren(self)
+    enableResize(self)
     self.collapseButton:setVisible(false)
     local y = self:titleBarHeight() + GAP
     self.statusLabel = W.heading(self, GAP, y, "")
     self.countLabel = label(self, GAP, y + H, "")
     self.surveyPanel = wrapped(self, GAP, y + 2 * H, self.width - 2 * GAP, 2 * H, "")
     self.reasonPanel = wrapped(self, GAP, y + 4 * H, self.width - 2 * GAP, 3 * H, "")
-    local listY, footerY = y + 7 * H + GAP, self.height - 2 * H - GAP
-    self.reasonsList = list(self, GAP, listY, self.width - 2 * GAP, footerY - listY - GAP, self)
-    self.reasonCount = 0
-    self.surveyReasonRows = {}
-    local actionWidth = math.floor((self.width - 4 * GAP) / 3)
-    self.cancelButton = button(self, GAP, footerY, actionWidth, "Cancel job", self, function(s) App.get(s.playerIndex):cancel() end,
-        "Stop owned work and allow temporary access restoration to finish. Sent trash commands cannot be recalled.", "danger")
-    self.reviewBinButton = button(self, 2 * GAP + actionWidth, footerY, actionWidth, "Review bin", self,
-        function(s) UI.showBinReview(s.playerIndex) end, "Review the inspected bin's contents, approve this destination, or try another bin.", "accent")
-    self.reviewBinButton:setVisible(false)
-    button(self, self.width - actionWidth - GAP, footerY, actionWidth, "Open manager", self, function(s) UI.open(s.playerIndex) end,
+    self.listY = y + 7 * H + GAP
+    self.reasonsList = list(self, GAP, self.listY, self.width - 2 * GAP, H, self)
+    self.reasonCount, self.surveyReasonRows = 0, {}
+    self.cancelButton = button(self, GAP, 0, 100, "Cancel job", self, function(s) App.get(s.playerIndex):cancel() end,
+        "Stop owned work. Resume continues the remaining job after native cleanup settles. Sent trash commands cannot be recalled.", "danger")
+    self.resumeButton = button(self, GAP, 0, 100, "Resume job", self, function(s)
+        local ok, err = App.get(s.playerIndex):resume()
+        if not ok then s.notice = err else s.notice = nil end
+    end, "Continue the stopped job from its remaining work. Current items, access, and deletion approvals are checked again.", "success")
+    self.reviewBinButton = button(self, GAP, 0, 100, "Review bin", self,
+        function(s) UI.showBinReview(s.playerIndex) end, "Check the inspected bin, approve whole-bin deletion, or try another destination.", "accent")
+    self.openManagerButton = button(self, GAP, 0, 100, "Open manager", self, function(s) UI.open(s.playerIndex) end,
         "Open the full manager without cancelling this job.")
-    label(self, GAP, footerY + H, "Closing this panel does not cancel the job.", true)
+    self.footer = wrapped(self, GAP, 0, self.width - 2 * GAP, H, "Closing LootBox windows keeps the job running.")
+    self.resumeButton:setVisible(false)
+    self.reviewBinButton:setVisible(false)
+    self:layoutControls()
+end
+
+function Progress:layoutControls()
+    if not self.reasonsList then return end
+    local width, footer = self.width - 2 * GAP, self.height - 2 * H - bottomInset(self)
+    place(self.countLabel, GAP, nil, width)
+    place(self.surveyPanel, GAP, nil, width)
+    place(self.reasonPanel, GAP, nil, width)
+    place(self.reasonsList, GAP, self.listY, width, footer - self.listY - GAP)
+    local buttons = { self.cancelButton }
+    if self.showResume then buttons[#buttons + 1] = self.resumeButton end
+    if self.showBinReview then buttons[#buttons + 1] = self.reviewBinButton end
+    buttons[#buttons + 1] = self.openManagerButton
+    local buttonWidth = math.floor((width - (#buttons - 1) * GAP) / #buttons)
+    for index, widget in ipairs(buttons) do place(widget, GAP + (index - 1) * (buttonWidth + GAP), footer, buttonWidth) end
+    place(self.footer, GAP, footer + H + 3, width, H - 3)
+end
+
+function Progress:onResize()
+    ISCollapsableWindow.onResize(self)
+    self:layoutControls()
 end
 
 function Progress:update()
     ISCollapsableWindow.update(self)
     if not getSpecificPlayer(self.playerIndex) then self:close(); return end
     local status = App.get(self.playerIndex):status()
-    self.statusLabel:setName(states[status.state] or "Working")
-    local color = status.state == "failed" and C.danger or ((status.state == "running" or status.state == "needs_review") and C.accent or C.success)
+    self.statusLabel:setName(status.waiting and "Waiting for your action" or states[status.state] or "Working")
+    local color = status.state == "failed" and C.danger
+        or ((status.state == "cancelled" or status.state == "needs_review" or status.waiting) and C.warning)
+        or (status.state == "running" and C.accent or C.success)
     self.statusLabel.r, self.statusLabel.g, self.statusLabel.b = color.r, color.g, color.b
     self.countLabel:setName(tostring(status.done or 0) .. " moved of " .. tostring(status.total or 0)
-        .. "   " .. tostring(status.skipped or 0) .. " exclusions or notes")
+        .. "   " .. tostring(status.skipped or 0) .. " notes to review")
     local survey = status.survey
     W.setText(self.surveyPanel, survey and ("Rooms processed " .. tostring(survey.roomsDone) .. " of " .. tostring(survey.roomsTotal)
         .. ". Sections searched " .. tostring(survey.sectionsSearched) .. ", unsearched " .. tostring(survey.sectionsUnsearched) .. ".") or "")
-    local text = status.reason or ""
-    if status.routing then text = text .. (text ~= "" and "\n" or "") .. "Bin choice: " .. status.routing end
+    local text = status.waiting or status.reason or ""
+    if status.routing then text = text .. (text ~= "" and "\n" or "") .. "Destination choice: " .. status.routing end
     if self.notice then text = text .. (text ~= "" and "\n" or "") .. self.notice end
     W.setText(self.reasonPanel, text)
     local reasons = status.reasons or {}
@@ -1283,20 +1530,25 @@ function Progress:update()
     end
     for index = self.reasonCount + 1, #reasons do
         local row = reasons[index]
-        local reason = tostring(row.itemName or "Item") .. "   " .. tostring(row.reason or "No destination")
-        self.reasonsList:addItem(reason, { tone = "muted" }, reason)
+        detailRow(self.reasonsList, row.itemName, row.status or "Note", row.reason or "No destination", row.tone or "warning")
     end
     self.reasonCount = #reasons
     for _, room in ipairs(survey and survey.unsearchedRooms or {}) do
         local id = room.roomId
-        local text = "Unsearched: " .. tostring(room.roomName) .. " / floor " .. tostring(room.z) .. "   " .. tostring(room.reason)
+        local name, reason = tostring(room.roomName) .. " / floor " .. tostring(room.z), tostring(room.reason)
         local row = self.surveyReasonRows[id]
-        if row then row.text, row.tooltip = text, text
-        else self.surveyReasonRows[id] = self.reasonsList:addItem(text, { tone = "danger" }, text) end
+        if row then
+            row.text, row.tooltip = name .. "   Unsearched   " .. reason, name .. "   Unsearched   " .. reason
+            row.item.segments[3].text = reason
+        else self.surveyReasonRows[id] = detailRow(self.reasonsList, name, "Unsearched", reason, "danger") end
     end
-    self.reviewBinButton:setVisible(status.state == "needs_review")
-    self.reviewBinButton:setEnable(status.state == "needs_review")
+    self.showResume, self.showBinReview = status.canResume == true, status.state == "needs_review"
+    self.resumeButton:setVisible(self.showResume)
+    self.resumeButton:setEnable(self.showResume)
+    self.reviewBinButton:setVisible(self.showBinReview)
+    self.reviewBinButton:setEnable(self.showBinReview)
     self.cancelButton:setEnable(status.state == "running" or status.state == "cancelling" or status.state == "needs_review")
+    self:layoutControls()
 end
 
 function Progress:close()
