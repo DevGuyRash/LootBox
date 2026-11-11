@@ -12,7 +12,8 @@ require "Vehicles/TimedActions/ISLockDoors"
 local Native = {}
 Native.__index = Native
 
-local timeouts = { approach = 60000, transfer = 120000, trash = 15000, vehicle = 180000 }
+local WALK_IDLE_TIMEOUT, WALK_MAX_TIMEOUT = 60000, 600000
+local timeouts = { approach = WALK_IDLE_TIMEOUT, transfer = 120000, trash = 15000, vehicle = 180000 }
 
 local function now()
     return getTimestampMs()
@@ -41,6 +42,70 @@ local function onSquare(player, square)
     local current = player:getCurrentSquare()
     return current and square and current:getX() == square:getX()
         and current:getY() == square:getY() and current:getZ() == square:getZ()
+end
+
+local function location(value)
+    if type(value) ~= "table" then return nil end
+    local result = {}
+    for _, field in ipairs({ "x", "y", "z" }) do
+        local coordinate = value[field]
+        if type(coordinate) ~= "number" or coordinate ~= coordinate or math.abs(coordinate) > 2147483647
+            or coordinate ~= math.floor(coordinate) then return nil end
+        result[field] = coordinate
+    end
+    return result
+end
+
+local function approachLocations(op)
+    if op.location == nil and op.locations == nil then return nil end
+    if op.container or op.square or (op.location ~= nil and op.locations ~= nil) then
+        return nil, "Choose one approach target"
+    end
+    if op.location ~= nil then
+        local point = location(op.location)
+        if not point then return nil, "Approach coordinates must be finite native integers" end
+        return { point }
+    end
+    if type(op.locations) ~= "table" or #op.locations < 1 or #op.locations > 16 then
+        return nil, "Choose between one and sixteen loaded frontier locations"
+    end
+    local count, result = 0, {}
+    for index in pairs(op.locations) do
+        if type(index) ~= "number" or index % 1 ~= 0 or index < 1 or index > #op.locations then
+            return nil, "Frontier locations must form a dense list"
+        end
+        count = count + 1
+    end
+    if count ~= #op.locations then return nil, "Frontier locations must form a dense list" end
+    for _, entry in ipairs(op.locations) do
+        local point = location(entry)
+        if not point then return nil, "Approach coordinates must be finite native integers" end
+        if not getCell():getGridSquare(point.x, point.y, point.z) then
+            return nil, "A frontier location is no longer loaded"
+        end
+        result[#result + 1] = point
+    end
+    return result
+end
+
+local function position(player)
+    return { x = player:getX(), y = player:getY(), z = player:getZ() }
+end
+
+local function observeWalk(self, state)
+    if not state.walking or state.cancelled or state.failure or state.stepStopped
+        or state.action ~= state.walking then return end
+    local point, stamp = position(self.player), now()
+    local observation = state.walkObservation
+    local previous = observation.to
+    local dx, dy, dz = point.x - previous.x, point.y - previous.y, point.z - previous.z
+    observation.distance = observation.distance + math.sqrt(dx * dx + dy * dy + dz * dz)
+    observation.elapsedMs = observation.elapsedMs + math.max(0, stamp - state.walkStamp)
+    observation.to, state.walkStamp = point, stamp
+    if observation.distance - state.walkProgressDistance >= 0.05 then
+        state.walkProgressDistance = observation.distance
+        state.deadline = math.min(state.walkHardDeadline, stamp + WALK_IDLE_TIMEOUT)
+    end
 end
 
 local function containerAnchor(player, container)
@@ -140,6 +205,9 @@ local function restoreDescription(self, state)
 end
 
 local function finish(self, state, success, reason)
+    if success and state.op.kind == "approach" and state.walkObservation then
+        state.op.travel = state.walkObservation
+    end
     self.active = nil
     if success then return true end
     return false, (reason or "The native action failed") .. restoreDescription(self, state)
@@ -193,7 +261,16 @@ end
 local function submitPath(self, state, action, check, nextPhase)
     if not action then return nil, "No reachable approach is available" end
     action:setOnFail(function() state.pathFailed = true end)
-    return submit(self, state, action, check, nextPhase)
+    local accepted, reason = submit(self, state, action, check, nextPhase)
+    if accepted and state.op.kind == "approach" then
+        local point = position(self.player)
+        state.walking, state.walkStamp = action, now()
+        state.walkObservation = state.walkObservation or { from = point, to = point, distance = 0, elapsedMs = 0 }
+        state.walkObservation.to = point
+        state.walkProgressDistance = state.walkObservation.distance
+        state.walkHardDeadline = state.walkHardDeadline or now() + WALK_MAX_TIMEOUT
+    end
+    return accepted, reason
 end
 
 local function observeAction(self, state)
@@ -202,6 +279,7 @@ local function observeAction(self, state)
     if state.pathFailed then return false, "No path to the destination" end
     if state.stepStopped then return false, "The native action was interrupted or rejected" end
     if state.check() then
+        state.walking = nil
         state.action = nil
         state.phase = state.nextPhase
         return true
@@ -213,6 +291,32 @@ end
 
 local function approach(self, state)
     local op = state.op
+    if op.location ~= nil or op.locations ~= nil then
+        local points, reason = approachLocations(op)
+        if not points then return nil, reason end
+        local arrived = op.exact and onSquare or nearSquare
+        local function reached()
+            for _, point in ipairs(points) do
+                local square = getCell():getGridSquare(point.x, point.y, point.z)
+                if square and arrived(self.player, square) then return true end
+            end
+            return false
+        end
+        if reached() then return true end
+        if self.player:getVehicle() then return nil, "Exit the vehicle before walking to the destination" end
+        local action
+        if op.locations then
+            local targets = {}
+            for _, point in ipairs(points) do
+                targets[#targets + 1], targets[#targets + 2], targets[#targets + 3] = point.x + 0.5, point.y + 0.5, point.z
+            end
+            action = ISPathFindAction:pathToNearest(self.player, targets)
+        else
+            local point = points[1]
+            action = ISPathFindAction:pathToLocationF(self.player, point.x + 0.5, point.y + 0.5, point.z)
+        end
+        return submitPath(self, state, action, reached, "done")
+    end
     if op.container then
         if containerReachable(self.player, op.container) then return true end
         local anchor = containerAnchor(self.player, op.container)
@@ -430,6 +534,7 @@ function Native:begin(op)
     self.active = state
     local ok, result, reason = pcall(function()
         if op.kind == "approach" then
+            op.travel = nil
             local accepted, err = approach(self, state)
             if accepted and not state.action then state.phase = "done" end
             return accepted, err
@@ -519,6 +624,7 @@ local function poll(self, state)
         if state.action and queueFor(self):indexOf(state.action) >= 0 then return nil end
         return finish(self, state, false, state.failure or "Another player action interrupted this operation")
     end
+    observeWalk(self, state)
     local observed, reason = observeAction(self, state)
     if observed == nil then return nil end
     if observed == false then

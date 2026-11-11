@@ -30,6 +30,7 @@ local function container(name, capacity, owned)
     function result:isExplored() return self.explored end
     function result:requestServerItemsForContainer()
         self.requested = (self.requested or 0) + 1
+        self.lastRequestAt = active.now
         if self.reply then
             active.scheduled[#active.scheduled + 1] = { at = active.now + 400, run = self.reply }
         end
@@ -58,6 +59,18 @@ local function remove(values, value)
     return false
 end
 
+local function coordinateKey(point)
+    return point.x .. ":" .. point.y .. ":" .. point.z
+end
+
+local function square(name, x, y, z)
+    local value = {name = name, x = x, y = y, z = z or 0}
+    function value:getX() return self.x end
+    function value:getY() return self.y end
+    function value:getZ() return self.z end
+    return value
+end
+
 function Native.new(player)
     local adapter = setmetatable({ player = player }, { __index = Native })
     active.adapter = adapter
@@ -66,6 +79,12 @@ end
 function Native:isBusy() return self.active ~= nil end
 function Native:begin(op)
     assert(not self.active, "The job overlapped native operations")
+    active.operations[#active.operations + 1] = op
+    if op.kind == "trash" then
+        for _, entry in ipairs(op.container.items) do
+            if not op.approved[entry.id] or entry.protected then return nil, "The trash can contains an item outside the approved cleanup" end
+        end
+    end
     self.active = { op = op, pending = 1 }
     return true
 end
@@ -91,10 +110,34 @@ function Native:poll()
     if state.pending > 0 then state.pending = state.pending - 1; return nil end
     if state.effectDone then self.active = nil; return true end
     if op.kind == "approach" then
-        local target = op.container and op.container.position or op.square.name
+        local target
+        if op.container then target = op.container.position
+        elseif op.square then target = op.square.name
+        else
+            local choices = op.locations or {op.location}
+            for _, point in ipairs(choices) do
+                local candidate = active.grid[coordinateKey(point)]
+                if candidate and not active.blockedPositions[candidate.name] then target = candidate.name; break end
+            end
+            target = target or coordinateKey(choices[1])
+        end
+        active.approaches[target] = (active.approaches[target] or 0) + 1
+        if active.blockedPositions[target] then self.active = nil; return false, "No path to the destination" end
+        if op.container and active.unloaded[target] then self.active = nil; return false, "Container chunk is unloaded" end
+        local from = active.world:point()
         local withinReach = op.square and not op.exact and active.nearby[active.position] and active.nearby[active.position][target]
         if not withinReach and active.position ~= target then active.visits[#active.visits + 1] = target; active.position = target end
+        if op.location or op.locations then
+            active.unloaded[target] = nil
+            if active.onWalk then active.onWalk(op, target) end
+        end
         if active.onApproach then active.onApproach(op) end
+        if active.observeTravel then
+            local to = active.world:point()
+            local distance, elapsed = math.abs(from.x - to.x) + math.abs(from.y - to.y) + math.abs(from.z - to.z), 1000
+            if type(active.observeTravel) == "function" then distance, elapsed = active.observeTravel(from, to) end
+            op.travel = {from = from, to = to, distance = distance, elapsedMs = elapsed}
+        end
     elseif op.kind == "transfer" then
         assert(op.source:contains(op.item), "Native transfer source lost the item")
         assert(op.destination:hasRoomFor(self.player, op.item), "Native transfer exceeded capacity")
@@ -145,9 +188,38 @@ isClient = function() return active.client == true end
 getServerOptions = function() return { getBoolean = function() return active.allowTrash ~= false end } end
 getPlayerLoot = function() return active.loot end
 ISInventoryPage = { GetFloorContainer = function() return active.floor end }
+getCell = function() return {getGridSquare = function(_, x, y, z)
+    local found = active.grid[x .. ":" .. y .. ":" .. z]
+    if found and not active.unloaded[found.name] then return found end
+end} end
 
 local function fixture(capacity)
-    local f = { now = 0, position = "source", visits = {}, transfers = {}, deletions = {}, scheduled = {}, ground = {}, squares = {}, nearby = {} }
+    local f = { now = 0, position = "source", visits = {}, transfers = {}, deletions = {}, scheduled = {}, ground = {}, squares = {}, nearby = {},
+        grid = {}, unloaded = {}, blockedPositions = {}, approaches = {}, operations = {}, sourceLocations = {}, binLocations = {}, unloadedBins = {}, inspectedBins = {} }
+    local nextPosition = 0
+    function f:ensureSquare(name, point)
+        if self.squares[name] then
+            local existing = self.squares[name]
+            if not existing.getX then
+                nextPosition = nextPosition + 1
+                self.squares[name] = square(name, nextPosition * 10, 0)
+            end
+        else
+            nextPosition = nextPosition + 1
+            self.squares[name] = square(name, point and point.x or nextPosition * 10,
+                point and point.y or 0, point and point.z or 0)
+        end
+        local result = self.squares[name]
+        self.grid[coordinateKey(result)] = result
+        return result
+    end
+    function f:addSquare(value)
+        self.squares[value.name], self.grid[coordinateKey(value)] = value, value
+        return value
+    end
+    f:addSquare(square("source", 0, 0))
+    f:addSquare(square("destination", 10, 0))
+    f:addSquare(square("inventory", 0, 0))
     f.inventory = container("inventory", capacity or 3, true)
     f.source = container("source", 100)
     f.destination = container("destination", 100)
@@ -155,7 +227,51 @@ local function fixture(capacity)
     f.sources, f.bins, f.groundSquares = { f.source }, {}, {}
     f.player = { getPlayerNum = function() return 0 end }
     local world = {}
+    function world:point()
+        local current = f:ensureSquare(f.position)
+        return {x = current.x, y = current.y, z = current.z}
+    end
+    function world:key(value) return value.name end
+    function world:square(value) return f:ensureSquare(value.position) end
+    function world:sourceAnchor(value)
+        f.sourceLocations[value.name] = f.sourceLocations[value.name] or value
+        local point = self:square(value)
+        return {key = value.name, point = {x = point.x, y = point.y, z = point.z}}
+    end
+    function world:resolveSource(anchor)
+        if not anchor then return nil, "Missing source anchor" end
+        local current = f.sourceLocations[anchor.key]
+        if current and f.unloaded[current.position] then return nil, "unloaded" end
+        if current then return current end
+        return nil, "Source changed after preview"
+    end
+    function world:locationLoaded(point)
+        return getCell():getGridSquare(point.x, point.y, point.z) ~= nil
+    end
+    function world:walkTargets(point)
+        local target = f.grid[coordinateKey(point)]
+        if not target then return nil, "No loaded walking frontier reaches the unsearched location" end
+        return {{x = point.x, y = point.y, z = point.z}}, true
+    end
     function world:owns(value) return value and value.owned == true end
+    f.carried = {f.inventory}
+    f.normalLimit = capacity or 3
+    function f:carryContainer(value, factor)
+        value.owned, value.carryFactor = true, factor or 1
+        self.carried[#self.carried + 1] = value
+        return value
+    end
+    function world:carryDelta(value, destination)
+        if not self:owns(destination) then return 0 end
+        local source = value:getContainer()
+        local previous = self:owns(source) and (source.carryFactor or 1) or 0
+        return value.weight * ((destination.carryFactor or 1) - previous)
+    end
+    function world:carrying()
+        local mass = 0
+        for _, carried in ipairs(f.carried) do mass = mass + carried:getCapacityWeight() * (carried.carryFactor or 1) end
+        return mass, f.normalLimit
+    end
     function world:itemId(value) return value.id end
     function world:describe(value) return { fullType = value.fullType, categoryId = "native:Material", labels = {} } end
     function world:protected(value) return value.protected == true end
@@ -163,7 +279,40 @@ local function fixture(capacity)
     function world:valid() return true end
     function world:isTrash(value) return value.trash == true end
     function world:vehicle() return {} end
-    function world:trashCandidates() return f.bins, {} end
+    function world:trashCandidates()
+        local bins = {}
+        for _, bin in ipairs(f.bins) do if not f.unloaded[bin.position] then bins[#bins + 1] = bin end end
+        return bins, {}
+    end
+    function world:trashTarget(bin)
+        local point = self:square(bin)
+        f.binLocations[bin.name] = f.binLocations[bin.name] or bin
+        return {key = bin.name, container = bin, point = {x = point.x, y = point.y, z = point.z},
+            capacity = bin.capacity, used = bin:getCapacityWeight(), needsInspection = bin.uninspected and not f.inspectedBins[bin.name] or nil}
+    end
+    function world:unloadedTrashTargets()
+        local targets = {}
+        for _, bin in ipairs(f.unloadedBins) do
+            local target = self:trashTarget(bin)
+            target.container, target.needsInspection = nil, true
+            targets[#targets + 1] = target
+        end
+        return targets
+    end
+    function world:resolveTrashTarget(target)
+        local current = f.binLocations[target.key]
+        if current and f.unloaded[current.position] then return nil, "unloaded" end
+        if not current or not current.trash then return nil, "missing" end
+        target.container, target.capacity, target.used = current, current.capacity, current:getCapacityWeight()
+        return current
+    end
+    function world:binReachable(target)
+        local current = f.binLocations[target.key]
+        return current and not f.unloaded[current.position] and f.position == current.position
+    end
+    function world:markTrashInspected(target)
+        if self:binReachable(target) then f.inspectedBins[target.key] = true; return true end
+    end
     function world:records(source)
         local result = {}
         for _, value in ipairs(source.items) do
@@ -174,6 +323,9 @@ local function fixture(capacity)
     end
     function world:scan(request)
         f.scannedRequest = request
+        if request.scope == "building" and f.survey then
+            return {items = {}, sources = {}, groundSquares = {}, warnings = {}, survey = f.survey}
+        end
         local records, endpoints = {}, {}
         if not f.onlyGround then
             for _, source in ipairs(f.sources) do
@@ -191,6 +343,23 @@ local function fixture(capacity)
         end
         return { items = records, sources = endpoints, groundSquares = f.groundSquares, warnings = {} }
     end
+    function world:sectionTarget(section)
+        return {x = section.target.x, y = section.target.y, z = section.target.z}
+    end
+    function world:scanSection(section)
+        local result = {items = {}, sources = {}, groundSquares = {}, warnings = {}}
+        local missing = f.unloaded[section.target.name] and 1 or section.missing or 0
+        if missing == 0 or section.inspectLoadedPart then
+            for _, source in ipairs(section.sources or {}) do
+                result.sources[#result.sources + 1] = source
+                if source.explored then
+                    for _, record in ipairs(self:records(source)) do result.items[#result.items + 1] = record end
+                end
+            end
+            result.groundSquares = section.groundSquares or {}
+        end
+        return result, missing, section.denied or 0
+    end
     function world:destinations(request)
         if request.destination.kind == "inventory" then return { f.inventory } end
         if request.destination.kind == "floor" then return { f.floor } end
@@ -207,6 +376,40 @@ local function fixture(capacity)
     active = f
     f.jobs = Jobs.new(f.player, world, assert(Categories.new({})))
     return f
+end
+
+local function building(f, sections, yields)
+    local index, pending, processed, searched, unsearched, failures = 0, nil, 0, 0, 0, {}
+    local remainingYields = yields or 0
+    for _, section in ipairs(sections) do f:addSquare(section.target) end
+    local survey = {building = {}, complete = false}
+    function survey:next()
+        assert(not pending, "A section cannot be skipped while its result is pending")
+        if remainingYields > 0 then remainingYields = remainingYields - 1; return false end
+        index = index + 1
+        pending = sections[index]
+        if not pending then self.complete = true end
+        return pending
+    end
+    function survey:report(section, ok, reason)
+        assert(pending == section, "The job reported a different room from the one it searched")
+        pending, processed = nil, processed + 1
+        if ok then searched = searched + 1
+        else
+            unsearched = unsearched + 1
+            failures[#failures + 1] = {roomId = section.roomId, roomName = section.roomName,
+                z = section.z, sections = 1, reason = reason}
+        end
+    end
+    function survey:status()
+        return {roomsTotal = #sections, roomsDone = processed, sectionsSearched = searched,
+            sectionsUnsearched = unsearched, unsearchedRooms = failures, complete = self.complete}
+    end
+    f.survey = survey
+    local input = {scope = "building", includeBags = true,
+        filter = {all = true, ids = {}, types = {}}, destination = {kind = "container", ref = f.destination}}
+    input.scope = "building"
+    return input
 end
 
 local function request(kind, destination)
@@ -229,6 +432,17 @@ local function finish(f)
         if state ~= "running" and state ~= "cancelling" then return f.jobs:status() end
     end
     error("Job did not reach a terminal state")
+end
+
+local function awaitState(f, expected)
+    for _ = 1, 1000 do
+        tick(f)
+        local status = f.jobs:status()
+        if status.state == expected then return status end
+        assert(status.state == "running" or status.state == "cancelling",
+            "Job ended before reaching " .. expected .. ": " .. tostring(status.state) .. " / " .. tostring(status.reason))
+    end
+    error("Job did not reach " .. expected)
 end
 
 local function start(f, input)
@@ -363,16 +577,16 @@ test("cleanup approves recreated destination identities and empties whole batche
     assert(#f.deletions == 3 and f.deletions[1].count == 2 and f.deletions[2].count == 2 and f.deletions[3].count == 1)
 end)
 
-test("empty existing trash before selecting a larger bin", function()
+test("choose a fitting larger bin without emptying an unused undersized bin", function()
     local f = fixture(10)
     local small, large = container("small trash", 2), container("large trash", 4)
     small.trash, large.trash = true, true; f.bins = { small, large }
-    item(small, "Base.ExistingTrash")
+    local retained = item(small, "Base.ExistingTrash")
     item(f.source, "Base.Heavy", 3)
     start(f, request("trash"))
     assert(finish(f).done == 1)
-    assert(#f.deletions == 2 and f.deletions[1].bin == small and f.deletions[1].count == 1)
-    assert(f.deletions[2].bin == large and f.deletions[2].count == 1)
+    assert(#f.deletions == 1 and f.deletions[1].bin == large and f.deletions[1].count == 1)
+    assert(small:contains(retained), "Capacity planning must not delete contents of an unused bin")
 end)
 
 test("newly protected bin contents stop whole-bin deletion", function()
@@ -421,8 +635,7 @@ end)
 
 test("floor inspection excludes adjacent unselected squares", function()
     local f = fixture(3); f.onlyGround = true; f.sources = {}
-    local selectedSquare, adjacent = { name = "selected floor" }, { name = "adjacent floor" }
-    f.squares[selectedSquare.name], f.squares[adjacent.name] = selectedSquare, adjacent
+    local selectedSquare, adjacent = f:addSquare(square("selected floor", 20, 0)), f:addSquare(square("adjacent floor", 21, 0))
     f.groundSquares = { selectedSquare }
     local selected = item(f.floor, "Base.Selected")
     local other = item(f.floor, "Base.Adjacent")
@@ -436,7 +649,7 @@ end)
 
 test("floor destination remains pinned after walking to sources", function()
     local f = fixture(3)
-    local destination = { name = "chosen floor" }; f.squares[destination.name] = destination
+    local destination = f:addSquare(square("chosen floor", 20, 0))
     local selected = item(f.source)
     start(f, request("floor", destination))
     assert(finish(f).done == 1)
@@ -445,8 +658,7 @@ end)
 
 test("floor items can move between squares sharing one native floor view", function()
     local f = fixture(3); f.sources = { f.floor }
-    local origin, destination = { name = "origin floor" }, { name = "destination floor" }
-    f.squares[origin.name], f.squares[destination.name] = origin, destination
+    local origin, destination = f:addSquare(square("origin floor", 20, 0)), f:addSquare(square("destination floor", 30, 0))
     local selected = item(f.floor)
     selected.world = { getSquare = function() return origin end }
     f.ground = { selected }
@@ -457,8 +669,7 @@ end)
 
 test("adjacent floor destinations require standing on the chosen square", function()
     local f = fixture(3); f.sources = { f.inventory }; f.position = "origin floor"
-    local origin, destination = { name = "origin floor" }, { name = "adjacent destination" }
-    f.squares[origin.name], f.squares[destination.name] = origin, destination
+    local origin, destination = f:addSquare(square("origin floor", 20, 0)), f:addSquare(square("adjacent destination", 21, 0))
     f.nearby[origin.name] = { [destination.name] = true }
     local selected = item(f.inventory)
     start(f, request("floor", destination))
@@ -511,6 +722,711 @@ test("exception waits for native restoration and stays failed", function()
     local status = finish(f)
     assert(status.state == "failed" and f.restored and not f.adapter:isBusy())
     assert(f.thrown and status.reason:find("Job execution failed", 1, true))
+end)
+
+test("building jobs search both floors and finish all selected transfers", function()
+    local f = fixture(2)
+    local upstairs, downstairs = container("upstairs", 100), container("downstairs", 100)
+    f:addSquare(square("upstairs", 0, 0, 1)); f:addSquare(square("downstairs", 0, 0, 0))
+    item(upstairs); item(upstairs); item(downstairs); item(downstairs)
+    local input = building(f, {
+        {roomId = "upper", roomName = "Upper bedroom", z = 1, target = square("upper section", 1, 0, 1), sources = {upstairs}},
+        {roomId = "lower", roomName = "Lower hall", z = 0, target = square("lower section", 1, 0, 0), sources = {downstairs}},
+    })
+    local plan = start(f, input)
+    assert(plan.building.roomsTotal == 2 and #plan.moves == 0 and plan.pending == 2)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 4 and #f.destination.items == 4)
+    assert(status.survey.roomsDone == 2 and status.survey.sectionsSearched == 2 and status.survey.sectionsUnsearched == 0)
+    assert(f.approaches.upstairs and f.approaches.downstairs)
+end)
+
+test("an unloaded building section is walked to and inspected after streaming", function()
+    local f = fixture(2)
+    local remote = container("remote upstairs", 100)
+    f:addSquare(square(remote.position, 40, 0, 1)); item(remote)
+    local section = {roomId = "remote", roomName = "Remote bedroom", z = 1,
+        target = square("remote section", 41, 0, 1), sources = {remote}}
+    local input = building(f, {section})
+    f.unloaded[section.target.name] = true
+    start(f, input)
+    local status = finish(f)
+    assert(status.done == 1 and #f.destination.items == 1 and status.survey.sectionsSearched == 1)
+    assert(f.approaches[section.target.name] == 1 and not f.unloaded[section.target.name])
+end)
+
+test("metadata yielding leaves building jobs cancellable before movement", function()
+    local f = fixture(2)
+    local input = building(f, {{roomId = "one", roomName = "Room", z = 0,
+        target = square("section", 1, 0), sources = {f.source}}}, 100)
+    item(f.source)
+    start(f, input)
+    for _ = 1, 20 do tick(f) end
+    assert(f.jobs:status().state == "running" and #f.operations == 0)
+    assert(f.jobs:cancel())
+    local status = finish(f)
+    assert(status.state == "cancelled" and status.done == 0 and #f.source.items == 1)
+end)
+
+test("cancelling a building approach waits for native cleanup without searching the room", function()
+    local f = fixture(2)
+    local section = {roomId = "remote", roomName = "Unloaded room", z = 1,
+        target = square("walking to section", 40, 0, 1), sources = {f.source}}
+    local input = building(f, {section})
+    f.unloaded[section.target.name] = true
+    item(f.source)
+    start(f, input)
+    for _ = 1, 30 do tick(f); if f.adapter:isBusy() then break end end
+    assert(f.adapter:isBusy() and f.jobs:cancel())
+    tick(f)
+    assert(f.jobs:status().state == "cancelling" and not f.restored)
+    local status = finish(f)
+    assert(status.state == "cancelled" and f.restored and not f.adapter:isBusy())
+    assert(status.survey.sectionsSearched == 0 and status.done == 0 and #f.transfers == 0)
+end)
+
+test("upstairs building cleanup returns between an outside bin and the selected floor", function()
+    local f = fixture(1); f.onlyGround, f.sources = true, {}
+    local upper = f:addSquare(square("upper floor items", 20, 0, 1))
+    local bin = container("outside ground bin", 3); bin.trash, f.bins = true, {bin}
+    f:addSquare(square(bin.position, 10, 0, 0))
+    for _ = 1, 4 do
+        local selected = item(f.floor)
+        selected.world = {getSquare = function() return upper end}
+        f.ground[#f.ground + 1] = selected
+    end
+    local input = building(f, {
+        {roomId = "upper", roomName = "Upper bedroom", z = 1, target = upper, groundSquares = {upper}},
+        {roomId = "lower", roomName = "Ground hall", z = 0, target = square("lower room", 1, 0, 0)},
+    })
+    input.destination = {kind = "trash"}
+    start(f, input)
+    local status = finish(f)
+    local upperVisits, outsideVisits = 0, 0
+    for _, name in ipairs(f.visits) do
+        if name == upper.name then upperVisits = upperVisits + 1 end
+        if name == bin.position then outsideVisits = outsideVisits + 1 end
+    end
+    assert(status.state == "finished" and status.done == 4 and status.skipped == 0)
+    assert(upperVisits == 4 and outsideVisits == 4, "Capacity one requires four actual upstairs/outside deliveries")
+    assert(#f.ground == 0 and #bin.items == 0 and #f.deletions == 2)
+    assert(status.survey.roomsDone == 2 and status.survey.sectionsSearched == 2)
+end)
+
+test("a blocked building section remains unsearched while reachable rooms continue", function()
+    local f = fixture(2)
+    local blocked = {roomId = "blocked", roomName = "Blocked attic", z = 1,
+        target = square("blocked section", 40, 0, 1), sources = {f.source}}
+    local healthy = container("healthy", 100); f:addSquare(square(healthy.position, 1, 0)); item(healthy)
+    local input = building(f, {blocked, {roomId = "healthy", roomName = "Hall", z = 0,
+        target = square("healthy section", 2, 0), sources = {healthy}}})
+    f.unloaded[blocked.target.name], f.blockedPositions[blocked.target.name] = true, true
+    start(f, input)
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 1)
+    assert(status.survey.roomsDone == 2 and status.survey.sectionsSearched == 1 and status.survey.sectionsUnsearched == 1)
+    assert(status.survey.unsearchedRooms[1].roomName == "Blocked attic" and status.survey.unsearchedRooms[1].z == 1)
+end)
+
+test("permission-denied room portions are not counted as fully searched", function()
+    local f = fixture(2)
+    local selected = item(f.source)
+    local input = building(f, {{roomId = "partial", roomName = "Partly accessible room", z = 0,
+        target = square("partial section", 1, 0), sources = {f.source}, denied = 1}})
+    start(f, input)
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 1 and f.destination:contains(selected))
+    assert(status.survey.sectionsSearched == 0 and status.survey.sectionsUnsearched == 1)
+end)
+
+test("accessible closet storage does not require standing in an obstructed center", function()
+    local f = fixture(2)
+    local closet = container("hall beside closet", 100)
+    f:addSquare(square(closet.position, 1, 0)); local selected = item(closet)
+    local section = {roomId = "closet", roomName = "Storage closet", z = 0,
+        target = square("obstructed closet center", 2, 0), sources = {closet}}
+    local input = building(f, {section})
+    f.blockedPositions[section.target.name] = true
+    start(f, input)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1 and f.destination:contains(selected))
+    assert(not f.approaches[section.target.name])
+end)
+
+test("capacity-limited return trips reacquire a recreated source container", function()
+    local f = fixture(2)
+    local original = f.source
+    for _ = 1, 5 do item(original) end
+    local unloaded, fresh
+    f.onTransfer = function(op)
+        if op.destination == f.destination and not unloaded then f.unloaded.source, unloaded = true, true end
+    end
+    f.onWalk = function(_, target)
+        if target == "source" and not fresh then
+            fresh = container("source", 100)
+            for _, old in ipairs(original.items) do
+                local current = item(fresh, old.fullType, old.weight); current.id = old.id; old.container = nil
+            end
+            original.items = {}
+            f.sourceLocations.source, f.sources[1], f.source = fresh, fresh, fresh
+        end
+    end
+    start(f)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 5 and status.skipped == 0 and fresh)
+    assert(#fresh.items == 0 and #f.destination.items == 5 and #f.inventory.items == 0)
+end)
+
+test("reloaded source items must retain the reviewed type as well as identity", function()
+    local f = fixture(1)
+    item(f.source, "Base.Selected"); local remaining = item(f.source, "Base.Selected")
+    local original, fresh = f.source
+    f.onTransfer = function(op) if op.destination == f.destination then f.unloaded.source = true end end
+    f.onWalk = function(_, target)
+        if target == "source" and not fresh then
+            fresh = container("source", 100)
+            local changed = item(fresh, "Base.Different"); changed.id = remaining.id
+            remaining.container, original.items = nil, {}
+            f.sourceLocations.source, f.source = fresh, fresh
+        end
+    end
+    start(f)
+    local status = finish(f)
+    assert(status.done == 1 and status.skipped == 1 and #fresh.items == 1 and #f.destination.items == 1)
+end)
+
+test("floor hauling reacquires the selected XYZ after its chunk is recreated", function()
+    local f = fixture(1); f.onlyGround, f.sources = true, {}
+    local oldSquare = f:addSquare(square("upstairs floor", 20, 0, 1))
+    f.groundSquares = {oldSquare}
+    for _ = 1, 3 do
+        local selected = item(f.floor)
+        selected.world = {getSquare = function() return oldSquare end}
+        f.ground[#f.ground + 1] = selected
+    end
+    local freshSquare, unloaded
+    f.onTransfer = function(op)
+        if op.destination == f.destination and not unloaded then f.unloaded[oldSquare.name], unloaded = true, true end
+    end
+    f.onWalk = function(_, target)
+        if target == oldSquare.name and unloaded and not freshSquare then
+            freshSquare = f:addSquare(square(oldSquare.name, 20, 0, 1))
+            local freshGround = {}
+            for _, old in ipairs(f.ground) do
+                local current = item(f.floor, old.fullType, old.weight); current.id = old.id
+                current.world = {getSquare = function() return freshSquare end}
+                freshGround[#freshGround + 1], old.container = current, nil
+            end
+            f.ground = freshGround
+        end
+    end
+    start(f)
+    local status = finish(f)
+    assert(status.done == 3 and status.skipped == 0 and freshSquare and #f.ground == 0)
+    assert(#f.destination.items == 3 and #f.inventory.items == 0)
+end)
+
+test("cleanup chooses a farther larger bin when fewer emptyings outweigh travel", function()
+    local f = fixture(6)
+    local near, large = container("near small", 1), container("farther large", 6)
+    near.trash, large.trash, f.bins = true, true, {near, large}
+    f:addSquare(square(near.position, 0, 0)); f:addSquare(square(large.position, 1, 0))
+    for _ = 1, 6 do item(f.source) end
+    start(f, request("trash"))
+    local status = finish(f)
+    assert(status.done == 6 and status.skipped == 0 and #f.deletions == 1 and f.deletions[1].bin == large)
+    assert(f.deletions[1].count == 6 and not f.approaches[near.position])
+end)
+
+test("cleanup keeps the nearer bin when larger capacity saves no emptying", function()
+    local f = fixture(3)
+    local near, far = container("near adequate", 6), container("far huge", 60)
+    near.trash, far.trash, f.bins = true, true, {near, far}
+    f:addSquare(square(near.position, 1, 0)); f:addSquare(square(far.position, 20, 0))
+    for _ = 1, 3 do item(f.source) end
+    start(f, request("trash"))
+    local status = finish(f)
+    assert(status.done == 3 and #f.deletions == 1 and f.deletions[1].bin == near and not f.approaches[far.position])
+end)
+
+test("cleanup keeps using a touched bin when switching still owes its final emptying", function()
+    local f = fixture(9)
+    local near, large = container("near touched bin", 10), container("larger alternative", 20)
+    near.trash, large.trash, f.bins = true, true, {near, large}
+    f:addSquare(square(near.position, 1, 0)); f:addSquare(square(large.position, 2, 0))
+    for _ = 1, 5 do item(f.source, "Base.Plank", 3) end
+    start(f, request("trash"))
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 5 and status.skipped == 0 and status.carried == 0)
+    local delivered = 0
+    for _, transfer in ipairs(f.transfers) do
+        if transfer.destination ~= f.inventory then
+            assert(transfer.destination == near, "The last two planks must account for cleanup still owed to the first bin")
+            delivered = delivered + 1
+        end
+    end
+    assert(delivered == 5 and not f.approaches[large.position])
+    assert(#f.deletions == 2 and f.deletions[1].bin == near and f.deletions[1].count == 3
+        and f.deletions[2].bin == near and f.deletions[2].count == 2,
+        "The ten-unit bin must empty its first nine-unit load before accepting the final six units")
+    assert(#f.source.items == 0 and #near.items == 0 and #large.items == 0 and #f.inventory.items == 0)
+end)
+
+test("a selected full bin is emptied before the next item is deposited", function()
+    local f = fixture(3)
+    local bin = container("full chosen bin", 3); bin.trash, f.bins = true, {bin}
+    local existing = item(bin, "Base.Existing", 3)
+    item(f.source, "Base.Selected", 2)
+    f.onTransfer = function(op)
+        if op.destination == bin then assert(not bin:contains(existing), "Chosen full bin must be emptied before deposit") end
+    end
+    start(f, request("trash"))
+    local status = finish(f)
+    assert(status.done == 1 and #f.deletions == 2 and f.deletions[1].count == 1 and f.deletions[2].count == 1)
+end)
+
+test("failed bin routes are not repeated from the same hauling origin", function()
+    local f = fixture(1)
+    local blocked, reachable = container("blocked bin", 10), container("reachable bin", 10)
+    blocked.trash, reachable.trash, f.bins = true, true, {blocked, reachable}
+    f:addSquare(square(blocked.position, 1, 0)); f:addSquare(square(reachable.position, 2, 0))
+    f.blockedPositions[blocked.position] = true
+    for _ = 1, 3 do item(f.source) end
+    start(f, request("trash"))
+    local status = finish(f)
+    assert(status.done == 3 and status.skipped == 0 and f.approaches[blocked.position] == 1)
+    assert(#f.deletions == 1 and f.deletions[1].bin == reachable and f.deletions[1].count == 3)
+end)
+
+test("remembered unloaded bins are inspected before any source pickup", function()
+    local f = fixture(2)
+    local bin = container("remembered bin", 4); bin.trash = true
+    f:addSquare(square(bin.position, 20, 0)); f.unloaded[bin.position] = true; f.unloadedBins = {bin}
+    local unseen = item(bin, "Base.Unseen")
+    local selected = item(f.source)
+    start(f, request("trash"))
+    local status = awaitState(f, "needs_review")
+    assert(status.done == 0 and status.carried == 0 and f.approaches[bin.position])
+    assert(f.source:contains(selected) and bin:contains(unseen) and #f.transfers == 0 and #f.deletions == 0)
+    local review = assert(f.jobs:reviewBin())
+    assert(review.canApprove and #review.moves == 1 and review.moves[1].itemName == "Base.Unseen")
+    assert(f.jobs:rejectBin(review))
+    assert(finish(f).state == "finished_with_skips" and f.source:contains(selected) and bin:contains(unseen))
+end)
+
+test("an empty remembered bin accepts cleanup only after a fresh explicit review", function()
+    local f = fixture(2)
+    local bin = container("remembered empty bin", 4); bin.trash = true
+    f:addSquare(square(bin.position, 20, 0)); f.unloaded[bin.position] = true; f.unloadedBins = {bin}
+    item(f.source); item(f.source)
+    start(f, request("trash"))
+    local paused = awaitState(f, "needs_review")
+    assert(paused.done == 0 and #f.transfers == 0 and #f.deletions == 0)
+    local review = assert(f.jobs:reviewBin())
+    assert(review.canApprove and #review.moves == 0 and #review.skipped == 0)
+    assert(f.jobs:approveBin(review))
+    local status = finish(f)
+    assert(status.done == 2 and status.skipped == 0 and #f.deletions == 1 and f.deletions[1].bin == bin)
+end)
+
+test("a recreated bin is resolved before depositing or deleting", function()
+    local f = fixture(2)
+    local original = container("reloaded bin", 4); original.trash, f.bins = true, {original}
+    f:addSquare(square(original.position, 20, 0))
+    local selected = item(f.source)
+    local fresh
+    f.onTransfer = function(op) if op.destination == f.inventory then f.unloaded[original.position] = true end end
+    f.onWalk = function(_, target)
+        if target == original.position and not fresh then
+            fresh = container(original.name, 4); fresh.trash = true
+            f.binLocations[original.name], f.bins[1] = fresh, fresh
+        end
+    end
+    start(f, request("trash"))
+    local status = finish(f)
+    assert(status.done == 1 and status.skipped == 0 and fresh and selected:getContainer() == nil)
+    assert(#f.deletions == 1 and f.deletions[1].bin == fresh and #original.items == 0)
+end)
+
+test("new unapproved bin contents are never deleted during cleanup", function()
+    local f = fixture(2)
+    local bin = container("changing bin", 2); bin.trash, f.bins = true, {bin}
+    for _ = 1, 2 do item(f.source) end
+    local outsider
+    f.onTransfer = function(op)
+        if op.destination == bin and not outsider then outsider = item(bin, "Base.Unapproved") end
+    end
+    start(f, request("trash"))
+    local status = finish(f)
+    assert(status.done == 1 and status.skipped > 0 and outsider and bin:contains(outsider))
+    assert(#f.deletions == 0, "Whole-bin deletion cannot include a newly unapproved item")
+end)
+
+test("completed native walks improve later bin choices beyond straight-line proximity", function()
+    local f = fixture(1)
+    local near, farther = container("near with detour", 10), container("farther direct", 10)
+    near.trash, farther.trash, f.bins = true, true, {near}
+    f:addSquare(square(near.position, 4, 0)); f:addSquare(square(farther.position, 8, 0))
+    f.observeTravel = function(from, to)
+        if from.x == 0 and to.x == 4 then return 14, 10000 end
+        return math.abs(from.x - to.x), math.abs(from.x - to.x) * 1000
+    end
+    item(f.source)
+    start(f, request("trash"))
+    assert(finish(f).done == 1 and f.deletions[1].bin == near)
+    f.position, f.bins = "source", {near, farther}
+    item(f.source)
+    start(f, request("trash"))
+    local status = finish(f)
+    assert(status.done == 1 and status.skipped == 0 and #f.deletions == 2)
+    assert(f.deletions[2].bin == farther, "An observed detour can make the farther direct bin cheaper")
+end)
+
+test("a newly discovered nonempty bin pauses without expanding the cleanup approval", function()
+    local f = fixture(2)
+    local blocked, unknown = container("original bin", 2), container("new nonempty bin", 10)
+    blocked.trash, unknown.trash, f.bins = true, true, {blocked}
+    f:addSquare(square(blocked.position, 1, 0)); f:addSquare(square(unknown.position, 2, 0))
+    local retained = item(unknown, "Base.UnseenExisting")
+    item(f.source)
+    f.onTransfer = function(op)
+        if op.destination == f.inventory then
+            f.bins = {blocked, unknown}
+            f.blockedPositions[blocked.position] = true
+        end
+    end
+    start(f, request("trash"))
+    local status = awaitState(f, "needs_review")
+    assert(status.done == 0 and status.carried == 1)
+    assert(unknown:contains(retained) and #unknown.items == 1 and #f.deletions == 0)
+    local review = assert(f.jobs:reviewBin())
+    assert(#review.moves == 1 and review.moves[1].itemName == "Base.UnseenExisting")
+    assert(f.jobs:rejectBin(review))
+    local ended = finish(f)
+    assert(ended.state == "finished_with_skips" and ended.carried == 1 and #f.deletions == 0)
+end)
+
+test("a newly discovered empty bin can replace an inaccessible bin after explicit approval", function()
+    local f = fixture(2)
+    local blocked, fresh = container("original inaccessible bin", 2), container("new empty bin", 10)
+    blocked.trash, fresh.trash, f.bins = true, true, {blocked}
+    f:addSquare(square(blocked.position, 1, 0)); f:addSquare(square(fresh.position, 2, 0))
+    local selected = item(f.source)
+    f.onTransfer = function(op)
+        if op.destination == f.inventory then
+            f.bins = {blocked, fresh}
+            f.blockedPositions[blocked.position] = true
+        end
+    end
+    start(f, request("trash"))
+    local paused = awaitState(f, "needs_review")
+    assert(paused.done == 0 and paused.carried == 1 and f.inventory:contains(selected))
+    assert(#f.transfers == 1 and #f.deletions == 0)
+    local review = assert(f.jobs:reviewBin())
+    assert(review.canApprove and #review.moves == 0)
+    assert(f.jobs:approveBin(review))
+    local status = finish(f)
+    assert(status.done == 1 and status.skipped == 0 and status.carried == 0)
+    assert(#f.deletions == 1 and f.deletions[1].bin == fresh and f.deletions[1].count == 1)
+    assert(#f.transfers == 2, "Approving a destination must continue the carried item instead of picking it up again")
+end)
+
+test("a loaded uninspected bin pauses before collecting any source items", function()
+    local f = fixture(2)
+    local bin = container("uninspected loaded bin", 4)
+    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    f:addSquare(square(bin.position, 10, 0))
+    local selected = item(f.source)
+    start(f, request("trash"))
+    local paused = awaitState(f, "needs_review")
+    assert(paused.done == 0 and paused.carried == 0 and f.source:contains(selected))
+    assert(f.approaches[bin.position] and f.inspectedBins[bin.name])
+    local review = assert(f.jobs:reviewBin())
+    for _ = 1, 120 do tick(f) end
+    assert(f.jobs:status().state == "needs_review" and #f.transfers == 0 and #f.deletions == 0)
+    assert(f.jobs:approveBin(review))
+    assert(finish(f).done == 1 and #f.deletions == 1)
+end)
+
+test("approving a bin preserves the building survey and original item selection", function()
+    local f = fixture(1)
+    local bin = container("outside uninspected bin", 4)
+    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    f:addSquare(square(bin.position, 10, 0))
+    local upper, lower = container("upper source", 100), container("lower source", 100)
+    f:addSquare(square(upper.position, 20, 0, 1)); f:addSquare(square(lower.position, 20, 0, 0))
+    item(upper, "Base.Selected"); item(lower, "Base.Selected")
+    local retained = item(upper, "Base.Other")
+    local input = building(f, {
+        {roomId = "upper", roomName = "Upper bedroom", z = 1, target = square("upper selected section", 21, 0, 1), sources = {upper}},
+        {roomId = "lower", roomName = "Lower hall", z = 0, target = square("lower selected section", 21, 0, 0), sources = {lower}},
+    })
+    input.filter, input.destination = {all = false, ids = {}, types = {"Base.Selected"}}, {kind = "trash"}
+    local plan = start(f, input)
+    local paused = awaitState(f, "needs_review")
+    assert(paused.survey.roomsDone == 0 and paused.survey.roomsTotal == 2 and #f.transfers == 0)
+    input.filter.types[1], plan.request.filter.types[1] = "Base.Other", "Base.Other"
+    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 2 and status.skipped == 0)
+    assert(status.survey.roomsDone == 2 and status.survey.sectionsSearched == 2)
+    assert(upper:contains(retained) and #upper.items == 1 and #lower.items == 0)
+    assert(#f.inventory.items == 0 and #bin.items == 0)
+end)
+
+test("public bin review mutation cannot approve contents added after the snapshot", function()
+    local f = fixture(2)
+    local bin = container("reviewed destination", 4)
+    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local selected = item(f.source)
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    local review = assert(f.jobs:reviewBin())
+    local added = item(bin, "Base.NewUnapproved")
+    review.moves[1], review.canApprove = {itemName = added.fullType, from = "Bin", to = "Delete"}, true
+    assert(not f.jobs:approveBin(review))
+    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected) and bin:contains(added))
+    assert(#f.transfers == 0 and #f.deletions == 0)
+    local fresh = assert(f.jobs:reviewBin())
+    assert(#fresh.moves == 1 and fresh.moves[1].itemName == added.fullType)
+    assert(not f.jobs:approveBin(review) and not f.jobs:rejectBin(review), "Refreshing review invalidates its older token")
+    assert(f.jobs:cancel() and finish(f).state == "cancelled")
+    assert(bin:contains(added) and f.source:contains(selected))
+end)
+
+test("protected existing contents remain blocked even if the public review is altered", function()
+    local f = fixture(2)
+    local bin = container("protected uninspected bin", 4)
+    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local kept = item(bin, "Base.Kept"); kept.protected = true
+    local selected = item(f.source)
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    local review = assert(f.jobs:reviewBin())
+    assert(not review.canApprove and #review.skipped == 1 and #review.moves == 0)
+    review.canApprove, review.skipped = true, {}
+    assert(not f.jobs:approveBin(review))
+    assert(f.jobs:status().state == "needs_review" and #f.transfers == 0 and #f.deletions == 0)
+    assert(f.jobs:rejectBin(review))
+    assert(finish(f).state == "finished_with_skips" and bin:contains(kept) and f.source:contains(selected))
+end)
+
+test("contents that become protected after review require another decision", function()
+    local f = fixture(2)
+    local bin = container("changing protected review", 4)
+    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local existing = item(bin, "Base.Existing")
+    item(f.source)
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    local review = assert(f.jobs:reviewBin())
+    assert(review.canApprove and #review.moves == 1)
+    existing.protected = true
+    assert(not f.jobs:approveBin(review))
+    local fresh = assert(f.jobs:reviewBin())
+    assert(not fresh.canApprove and #fresh.skipped == 1)
+    assert(f.jobs:cancel() and finish(f).state == "cancelled")
+    assert(bin:contains(existing) and #f.transfers == 0 and #f.deletions == 0)
+end)
+
+test("rejecting a reviewed bin inspects another without discarding source selection", function()
+    local f = fixture(2)
+    local first, second = container("first uninspected bin", 4), container("second uninspected bin", 4)
+    first.trash, second.trash, first.uninspected, second.uninspected = true, true, true, true
+    f.bins = {first, second}
+    f:addSquare(square(first.position, 10, 0)); f:addSquare(square(second.position, 20, 0))
+    local retained = item(first, "Base.ExistingFirst")
+    item(f.source, "Base.Selected")
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    local declined = assert(f.jobs:reviewBin())
+    assert(declined.bin.name == first.name and #f.transfers == 0)
+    assert(f.jobs:rejectBin(declined))
+    awaitState(f, "needs_review")
+    local accepted = assert(f.jobs:reviewBin())
+    assert(accepted.bin.name == second.name and accepted.canApprove and #f.transfers == 0)
+    assert(f.jobs:approveBin(accepted))
+    local status = finish(f)
+    assert(status.done == 1 and status.skipped == 1 and first:contains(retained))
+    assert(#f.deletions == 1 and f.deletions[1].bin == second)
+    assert(f.approaches[first.position] == 1, "The rejected bin must not be selected again by the current job")
+end)
+
+test("moving away from the bin blocks approval without losing the paused job", function()
+    local f = fixture(2)
+    local bin = container("reachable review bin", 4)
+    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local selected = item(f.source)
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    local review = assert(f.jobs:reviewBin())
+    f.position = "source"
+    assert(not f.jobs:approveBin(review))
+    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected) and #f.deletions == 0)
+    f.position = bin.position
+    assert(f.jobs:approveBin(review))
+    assert(finish(f).done == 1)
+end)
+
+test("cancelling a paused review invalidates its approval and rejection tokens", function()
+    local f = fixture(2)
+    local bin = container("cancelled review bin", 4)
+    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local selected = item(f.source)
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    local review = assert(f.jobs:reviewBin())
+    assert(f.jobs:cancel() and f.jobs:status().state == "cancelling")
+    assert(not f.jobs:approveBin(review) and not f.jobs:rejectBin(review))
+    assert(finish(f).state == "cancelled")
+    assert(not f.jobs:reviewBin() and not f.jobs:approveBin(review) and not f.jobs:rejectBin(review))
+    assert(f.source:contains(selected) and #f.transfers == 0 and #f.deletions == 0)
+end)
+
+test("waiting for an empty multiplayer inspection never substitutes for explicit approval", function()
+    local f = fixture(2); f.client = true
+    local bin = container("unconfirmed multiplayer bin", 4)
+    bin.trash, bin.uninspected, bin.explored, f.bins = true, true, false, {bin}
+    local selected = item(f.source)
+    start(f, request("trash"))
+    for _ = 1, 30 do tick(f); if bin.requested then break end end
+    assert(bin.requested == 1 and not bin.explored and f.jobs:status().state == "running")
+    for _ = 1, 10 do tick(f) end
+    assert(f.jobs:status().state == "running" and #f.transfers == 0)
+    awaitState(f, "needs_review")
+    assert(f.now - bin.lastRequestAt >= 3000 and not bin.explored)
+    local review = assert(f.jobs:reviewBin())
+    local uncertainty = false
+    for _, warning in ipairs(review.warnings) do
+        if warning:find("Empty replies", 1, true) and warning:find("not acknowledged", 1, true) then uncertainty = true end
+    end
+    assert(uncertainty and #review.moves == 0 and review.canApprove)
+    for _ = 1, 60 do tick(f) end
+    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected))
+    assert(#f.transfers == 0 and #f.deletions == 0)
+    assert(f.jobs:cancel() and finish(f).state == "cancelled")
+end)
+
+test("the normal character limit forces four trips despite a fifty-weight inventory admission limit", function()
+    local f = fixture(50)
+    f.normalLimit = 11
+    local gear = item(f.inventory, "Base.PersonalGear", 3)
+    for _ = 1, 8 do item(f.source, "Base.Plank", 3) end
+    local peak, pickups = 0, 0
+    f.onTransfer = function(op)
+        local mass = f.world:carrying()
+        peak = math.max(peak, mass)
+        if not op.source.owned and op.destination.owned then
+            pickups = pickups + 1
+            assert(mass <= 11, "Automatic pickup exceeded the normal character limit")
+        end
+    end
+    start(f)
+    local status = finish(f)
+    assert(status.done == 8 and status.skipped == 0 and pickups == 8)
+    assert(peak == 9 and f.inventory:contains(gear) and #f.inventory.items == 1)
+    local trips = 0
+    for _, name in ipairs(f.visits) do if name == f.destination.position then trips = trips + 1 end end
+    assert(trips == 4, "Three weight of gear leaves room for two three-weight planks per normal trip")
+end)
+
+test("a weighted carried bag admits an item that cannot fit the character limit at full weight", function()
+    local f = fixture(50)
+    f.normalLimit = 11
+    item(f.inventory, "Base.PersonalGear", 3)
+    local backpack = f:carryContainer(container("equipped backpack", 50), 0.2)
+    local selected = item(f.source, "Base.HeavySupply", 20)
+    function f.world:destinations(input)
+        if input.destination.kind == "inventory" then return {f.inventory, backpack} end
+        return {f.destination}
+    end
+    local input = request("inventory")
+    local plan = start(f, input)
+    assert(#plan.moves == 1 and #plan.skipped == 0)
+    local status = finish(f)
+    local mass = f.world:carrying()
+    assert(status.done == 1 and backpack:contains(selected) and not f.inventory:contains(selected))
+    assert(mass == 7, "Three weight of gear plus twenty weight reduced by eighty percent is seven")
+end)
+
+test("preview reserves one character mass allowance across different carried bags", function()
+    local f = fixture(50)
+    f.normalLimit = 3
+    local first = f:carryContainer(container("first pouch", 2), 1)
+    local second = f:carryContainer(container("second pouch", 2), 1)
+    item(f.source, "Base.First", 2); item(f.source, "Base.Second", 2)
+    function f.world:destinations(input)
+        if input.destination.kind == "inventory" then return {first, second} end
+        return {f.destination}
+    end
+    local plan = start(f, request("inventory"))
+    assert(#plan.moves == 1 and #plan.skipped == 1, "Separate bag capacities must not create separate character limits")
+    local status = finish(f)
+    assert(status.done == 1 and status.skipped == 1 and #f.source.items == 1)
+    local mass = f.world:carrying()
+    assert(mass == 2 and #first.items + #second.items == 1)
+end)
+
+test("weight-reducing carried rearrangement remains allowed while already overloaded", function()
+    local f = fixture(50)
+    f.normalLimit = 5
+    local selected = item(f.inventory, "Base.Selected", 8)
+    local retained = item(f.inventory, "Base.PersonalGear", 2)
+    local backpack = f:carryContainer(container("reducing backpack", 50), 0.25)
+    f.sources = {f.inventory}
+    local input = request("container", backpack)
+    input.scope, input.filter = "inventory", {all = false, ids = {}, types = {"Base.Selected"}}
+    start(f, input)
+    local status = finish(f)
+    local mass = f.world:carrying()
+    assert(status.done == 1 and status.skipped == 0 and backpack:contains(selected))
+    assert(f.inventory:contains(retained) and mass == 4, "Moving eight weight into a seventy-five-percent reducing bag lowers ten to four")
+end)
+
+test("a changed normal limit is checked before the next pickup", function()
+    local f = fixture(50)
+    f.normalLimit = 11
+    item(f.inventory, "Base.PersonalGear", 3)
+    for _ = 1, 3 do item(f.source, "Base.Plank", 3) end
+    local picked = 0
+    f.onTransfer = function(op)
+        if not op.source.owned and op.destination.owned then
+            picked = picked + 1
+            if picked == 1 then f.normalLimit = 5 end
+        elseif op.source.owned and not op.destination.owned then f.normalLimit = 11 end
+    end
+    start(f)
+    local status = finish(f)
+    assert(status.done == 3 and status.skipped == 0)
+    assert(f.transfers[1].destination == f.inventory and f.transfers[2].destination == f.destination,
+        "A lower limit after the first pickup must cause delivery before another pickup")
+end)
+
+test("an item beyond normal carrying capacity stays at its source with a reason", function()
+    local f = fixture(50)
+    f.normalLimit = 11
+    local retained = item(f.inventory, "Base.PersonalGear", 3)
+    local heavy = item(f.source, "Base.Oversized", 9)
+    local plan = start(f, request("inventory"))
+    assert(#plan.moves == 0 and #plan.skipped == 1 and plan.skipped[1].reason:find("carrying limit", 1, true))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 0 and status.skipped == 1)
+    assert(f.source:contains(heavy) and f.inventory:contains(retained) and #f.transfers == 0)
+end)
+
+test("nil cannot approve or reject a bin before a review token is issued", function()
+    local f = fixture(2)
+    local bin = container("unissued bin review", 4)
+    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local selected = item(f.source)
+    start(f, request("trash"))
+    awaitState(f, "needs_review")
+    assert(not f.jobs:approveBin(nil) and not f.jobs:rejectBin(nil))
+    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected))
+    assert(#f.transfers == 0 and #f.deletions == 0)
+    local review = assert(f.jobs:reviewBin())
+    assert(not f.jobs:approveBin(nil) and not f.jobs:rejectBin(nil))
+    assert(f.jobs:approveBin(review) and finish(f).done == 1)
 end)
 
 print("PASS " .. tests .. " Jobs integration scenarios")
