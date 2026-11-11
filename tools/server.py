@@ -74,19 +74,19 @@ def stop(evidence: Path) -> int:
     raise RuntimeError("The owned server did not stop before the cleanup deadline")
 
 
-def launch(game: Path, evidence: Path, memory_cache: bool = False) -> int:
+def launch(game: Path, evidence: Path, memory_cache: bool = False, vanilla: bool = False) -> int:
     if not memory_cache:
-        return launch_in_cache(game, evidence, None)
+        return launch_in_cache(game, evidence, None, vanilla)
     with tempfile.TemporaryDirectory(prefix="lootbox-server-", dir="/dev/shm") as temporary:
         try:
-            return launch_in_cache(game, evidence, temporary)
+            return launch_in_cache(game, evidence, temporary, vanilla)
         finally:
             cache = evidence / "server-cache"
             if cache.is_symlink() and os.readlink(cache) == temporary:
                 cache.unlink()
 
 
-def launch_in_cache(game: Path, evidence: Path, temporary: str | None) -> int:
+def launch_in_cache(game: Path, evidence: Path, temporary: str | None, vanilla: bool = False) -> int:
     game = game.expanduser().resolve()
     if not (game / "projectzomboid.jar").is_file() or not (game / "jre64/bin/java").is_file():
         raise ValueError("--game must contain projectzomboid.jar and jre64/bin/java")
@@ -96,12 +96,13 @@ def launch_in_cache(game: Path, evidence: Path, temporary: str | None) -> int:
     cache = evidence / "server-cache"
     if temporary is not None:
         cache.symlink_to(temporary, target_is_directory=True)
-    with zipfile.ZipFile(archive) as package:
-        for name in package.namelist():
-            relative = Path(name).relative_to("Contents")
-            target = cache / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(package.read(name))
+    if not vanilla:
+        with zipfile.ZipFile(archive) as package:
+            for name in package.namelist():
+                relative = Path(name).relative_to("Contents")
+                target = cache / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(package.read(name))
     nonclient = [path for path in (cache / "mods").rglob("*.lua") if "/media/lua/client/" not in path.as_posix()]
     if nonclient:
         raise ValueError("The staged mod contains executable Lua outside client")
@@ -110,8 +111,9 @@ def launch_in_cache(game: Path, evidence: Path, temporary: str | None) -> int:
     port, udp_port = free_udp_port(), free_udp_port()
     while port == udp_port:
         udp_port = free_udp_port()
+    native_mods = "" if vanilla else "LootBox"
     (server_dir / "LootBoxProbe.ini").write_text(
-        f"DefaultPort={port}\nUDPPort={udp_port}\nMods=LootBox\nWorkshopItems=\n"
+        f"DefaultPort={port}\nUDPPort={udp_port}\nMods={native_mods}\nWorkshopItems=\n"
         "DoLuaChecksum=true\nPublic=false\nUPnP=false\nOpen=true\nAutoCreateUserInWhiteList=true\n"
         "MaxPlayers=4\nPVP=false\nPauseEmpty=true\nMap=Muldraugh, KY\nRCONPassword=\n"
         "Password=\nTrashDeleteAll=true\nItemNumbersLimitPerContainer=0\n", encoding="utf-8")
@@ -142,7 +144,8 @@ def launch_in_cache(game: Path, evidence: Path, temporary: str | None) -> int:
                    "ownerScript": sys.argv[0],
                    "evidence": str(evidence), "cache": str(cache), "game": str(game),
                    "host": "127.0.0.1", "port": port, "udpPort": udp_port,
-                   "console": str(console), "modId": "LootBox", "serverModLuaFiles": len(nonclient),
+                   "console": str(console), "modId": None if vanilla else "LootBox", "serverModLuaFiles": len(nonclient),
+                   "vanilla": vanilla,
                    "packageManifest": str(evidence / "package/manifest.json")}
         if temporary is not None:
             session["temporaryCache"] = temporary
@@ -192,13 +195,14 @@ if __name__ == "__main__":
     parser.add_argument("--game", type=Path)
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--memory-cache", action="store_true", help="Use an owned temporary /dev/shm cache, removed on stop")
+    parser.add_argument("--vanilla", action="store_true", help="Use no installed or enabled mods on the server, retaining normal checksum enforcement")
     args = parser.parse_args()
     evidence = args.evidence.expanduser().resolve()
     if args.command == "launch":
         if args.game is None:
             parser.error("launch requires --game")
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-        raise SystemExit(launch(args.game, evidence, args.memory_cache))
+        raise SystemExit(launch(args.game, evidence, args.memory_cache, args.vanilla))
     if args.command == "stop":
         raise SystemExit(stop(evidence))
     session = json.loads((evidence / "server-session.json").read_text())

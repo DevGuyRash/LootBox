@@ -2,6 +2,7 @@
 """Launch the packaged mod in an owned, isolated Linux game session."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,7 @@ import zipfile
 from build import build
 
 
-def run(game: Path, evidence: Path, resume: bool = False) -> int:
+def run(game: Path, evidence: Path, resume: bool = False, luabuddy_runtime: Path | None = None) -> int:
     game, evidence = game.resolve(), evidence.expanduser().resolve()
     if not (game / "projectzomboid.jar").is_file() or not (game / "jre64/bin/java").is_file():
         raise ValueError("--game must contain projectzomboid.jar and jre64/bin/java")
@@ -49,6 +50,26 @@ def run(game: Path, evidence: Path, resume: bool = False) -> int:
         (cache / "options.ini").write_text(
             "version=7\nwidth=1280\nheight=900\nfullScreen=false\nborderless=false\n"
             "tutorialDone=true\ndoneNewSaveFolder=true\n", encoding="utf-8")
+    adapter = None
+    if luabuddy_runtime is not None:
+        runtime = luabuddy_runtime.expanduser().resolve()
+        if not runtime.is_file() or any(character in str(runtime) for character in "=\n\r"):
+            raise ValueError("--luabuddy-runtime must identify an installed native runtime")
+        runtime_dir = evidence / "adapter"
+        runtime_dir.mkdir(exist_ok=True)
+        snapshot = runtime_dir / runtime.name
+        digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+        if snapshot.exists() and hashlib.sha256(snapshot.read_bytes()).hexdigest() != digest:
+            raise ValueError("The runtime changed; use a fresh evidence directory")
+        if not snapshot.exists():
+            shutil.copy2(runtime, snapshot)
+        profiles = runtime_dir / "profiles"
+        templates = runtime_dir / "templates"
+        profiles.mkdir(exist_ok=True)
+        templates.mkdir(exist_ok=True)
+        (profiles / "LootBox.properties").write_text("id=LootBox\n", encoding="ascii")
+        adapter = {"source": str(runtime), "snapshot": str(snapshot), "sha256": digest,
+                   "profiles": str(profiles), "templates": str(templates)}
     processes = []
     try:
         with (evidence / f"display-{launch}.log").open("wb") as display_log, (evidence / f"client-{launch}.log").open("wb") as client_log:
@@ -74,11 +95,15 @@ def run(game: Path, evidence: Path, resume: bool = False) -> int:
                        "-Dzomboid.steam=0", "-Djava.library.path=.:natives", "-cp", ".:projectzomboid.jar",
                        "zombie.gameStates.MainScreenState", f"-cachedir={cache}", "-nosteam", "-nosound", "-novoip",
                        "-modfolders", "mods"]
+            if adapter is not None:
+                command[1:1] = [f"-agentpath:{adapter['snapshot']}", f"-Dluabuddy.config={adapter['profiles']}",
+                                f"-Dluabuddy.templates={adapter['templates']}"]
             client = subprocess.Popen(command, cwd=game, env=env, stdin=subprocess.DEVNULL,
                                       stdout=client_log, stderr=subprocess.STDOUT)
             processes.append(client)
             state = {"ownerPid": os.getpid(), "clientPid": client.pid, "displayPid": display.pid,
-                     "display": display_name, "cache": str(cache), "game": str(game), "launch": launch}
+                     "display": display_name, "cache": str(cache), "game": str(game), "launch": launch,
+                     "adapter": adapter}
             (evidence / "session.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
             print(json.dumps(state), flush=True)
             return client.wait()
@@ -98,6 +123,7 @@ if __name__ == "__main__":
     parser.add_argument("--game", required=True, type=Path)
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--resume", action="store_true", help="Restart a stopped owned session, retaining its disposable saves/preferences")
+    parser.add_argument("--luabuddy-runtime", type=Path, help="Snapshot an installed LuaBuddy runtime and use an isolated ID-only local-mod profile")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    raise SystemExit(run(args.game, args.evidence, args.resume))
+    raise SystemExit(run(args.game, args.evidence, args.resume, args.luabuddy_runtime))

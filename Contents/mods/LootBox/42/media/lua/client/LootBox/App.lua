@@ -3,18 +3,46 @@ local Catalog = require "LootBox/Catalog"
 local Store = require "LootBox/Store"
 local World = require "LootBox/World"
 local Jobs = require "LootBox/Jobs"
+local Setups = require "LootBox/Setups"
 
 local App = {}
 local Instance = {}
 Instance.__index = Instance
 local sessions, definitions, graph, loadError = {}, nil, nil, nil
 local nextCategoryId = 1
+local preferences, preferencesError
 
 local function copy(value)
     if type(value) ~= "table" then return value end
     local result = {}
     for key, entry in pairs(value) do result[key] = copy(entry) end
     return result
+end
+
+function App.getPreferences()
+    if not preferences then
+        local data, err = Store.load("LootBox/preferences")
+        preferences, preferencesError = Setups.preferences(data or {})
+        preferencesError = err or preferencesError
+        if not preferences then preferences = copy(Setups.defaults) end
+    end
+    return copy(preferences), preferencesError
+end
+
+function App.setPreferences(patch)
+    local candidate, err = App.getPreferences()
+    if err then return nil, err end
+    if type(patch) ~= "table" then return nil, "Choose interface preferences to change" end
+    for key, value in pairs(patch) do
+        if Setups.defaults[key] == nil or type(value) ~= "boolean" then
+            return nil, "Unknown or invalid interface preference: " .. tostring(key)
+        end
+        candidate[key] = value
+    end
+    local ok
+    ok, err = Store.save("LootBox/preferences", candidate)
+    if ok then preferences = candidate end
+    return ok, err
 end
 
 local function initialize()
@@ -283,6 +311,114 @@ function Instance:setChecklist(filter)
     if not ok then self.state.checklist = old end
     return ok, err
 end
+
+local function setupDocument(instance)
+    if not instance.setups then
+        local data, err = Store.load(instance.path .. "/setups")
+        instance.setups, instance.setupsError = Setups.document(data or {})
+        instance.setupsError = err or instance.setupsError
+        if not instance.setups then instance.setups = { nextId = 1, presets = {} } end
+    end
+    return instance.setups, instance.setupsError
+end
+
+local function saveSetups(instance, candidate)
+    local ok, err = Store.save(instance.path .. "/setups", candidate)
+    if ok then instance.setups = candidate end
+    return ok, err
+end
+
+function Instance:getSetups()
+    local data, err = setupDocument(self)
+    return { presets = copy(data.presets), lastSetup = copy(data.lastSetup) }, err
+end
+
+function Instance:saveSetup(name, request, id)
+    local data, err = setupDocument(self)
+    if err then return nil, err end
+    local candidate = copy(data)
+    id, err = Setups.add(candidate, name, request, id)
+    if not id then return nil, err end
+    local ok
+    ok, err = saveSetups(self, candidate)
+    return ok and id or nil, err
+end
+
+function Instance:deleteSetup(id)
+    local data, err = setupDocument(self)
+    if err then return nil, err end
+    local candidate, found = copy(data), false
+    for index, preset in ipairs(candidate.presets) do
+        if preset.id == id then table.remove(candidate.presets, index); found = true; break end
+    end
+    if not found then return nil, "Saved setup is no longer available" end
+    return saveSetups(self, candidate)
+end
+
+function Instance:rememberSetup(request)
+    local options, err = App.getPreferences()
+    if err then return nil, err end
+    if not options.rememberLastSetup then return true end
+    local data
+    data, err = setupDocument(self)
+    if err then return nil, err end
+    local setup
+    setup, err = Setups.request(request)
+    if not setup then return nil, err end
+    local candidate = copy(data)
+    candidate.lastSetup = setup
+    return saveSetups(self, candidate)
+end
+
+function Instance:resolveSetup(setup, context)
+    local request, err = Setups.request(setup)
+    if not request then return nil, err end
+    local catalog
+    catalog, err = App.catalog()
+    if not catalog then return nil, err end
+    local available = {}
+    for _, category in ipairs(catalog.categories) do available[category.id] = true end
+    for _, ids in ipairs({ request.filter.ids, request.sourceLabels, request.destination.labels }) do
+        for _, id in ipairs(ids) do
+            if not available[id] then return nil, "Saved setup category is unavailable: " .. id end
+        end
+    end
+    context = context or {}
+    if request.scope == "container" then
+        request.sourceContainer = context.sourceContainer or context.container
+        if not request.sourceContainer then return nil, "Right-click a source container to use this saved setup" end
+    end
+    if request.destination.kind == "container" then
+        request.destination.ref = context.targetContainer or context.container
+        if not request.destination.ref then return nil, "Right-click a destination container to use this saved setup" end
+    elseif request.destination.kind == "floor" then
+        request.destination.ref = context.square or (self.player.getSquare and self.player:getSquare())
+            or (self.player.getCurrentSquare and self.player:getCurrentSquare())
+        if not request.destination.ref then return nil, "Choose a loaded floor location for this saved setup" end
+    end
+    return request
+end
+
+function Instance:loadSetup(id, context)
+    local data, err = setupDocument(self)
+    if err then return nil, err end
+    for _, preset in ipairs(data.presets) do
+        if preset.id == id then return self:resolveSetup(preset.setup, context) end
+    end
+    return nil, "Saved setup is no longer available"
+end
+
+function Instance:lastSetup(context)
+    local options, err = App.getPreferences()
+    if err then return nil, err end
+    if not options.rememberLastSetup then return nil end
+    local data
+    data, err = setupDocument(self)
+    if err then return nil, err end
+    if not data.lastSetup then return nil end
+    return self:resolveSetup(data.lastSetup, context)
+end
+
 function Instance:knownVehicles() return self.world:knownVehicles() end
 function Instance:currentContainer()
     local loot = getPlayerLoot(self.player:getPlayerNum())
@@ -318,6 +454,7 @@ end
 function App.reset()
     for _, instance in pairs(sessions) do instance:cancel() end
     sessions, definitions, graph, loadError = {}, nil, nil, nil
+    preferences, preferencesError = nil, nil
 end
 
 if Events then
