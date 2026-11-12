@@ -311,4 +311,41 @@ test("matching modes are bounded and invalid updates preserve an existing setup"
     end
 end)
 
+test("Smart Take unwanted exclusion survives named and remembered setup roundtrips", function(app)
+    local setup = request("container", "inventory")
+    setup.excludeUnwanted, setup.sourceLabels = true, {}
+    local id = assert(app:saveSetup("Smart Take All", setup))
+    assert(app:rememberSetup(setup))
+    App.reset(); app = assert(App.get(0))
+    local source = {id = "selected-container"}
+    local named = assert(app:loadSetup(id, {container = source}))
+    local remembered = assert(app:lastSetup({container = source}))
+    assert(named.excludeUnwanted == true and remembered.excludeUnwanted == true)
+    assert(named.sourceContainer == source and remembered.sourceContainer == source)
+    assert(named.destination.kind == "inventory" and remembered.destination.kind == "inventory")
+end)
+
+test("unwanted exclusion accepts booleans and rejects invalid setup updates", function(app)
+    local setup = request()
+    local id = assert(app:saveSetup("Existing workflow", setup))
+    assert(app:loadSetup(id, {}).excludeUnwanted == false)
+    for _, value in ipairs({"yes", 1, {}}) do
+        setup.excludeUnwanted = value
+        assert(not app:saveSetup("Invalid unwanted policy", setup, id))
+        assert(app:getSetups().presets[1].name == "Existing workflow")
+        assert(app:loadSetup(id, {}).excludeUnwanted == false)
+    end
+    setup.excludeUnwanted = false
+    assert(app:saveSetup("Existing workflow", setup, id))
+end)
+
+test("Condense defaults keep unequipped and nested loot bags untouched and choices persist", function()
+    local preferences = assert(App.getPreferences())
+    assert(preferences.condenseButton == true)
+    assert(preferences.condenseRebalance == false and preferences.condenseUseUnequipped == false and preferences.condenseNested == false)
+    assert(App.setPreferences({condenseButton = false, condenseRebalance = true, condenseUseUnequipped = true, condenseNested = true}))
+    App.reset(); preferences = assert(App.getPreferences())
+    assert(not preferences.condenseButton and preferences.condenseRebalance and preferences.condenseUseUnequipped and preferences.condenseNested)
+end)
+
 print(passed .. " setup and preference integration cases passed (explicit world/action and native file doubles)")

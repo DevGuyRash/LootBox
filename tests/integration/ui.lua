@@ -830,7 +830,7 @@ test("Settings keeps every preference reachable above Save across native font si
         local viewport, choices = window.preferenceViewport, window.preferenceSelection
         local rows, save = viewport.items
         for _, widget in ipairs(window.body.controls) do if widget.text == "Save preferences" then save = widget end end
-        assert(#rows == 15 and save and viewport.height >= rowHeight)
+        assert(#rows == 20 and save and viewport.height >= rowHeight)
         assert(viewport.y + viewport.height < save.y)
         local preferences, sections, lastY = 0, 0, 0
         for _, row in ipairs(rows) do
@@ -843,7 +843,7 @@ test("Settings keeps every preference reachable above Save across native font si
             else sections = sections + 1; assert(row.item.selectable == false) end
             lastY = lastY + row.height
         end
-        assert(preferences == 13 and sections == 2)
+        assert(preferences == 17 and sections == 3)
         viewport.callback(viewport.target, rows[1].item)
         assert(choices.contextMenus == true and viewport.selected == 0)
         viewport.callback(viewport.target, rows[2].item)
@@ -869,7 +869,9 @@ test("Settings changes only persist through its fixed Save control", function(f)
     local window = managerWindow(f, "settings")
     local viewport, choices = window.preferenceViewport, window.preferenceSelection
     viewport.callback(viewport.target, viewport.items[2].item)
-    viewport.callback(viewport.target, viewport.items[#viewport.items].item)
+    for _, row in ipairs(viewport.items) do
+        if row.item.key == "showTips" then viewport.callback(viewport.target, row.item); break end
+    end
     resize(window, 760, 710)
     viewport:onMouseWheel(1000)
     assert(saves == nil and f.preferences.contextMenus and f.preferences.showTips)
@@ -877,7 +879,7 @@ test("Settings changes only persist through its fixed Save control", function(f)
     assert(saves.contextMenus == false and saves.showTips == false)
     local count = 0
     for _, value in pairs(saves) do assert(type(value) == "boolean"); count = count + 1 end
-    assert(count == 13 and window.preferenceSelection == choices)
+    assert(count == 17 and window.preferenceSelection == choices)
     assert(window.messagePanel.text:find("Preferences saved", 1, true) and not f.cancelled and f.starts == 0)
     App.setPreferences = previous
 end)
@@ -1326,6 +1328,44 @@ test("a quiet quick action with no planned moves does not require an empty appro
     f.plan.moves = {}
     assert(UI.quickAction(0, {}, request()) == true)
     assert(f.starts == 1 and not f.review and not f.progress)
+end)
+
+test("Smart Take quick requests and Adjust setup retain the unwanted-item exclusion", function(f)
+    local setup = request("inventory")
+    setup.excludeUnwanted = true
+    UI.quickAction(0, {}, setup)
+    assert(f.reviewed.excludeUnwanted == true and f.review.request.excludeUnwanted == true)
+    local window = reviewWindow(f, f.plan, {}, setup)
+    press(window, "Adjust setup")
+    assert(f.opened.context.request.excludeUnwanted == true)
+    local full = managerWindow(f, "compose", f.opened.context)
+    assert(full:readRequest().excludeUnwanted == true)
+    press(full.body, "Preview job")
+    assert(f.reviewed.excludeUnwanted == true)
+end)
+
+test("Condense follows the ordinary review setting and can start quietly", function(f)
+    f.plan.condense = {mode = "pack", eligible = 1, bagCount = 1, estimatedSaving = 2.7}
+    f.app.previewCondense = function() f.condensePreviews = (f.condensePreviews or 0) + 1; return f.plan end
+    local preview = UI.condense(2)
+    assert(preview.context.condense and preview.playerIndex == 2 and preview.plan == f.plan)
+    assert(preview.request.destination.kind == "condense" and f.starts == 0)
+    f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
+    assert(UI.condense(2) == true and f.starts == 1 and f.condensePreviews == 2 and not f.progress)
+    assert(preview.closed and UI.quickWindows[2] == nil)
+end)
+
+test("Condense review starts its reviewed plan and opens its settings section", function(f)
+    f.plan.condense = {mode = "rebalance", eligible = 4, bagCount = 2, beforeWeight = 10, estimatedSaving = 2.7,
+        useUnequipped = false, nested = false}
+    local setup = request("condense")
+    local window = reviewWindow(f, f.plan, {condense = true}, setup)
+    assert(window.runButton.text == "Start Condense" and window.runButton.enabled)
+    press(window, "Start Condense")
+    assert(f.starts == 1 and window.removed)
+    window = reviewWindow(f, f.plan, {condense = true}, setup)
+    press(window, "Condense settings")
+    assert(f.opened.mode == "settings" and f.opened.context.settingsSection == "condense" and f.starts == 1)
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")

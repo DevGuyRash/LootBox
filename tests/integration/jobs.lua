@@ -2503,4 +2503,199 @@ test("an explicit main-inventory unpack does not prepare another bag or queue a 
     for _, op in ipairs(f.operations) do assert(op.kind ~= "gear") end
 end)
 
+local function condenseFixture()
+    local f = fixture(50)
+    f.world.player = f.player
+    function f.world:carryFactor(value) return value.carryFactor or 1 end
+    function f.inventory:isRemoveItemAllowed() return true end
+    function f.player:isEquipped(value) return value.equipped == true end
+    function f:addBag(name, capacity, factor, equipped, parent)
+        parent = parent or self.inventory
+        local inside = self:carryContainer(container(name, capacity), factor)
+        local value = item(parent, "Test." .. name, 0)
+        value.equipped = equipped ~= false
+        function value:IsInventoryContainer() return true end
+        function value:getInventory() return inside end
+        function value:getMaxItemSize() return self.maximumItem or 0 end
+        function value:getAttachedSlot() return -1 end
+        function inside:isRemoveItemAllowed() return true end
+        return inside, value
+    end
+    function f:startCondense(options)
+        local plan, err = self.jobs:previewCondense(options)
+        assert(plan, err)
+        assert(self.jobs:start(plan))
+        return plan
+    end
+    return f
+end
+
+test("Condense packs heavy loose items into the strongest useful bags first", function()
+    local f = condenseFixture()
+    local strong = f:addBag("Strong", 8, 0.1)
+    local weak = f:addBag("Weak", 8, 0.5)
+    local light = item(f.inventory, "Test.Light", 2)
+    local medium = item(f.inventory, "Test.Medium", 4)
+    local heavy = item(f.inventory, "Test.Heavy", 6)
+    f:startCondense()
+    local status = finish(f)
+    assert(status.state == "finished" and #f.transfers == 3 and f.transfers[1].item == heavy)
+    assert(strong:contains(heavy) and strong:contains(light) and weak:contains(medium))
+    assert(math.abs(f.world:carrying() - 2.8) < 0.0001 and math.abs(status.condense.saved - 9.2) < 0.0001)
+    f:startCondense()
+    assert(finish(f).state == "finished" and #f.transfers == 3)
+end)
+
+test("Condense default leaves bag contents and protected loose items in place", function()
+    local f = condenseFixture()
+    local strong = f:addBag("Strong", 8, 0.1)
+    local weak = f:addBag("Weak", 8, 0.5)
+    local existing = item(weak, "Test.Existing", 4)
+    local loose = item(f.inventory, "Test.Loose", 6)
+    local protected = item(f.inventory, "Test.Keep", 1)
+    protected.protected = true
+    f:startCondense()
+    assert(finish(f).state == "finished" and #f.transfers == 1)
+    assert(strong:contains(loose) and weak:contains(existing) and f.inventory:contains(protected))
+end)
+
+test("Condense optimization resolves fragmentation through temporary main storage", function()
+    local f = condenseFixture()
+    local strong = f:addBag("Strong", 10, 0.1)
+    local weak = f:addBag("Weak", 10, 0.5)
+    local nine = item(strong, "Test.Nine", 9)
+    local eight = item(weak, "Test.Eight", 8)
+    local two = item(weak, "Test.Two", 2)
+    f:startCondense({rebalance = true})
+    local status = finish(f)
+    assert(status.state == "finished" and #f.transfers == 4 and status.condense.buffered == 0)
+    assert(strong:contains(eight) and strong:contains(two) and weak:contains(nine))
+    assert(math.abs(f.world:carrying() - 5.5) < 0.0001 and math.abs(status.condense.saved - 0.4) < 0.0001)
+    assert(f.transfers[1].item == nine and f.transfers[1].destination == f.inventory)
+end)
+
+test("Condense avoids equal-weight full-bag exchanges and respects temporary hard capacity", function()
+    local equal = condenseFixture()
+    local strong = equal:addBag("Strong", 10, 0.1)
+    local weak = equal:addBag("Weak", 10, 0.5)
+    item(strong, "Test.TenA", 10); item(weak, "Test.TenB", 10)
+    equal:startCondense({rebalance = true})
+    assert(finish(equal).state == "finished" and #equal.transfers == 0)
+    local f = condenseFixture()
+    strong = f:addBag("Strong", 10, 0.1)
+    weak = f:addBag("Weak", 10, 0.5)
+    item(strong, "Test.Nine", 9); item(weak, "Test.Eight", 8); item(weak, "Test.Two", 2)
+    f.hardLimit = 14
+    f:startCondense({rebalance = true})
+    local blocked = finish(f)
+    assert(blocked.state == "finished" and #f.transfers == 0 and blocked.reason:find("temporary", 1, true))
+    f.hardLimit = 22
+    f:startCondense({rebalance = true})
+    assert(finish(f).state == "finished" and math.abs(f.world:carrying() - 5.5) < 0.0001)
+end)
+
+test("Condense uses unequipped loot bags only when enabled and honors native item size", function()
+    local f = condenseFixture()
+    local loot, bag = f:addBag("LootBag", 8, 1, false)
+    local selected = item(f.inventory, "Test.Loose", 4)
+    f:startCondense()
+    assert(finish(f).state == "finished" and #f.transfers == 0 and f.inventory:contains(selected))
+    bag.maximumItem = 3
+    f:startCondense({useUnequipped = true})
+    assert(finish(f).state == "finished" and #f.transfers == 0)
+    bag.maximumItem = 4
+    f:startCondense({useUnequipped = true})
+    assert(finish(f).state == "finished" and #f.transfers == 1 and loot:contains(selected))
+    assert(f.world:carrying() == 4 and not bag.equipped)
+end)
+
+test("Condense nested opt-in retains enclosing bag capacity budgets", function()
+    local f = condenseFixture()
+    local outer = f:addBag("Outer", 5, 0.2)
+    local inner = f:addBag("Inner", 10, 0.2, false, outer)
+    local existing = item(inner, "Test.Existing", 4)
+    local selected = item(f.inventory, "Test.Loose", 3)
+    function outer:isItemAllowed() return false end
+    function outer:getCapacityWeight() return inner:getCapacityWeight() end
+    f:startCondense()
+    assert(finish(f).state == "finished" and #f.transfers == 0)
+    f:startCondense({nested = true})
+    assert(finish(f).state == "finished" and #f.transfers == 0)
+    outer.capacity = 7
+    f:startCondense({nested = true})
+    assert(finish(f).state == "finished" and #f.transfers == 1 and inner:contains(selected) and inner:contains(existing))
+    assert(outer:getCapacityWeight() == 7 and math.abs(f.world:carrying() - 1.4) < 0.0001)
+end)
+
+test("Condense native failure after buffering restores items before trying another arrangement", function()
+    local f = condenseFixture()
+    local strong = f:addBag("Strong", 10, 0.1)
+    local weak = f:addBag("Weak", 10, 0.5)
+    local nine = item(strong, "Test.Nine", 9)
+    local eight = item(weak, "Test.Eight", 8)
+    local two = item(weak, "Test.Two", 2)
+    local failed, restored = false, false
+    function f.onTransfer(op)
+        if op.item == nine and op.destination == f.inventory and not failed then
+            failed, f.rejectOnce = true, "Native destination changed"
+        elseif failed and op.item == nine and op.destination == strong then restored = true end
+    end
+    f:startCondense({rebalance = true})
+    local status = finish(f)
+    assert(status.state == "finished" and failed and restored and status.condense.buffered == 0)
+    assert(strong:contains(eight) and strong:contains(two) and weak:contains(nine))
+    assert(math.abs(f.world:carrying() - 5.5) < 0.0001)
+end)
+
+test("Condense Pause and Resume settle an observed transfer exactly once", function()
+    local f = condenseFixture()
+    local bag = f:addBag("Strong", 10, 0.1)
+    local first = item(f.inventory, "Test.First", 4)
+    local second = item(f.inventory, "Test.Second", 2)
+    f.holdTransferResult = true
+    f:startCondense()
+    for _ = 1, 30 do tick(f); if #f.transfers == 1 then break end end
+    assert(#f.transfers == 1 and bag:contains(first))
+    f.completeDuringCancel = true
+    assert(f.jobs:pause())
+    local paused = awaitState(f, "paused")
+    assert(paused.canResume and not f.jobs:previewCondense())
+    f.holdTransferResult = false
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished" and #f.transfers == 2 and status.condense.transfers == 2)
+    assert(bag:contains(first) and bag:contains(second) and math.abs(f.world:carrying() - 0.6) < 0.0001)
+end)
+
+test("Condense pauses on failed inventory capture and resumes from current storage", function()
+    local f = condenseFixture()
+    local bag = f:addBag("Strong", 10, 0.1)
+    local selected = item(f.inventory, "Test.Loose", 4)
+    function f.onTransfer() f.inventory.owned = false end
+    f:startCondense()
+    local status = awaitState(f, "paused")
+    assert(status.canResume and #f.transfers == 1 and bag:contains(selected))
+    assert(status.reason:find("unavailable", 1, true))
+    f.inventory.owned, f.onTransfer = true, nil
+    assert(f.jobs:resume())
+    assert(finish(f).state == "finished" and #f.transfers == 1)
+end)
+
+test("Smart Take unwanted exclusion survives preview and final native dispatch checks", function()
+    local f = fixture(10)
+    local wanted = item(f.source)
+    local unwanted = item(f.source)
+    unwanted.isUnwanted = function(_, player) return player == f.player end
+    local input = request("inventory")
+    input.excludeUnwanted = true
+    local plan = assert(f.jobs:preview(input))
+    assert(#plan.moves == 1 and plan.records[1].item == wanted)
+    wanted.isUnwanted = function() return true end
+    assert(f.jobs:start(plan))
+    local status = finish(f)
+    assert(status.moved == 0 and f.source:contains(wanted) and f.source:contains(unwanted) and #f.transfers == 0)
+    local ordinary = assert(f.jobs:preview(request("inventory")))
+    assert(#ordinary.moves == 2, "Only Smart Take's explicit unwanted policy changes selection")
+end)
+
 print("PASS " .. tests .. " Jobs integration scenarios")

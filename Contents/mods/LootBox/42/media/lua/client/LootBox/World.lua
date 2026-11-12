@@ -1193,6 +1193,46 @@ function World:matchingRecords(mode)
     return records, targets
 end
 
+function World:smartLootRecords(mode, container)
+    if mode ~= "all" and mode ~= "matching" then return nil, "Choose Smart Take All or Smart Take Matching" end
+    if not container or self:owns(container) or not self:valid(container) or not self:canAccess(container) then
+        return nil, "The displayed loot container is no longer accessible"
+    end
+    if self.recovery and self.recovery:isReservedContainer(container) then return nil, "Recover staged personal gear before looting this container" end
+    local records = self:records(container, false)
+    if mode == "matching" then
+        local rules = ISInventoryWindowControlHandler_TransferSameType
+        if not rules or type(rules.getItemsTable) ~= "function" then return nil, "The game's matching-transfer rules are unavailable" end
+        local carried, seen, selected = {}, {}, {}
+        local inventory = self.player:getInventory()
+        local containers = {inventory}
+        for _, record in ipairs(self:records(inventory, true)) do
+            if isBag(record.item) then containers[#containers + 1] = call(record.item, "getInventory") end
+        end
+        for _, source in ipairs(containers) do
+            if not seen[source] then
+                seen[source] = true
+                local ok, map = pcall(rules.getItemsTable, rules, source)
+                if not ok or type(map) ~= "table" then return nil, "The game's matching-transfer rules could not read carried storage" end
+                for fullType in pairs(map) do carried[fullType] = true end
+            end
+        end
+        local ok, map = pcall(rules.getItemsTable, rules, container)
+        if not ok or type(map) ~= "table" then return nil, "The game's matching-transfer rules could not read this container" end
+        for fullType, items in pairs(map) do
+            if carried[fullType] then for _, item in ipairs(items) do selected[item] = true end end
+        end
+        local matching = {}
+        for _, record in ipairs(records) do if selected[record.item] then matching[#matching + 1] = record end end
+        records = matching
+    end
+    local eligible = {}
+    for _, record in ipairs(records) do
+        if not self:protected(record.item) and call(record.item, "isUnwanted", self.player) ~= true then eligible[#eligible + 1] = record end
+    end
+    return self:matchingOrder(eligible)
+end
+
 function World:matchingPoint(request, container)
     if request.destination.kind ~= "matching" or call(container, "getType") ~= "floor" then return nil end
     for _, target in ipairs(request.destination.targets or {}) do
@@ -1216,9 +1256,35 @@ function World:destinations(request, item)
         for _, record in ipairs(self:records(inventory, true)) do
             if isBag(record.item) then add(call(record.item, "getInventory")) end
         end
-        local order, factors = {}, {}
-        for index, container in ipairs(result) do order[container], factors[container] = index, self:carryFactor(container) end
+        local order, factors, similar = {}, {}, {}
+        local rules = ISInventoryWindowControlHandler_TransferSameType
+        local sourceMap
+        if item and rules and type(rules.getItemsTable) == "function" then
+            local ok, map = pcall(rules.getItemsTable, rules, call(item, "getContainer"))
+            if ok and type(map) == "table" then
+                sourceMap = {}
+                for fullType, items in pairs(map) do
+                    for _, candidate in ipairs(items) do if candidate == item then sourceMap[fullType] = true; break end end
+                end
+            end
+        end
+        for index, container in ipairs(result) do
+            order[container], factors[container] = index, self:carryFactor(container)
+            if item then
+                if sourceMap then
+                    local ok, map = pcall(rules.getItemsTable, rules, container)
+                    if ok and type(map) == "table" then
+                        for fullType in pairs(sourceMap) do if map[fullType] then similar[container] = true; break end end
+                    end
+                else
+                    for _, record in ipairs(self:records(container, false)) do
+                        if record.item ~= item and tostring(record.item:getFullType()) == tostring(item:getFullType()) then similar[container] = true; break end
+                    end
+                end
+            end
+        end
         table.sort(result, function(a, b)
+            if (similar[a] == true) ~= (similar[b] == true) then return similar[a] == true end
             if factors[a] ~= factors[b] then return factors[a] < factors[b] end
             return order[a] < order[b]
         end)
