@@ -10,8 +10,9 @@ end
 
 local Menu = {}
 Menu.__index = Menu
-function Menu:new(root) return setmetatable({ options = {}, submenus = {}, root = root }, self) end
+function Menu:new(root) return setmetatable({ options = {}, optionPool = {}, submenus = {}, root = root }, self) end
 function Menu:clear()
+    for _, option in ipairs(self.options) do self.optionPool[#self.optionPool + 1] = option end
     self.options = {}
     if not self.root then self.menuCursor = 0 end
     self.visible = false
@@ -19,7 +20,11 @@ end
 function Menu:setVisible(visible) self.visible = visible end
 function Menu:bringToTop() self.raised = true end
 function Menu:addOption(name, target, action)
-    local option = { name = name, target = target, onSelect = action }
+    local option = table.remove(self.optionPool) or {}
+    local keys = {}
+    for key in pairs(option) do keys[#keys + 1] = key end
+    for _, key in ipairs(keys) do option[key] = nil end
+    option.name, option.target, option.onSelect = name, target, action
     self.options[#self.options + 1] = option
     return option
 end
@@ -63,7 +68,10 @@ function instanceof(object, class) return type(object) == "table" and object.cla
 function getSpecificPlayer() return current.player end
 function getText(key) return key == "IGUI_ItemCat_Food" and "Food" or key end
 function getTextOrNull() return nil end
-function getTexture(path) return path end
+function getTexture(path)
+    assert(type(path) == "string" and path ~= "", "Native texture keys must be nonempty strings")
+    return path
+end
 function getMouseXScaled() return 10 end
 function getMouseYScaled() return 20 end
 ISWorldObjectContextMenu = { setTest = function() current.tested = current.tested + 1; return "available" end }
@@ -115,6 +123,7 @@ local function fixture()
     local f = { preferences = copy(defaults), definitions = {}, matches = {}, presets = {}, kept = {}, tested = 0 }
     current = f
     ISInventoryPaneContextMenu.dontCreateMenu = false
+    ContainerButtonIcons = nil
     f.inventory, f.crate, f.floor = container("inventory", true), container("crate", false), container("floor", false)
     f.square = { getRoom = function() return f.room end, getBuilding = function() return f.building end }
     f.room, f.building = {}, {}
@@ -171,16 +180,47 @@ local function click(menu, name)
     selected.onSelect(selected.target)
     return selected
 end
+local function icon(selected)
+    assert(selected.iconTexture ~= nil or selected.itemForTexture ~= nil, "Missing icon: " .. selected.name)
+    assert(selected.iconTexture == nil or selected.itemForTexture == nil, "Conflicting icon renderers: " .. selected.name)
+    return selected.iconTexture or selected.itemForTexture
+end
+local function iconTree(menu)
+    local total = 0
+    for _, selected in ipairs(menu.options) do
+        icon(selected)
+        total = total + 1
+        if selected.child then total = total + iconTree(selected.child) end
+    end
+    return total
+end
+local function ownedIcons(parent)
+    local root = option(parent, "LootBox")
+    if not root then return end
+    icon(root)
+    assert(iconTree(root.child) > 0)
+    assert(icon(root) ~= icon(needed(root.child, "Open LootBox")), "Root and manager actions must have different symbols")
+end
+local function distinctIcons(menu)
+    local seen = {}
+    for _, selected in ipairs(menu.options) do
+        local image = icon(selected)
+        assert(not seen[image], "Unrelated actions share an icon: " .. tostring(seen[image]) .. " / " .. selected.name)
+        seen[image] = selected.name
+    end
+end
 local function inventoryMenu(f, selected)
     local parent = Menu:new()
     parent:addOption("Foreign action", nil, function() f.foreignClicked = true end)
     Menus.inventoryMenu(0, parent, selected or { f.apple })
+    ownedIcons(parent)
     return parent, option(parent, "LootBox") and option(parent, "LootBox").child
 end
 local function worldMenu(f, objects)
     local parent = Menu:new()
     parent:addOption("Foreign action", nil, function() f.foreignClicked = true end)
     Menus.worldMenu(0, parent, objects or {}, false)
+    ownedIcons(parent)
     return parent, option(parent, "LootBox") and option(parent, "LootBox").child
 end
 local function fixtureObject(f, target)
@@ -222,6 +262,7 @@ end
 local function contentsMenu(f, source)
     local parent = Menu:new()
     Menus.containerMenu(0, parent, source)
+    ownedIcons(parent)
     return parent, option(parent, "LootBox") and option(parent, "LootBox").child
 end
 
@@ -338,10 +379,12 @@ test("Keep changes only the clicked copy and exposes its checked state", functio
     local other = item(f.inventory)
     local _, menu = inventoryMenu(f)
     assert(needed(menu, "Keep this copy").checkMark == false)
+    local keepIcon = icon(needed(menu, "Keep this copy"))
     click(menu, "Keep this copy")
     assert(f.kept[f.apple] and not f.kept[other])
     local _, reopened = inventoryMenu(f)
     assert(needed(reopened, "Keep this copy").checkMark == true)
+    assert(icon(needed(reopened, "Keep this copy")) == keepIcon)
     click(reopened, "Keep this copy")
     assert(f.kept[f.apple] == false)
 end)
@@ -863,6 +906,131 @@ test("container help provides a complete workflow with explicit nondeletion and 
     local text = table.concat(guide.steps, " ")
     assert(text:find("never deletes", 1, true) and text:find("Review", 1, true))
     assert(text:find("Sort contents", 1, true) and text:find("Choose items and categories", 1, true))
+end)
+
+test("item menus include distinct action icons and icons on every generated choice", function(f)
+    for index = 1, 8 do
+        local id = "custom:" .. tostring(index)
+        f.definitions[index] = { id = id, name = "Supplies " .. tostring(index) }
+        f.matches[id] = true
+    end
+    f.presets = {
+        { id = "setup:1", name = "Sorting", setup = {scope = "inventory", destination = {kind = "labels"}, filter = {all = true}} },
+        { id = "setup:2", name = "Dropping", setup = {scope = "inventory", destination = {kind = "floor"}, filter = {all = true}} },
+    }
+    local selected, source = bag(f, true)
+    local locker = container("locker", false)
+    sidebar(f, f.inventoryPage, f.inventory)
+    sidebar(f, f.inventoryPage, source)
+    sidebar(f, f.lootPage, f.crate)
+    sidebar(f, f.lootPage, locker)
+    local parent, menu = inventoryMenu(f, {selected})
+    distinctIcons(menu)
+    distinctIcons(needed(menu, "Category: Food").child)
+    local contentsHeader = needed(menu, "Contents of School Bag")
+    assert(contentsHeader.itemForTexture == selected and contentsHeader.iconTexture == nil)
+    distinctIcons(contentsHeader.child)
+    local moves = needed(contentsHeader.child, "Move contents to").child
+    assert(icon(needed(moves, "Crate...")) == icon(needed(moves, "Locker...")))
+    assert(icon(needed(moves, "Crate...")) ~= icon(needed(moves, "My remembered vehicle...")))
+    local custom = needed(menu, "My matching categories").child
+    local more = needed(custom, "More categories in Actions...")
+    local storeIcon = icon(needed(menu, "Put all of this type in Crate"))
+    for _, selectedCategory in ipairs(custom.options) do
+        if selectedCategory ~= more then assert(icon(selectedCategory) == storeIcon) end
+    end
+    assert(icon(more) ~= storeIcon)
+    local saved = needed(menu, "Saved setups").child
+    assert(#saved.options == 2 and icon(saved.options[1]) == icon(saved.options[2]))
+    assert(icon(needed(menu, "Saved setups")) ~= icon(saved.options[1]))
+    assert(iconTree(needed(parent, "LootBox").child) > #menu.options)
+end)
+
+test("container floor and carried inventory operations use distinct action symbols", function(f)
+    for _, source in ipairs({f.crate, f.floor, f.inventory}) do
+        local _, menu = contentsMenu(f, source)
+        distinctIcons(menu)
+    end
+    local selected = item(f.crate)
+    local _, menu = inventoryMenu(f, {selected})
+    distinctIcons(menu)
+    distinctIcons(needed(menu, "Category: Food").child)
+    assert(icon(needed(menu, "Take all of this type")) ~= icon(needed(menu, "Put all of this type in Crate")))
+end)
+
+test("vehicle and unavailable world actions retain distinct icons", function(f)
+    f.pickedVehicle = vehicle(f)
+    f.room, f.building = nil, nil
+    local _, menu = worldMenu(f)
+    distinctIcons(menu)
+    assert(icon(needed(menu, "Label this container...")) ~= icon(needed(menu, "Label this vehicle's storage...")))
+    assert(icon(needed(menu, "Remember this vehicle")) ~= icon(needed(menu, "Haul my checklist to this vehicle...")))
+    local loot, clean = needed(menu, "Loot supplies").child, needed(menu, "Clean and delete").child
+    distinctIcons(loot)
+    distinctIcons(clean)
+    for _, choice in ipairs({needed(loot, "Current room..."), needed(loot, "Current building..."),
+        needed(clean, "Clean current room..."), (needed(clean, "Clean current building..."))}) do
+        assert(choice.notAvailable and choice.toolTip and icon(choice))
+    end
+end)
+
+test("contents groups use native container imagery and retain unknown-storage fallback", function(f)
+    local nativeCrate, nativeTrunk = {}, {}
+    ContainerButtonIcons = {crate = nativeCrate, TruckBed = nativeTrunk}
+    f.pickedVehicle = vehicle(f)
+    local unknown = container("moddedbox", false)
+    local _, menu = worldMenu(f, {fixtureObject(f, f.crate), fixtureObject(f, unknown)})
+    local crate = needed(menu, "Contents of Crate")
+    local trunk = needed(menu, "Contents of TruckBed")
+    local fallback = needed(menu, "Contents of Moddedbox")
+    assert(crate.iconTexture == nativeCrate and crate.itemForTexture == nil)
+    assert(trunk.iconTexture == nativeTrunk and trunk.itemForTexture == nil)
+    assert(fallback.iconTexture ~= nil and fallback.itemForTexture == nil)
+    assert(iconTree(crate.child) > 0 and iconTree(trunk.child) > 0 and iconTree(fallback.child) > 0)
+end)
+
+test("sidebar no-item and preference-only menus keep complete icon coverage", function(f)
+    local button = sidebar(f, f.lootPage, f.crate)
+    registrations.refresh[1](f.lootPage, "end")
+    button.onRightMouseDown(button, 0, 0)
+    ownedIcons(f.contextMenu)
+    assert(option(f.contextMenu, "Native rename") and option(f.contextMenu, "Foreign action"))
+    for _, isLoot in ipairs({false, true}) do
+        local parent = Menu:new()
+        registrations.background[1](0, parent, isLoot)
+        ownedIcons(parent)
+        distinctIcons(needed(parent, "LootBox").child)
+    end
+    f.preferences.inventoryShortcuts, f.preferences.worldShortcuts, f.preferences.vehicleShortcuts = false, false, false
+    local parent, menu = inventoryMenu(f)
+    distinctIcons(menu)
+    assert(not option(menu, "Keep this copy") and option(menu, "Settings"))
+    parent, menu = worldMenu(f, {fixtureObject(f, f.crate)})
+    distinctIcons(menu)
+    assert(not option(menu, "Loot contents...") and option(menu, "Workflow help"))
+end)
+
+test("pooled menu options switch between bag and native storage images without stale state", function(f)
+    local selected = bag(f, true)
+    local first, second = container("crate", false), container("locker", false)
+    local nativeCrate, nativeLocker = {}, {}
+    ContainerButtonIcons = {crate = nativeCrate, locker = nativeLocker}
+    local parent = Menu:new()
+    for _ = 1, 3 do
+        parent:clear()
+        Menus.inventoryMenu(0, parent, {selected})
+        ownedIcons(parent)
+        local header = needed(needed(parent, "LootBox").child, "Contents of School Bag")
+        assert(header.itemForTexture == selected and header.iconTexture == nil)
+        parent:clear()
+        Menus.worldMenu(0, parent, {fixtureObject(f, first), fixtureObject(f, second)}, false)
+        ownedIcons(parent)
+        local menu = needed(parent, "LootBox").child
+        for _, choice in ipairs({{ "Contents of Crate", nativeCrate }, { "Contents of Locker", nativeLocker }}) do
+            local storage = needed(menu, choice[1])
+            assert(storage.iconTexture == choice[2] and storage.itemForTexture == nil)
+        end
+    end
 end)
 
 assert(#failures == 0, table.concat(failures, "\n"))
