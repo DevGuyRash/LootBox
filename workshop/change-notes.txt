@@ -1,7 +1,5 @@
-LootBox 0.9.1
+LootBox 0.9.2
 
-Verified public release of the standalone Build 42 client-side looting, sorting, hauling and cleanup tools.
+Label the matching loot button Smart Take Matching instead of SMART, with width measured from its full text and native icon.
 
-Smart Take All and Smart Take Matching work across carried bags. Condense Optimize now groups matching types without sacrificing lower carried weight, including protected grouping seeds and native clothing aliases.
-
-Verified with 651 contracts in each of Lua 5.1 and native Kahlua, native Store file I/O, and ordinary multiplayer grouping at unchanged carried weight.
+Fix the setup-screen dropdown tooltip exception. Clicking another quick action while a job is active or stopping now opens Current job with an explanation, preserving the original job instead of trying to build a new setup.

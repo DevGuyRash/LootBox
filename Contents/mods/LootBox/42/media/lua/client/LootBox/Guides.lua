@@ -38,7 +38,7 @@ Guides.list = {
         prerequisites = "Open a nearby container or the floor in the loot pane. Equip your carrying bags for useful weight reduction.",
         steps = {
             "Use Smart Take All beside Take All to collect eligible contents from the displayed container.",
-            "Use the SMART icon beside Take Matching to take types found anywhere in your carried inventory, including nested bags, even when the selected inventory pane has none.",
+            "Use Smart Take Matching beside Take Matching to take types found anywhere in your carried inventory, including nested bags, even when the selected inventory pane has none.",
             "Hover to highlight eligible loot. Smart Load fills bags already holding similar items, then other bags by useful reduction, and main inventory last. Full bags spill into the next eligible bag.",
             "Quick transfer review and Progress follow your Settings. F7 opens Current job while a quiet job runs or after it finishes.",
         },

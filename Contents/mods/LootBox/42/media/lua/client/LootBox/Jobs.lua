@@ -51,20 +51,21 @@ function Jobs.new(player, world, graph)
         revision = 0 }, Jobs)
 end
 
+local function planningBlocked(self)
+    return self.execution or self.ending or self.native:isBusy() or (self.suspended and self.view.state == "paused")
+end
+
 function Jobs:status()
     local result = {}
     for key, value in pairs(self.view) do result[key] = value end
     result.canResume = self.suspended ~= nil and not self.ending and not self.native:isBusy()
         and (not self.recoveryRequired or self.suspended.execution.recoveryOnly == true)
     result.canPause = self.execution ~= nil and not self.ending
+    result.canPreview = not planningBlocked(self)
     local execution = self.execution or self.suspended and self.suspended.execution
     result.reviewBins = not execution or execution.reviewBins ~= false
     if execution and execution.condense then result.condense = execution.condense:status() end
     return result
-end
-
-local function planningBlocked(self)
-    return self.execution or self.ending or self.native:isBusy() or (self.suspended and self.view.state == "paused")
 end
 
 function Jobs:captureRecord(record)
