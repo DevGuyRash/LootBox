@@ -120,6 +120,7 @@ local function containerName(container)
     local part = container:getVehiclePart()
     if part then return getTextOrNull("IGUI_VehiclePart" .. part:getId()) or friendly(part:getId()) end
     local parent = container:getParent()
+    if parent and instanceof(parent, "IsoPlayer") then return "My main inventory" end
     local count = parent and parent.getContainerCount and parent:getContainerCount() or 1
     local index = parent and parent:getContainerIndex(container)
     local name = friendly(container:getType())
@@ -498,8 +499,8 @@ function Window:buildComposer()
     local optionsY = rowY + H + 7
     self.includeInventory = check(body, 0, optionsY, col, "Also use my carried items", self.request.includeInventory, self, nil,
         "Include carried items as sources alongside the room, area or other selected scope.")
-    self.includeBags = check(body, col + GAP, optionsY, col, "Search inside carried bags", self.request.includeBags, self, nil,
-        "Traverse all carried nested bags without equipping or dropping them.")
+    self.includeBags = check(body, col + GAP, optionsY, col, "Search inside bags", self.request.includeBags, self, nil,
+        "Include nested contents in the selected sources. Native access rules still apply. Nonempty bags themselves remain protected.")
     self.endpoint = combo(body, 2 * (col + GAP), optionsY, col, self)
     local specificY = optionsY + H + 6
     self.areaButton = button(body, 0, specificY, 210, "Choose area in the world", self, Window.selectArea,
@@ -1176,7 +1177,7 @@ end
 
 local preferenceRows = {
     { key = "contextMenus", title = "Show LootBox in right-click menus", description = "Turn off the LootBox menu entry entirely. The full manager remains available in Options." },
-    { key = "inventoryShortcuts", title = "Inventory item shortcuts", description = "Show take, put, drop, sort, tag and Keep actions for inventory items." },
+    { key = "inventoryShortcuts", title = "Inventory and container shortcuts", description = "Show item actions and container contents actions for looting, emptying onto the floor, sorting, moving, cleanup, and labels. Use a container icon, a bag, or an empty pane." },
     { key = "worldShortcuts", title = "World storage, room and area shortcuts", description = "Show container transfers, storage labels, looting, area selection and cleanup in the world." },
     { key = "vehicleShortcuts", title = "Vehicle shortcuts", description = "Show vehicle memory, hauling and storage actions in the relevant context." },
     { key = "categoryShortcuts", title = "Category shortcuts", description = "Offer actions for categories relevant to the item you clicked." },

@@ -74,3 +74,9 @@ The user reported scrolling text clipping and asked for clearer workflows, visua
 "also make better use of colors too for all this. Like here we can highlight the item one, the status anothER (like Protected), leave description normal, etc. apply this kind of change throughout though and not only in one place. Also make this easier to understand, the planning easier to understand, the bin itself when it finds one and asks for approval, etc"
 
 "and add a resume button too"
+
+## Per-container workflows
+
+"also would love the ability to right click a container itself in the inventory/loot thing and choose to empty container, loot container, clean container, etc just at a per container level too! if not already existing"
+
+"also the other stuff like organizing and all that too! Just general lootbox capabilities"
