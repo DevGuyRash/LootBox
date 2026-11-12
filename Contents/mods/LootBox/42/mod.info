@@ -2,5 +2,5 @@ name=LootBox
 id=LootBox
 author=DevGuyRash
 description=Client-side categories, looting, sorting, hauling, and cleanup through native game actions.
-modversion=0.4.0
+modversion=0.4.1
 versionMin=42.20.0

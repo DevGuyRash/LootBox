@@ -6,7 +6,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 ## Install locally
 
-Extract the built `LootBox-0.4.0.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.4.1.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -14,7 +14,7 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.4.0.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
+The archive is `dist/LootBox-0.4.1.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
 
 ## Start with a workflow
 
@@ -22,7 +22,7 @@ Open **Options > Mods > LootBox > Open LootBox**, or choose **LootBox > Open Loo
 
 Home also offers **Loot this building** and **Clean this building**. A building search follows the game's room metadata on each actual floor and walks through small sections as needed. It loads sources through normal movement instead of making one enormous tile query. Progress distinguishes rooms processed, sections searched, and sections left unsearched. A blocked stairway, missing geometry, denied permission, or unstreamed section remains visible in the result. Buildings have no 16,384-tile scan cap; the existing room and drawn-area limits remain. A drawn area still covers one floor.
 
-Drag the lower-right corner or bottom edge to resize the manager, quick review, bin review, or progress window. Existing text drafts, selected items and labels, and scroll positions stay in place. Item names, decision statuses, and explanations use separate colors; the full explanation remains available in the row tooltip.
+Drag the lower-right corner or bottom edge to resize the manager, quick review, bin review, or progress window. Existing text drafts, selected items and labels, and scroll positions stay in place. Settings uses scrollable preference rows so descriptions remain reachable above the fixed Save controls at narrower sizes and larger fonts. Item names, decision statuses, and explanations use separate colors; the full explanation remains available in the row tooltip.
 
 Closing any LootBox window keeps its job running. Ordinary walking and queued player actions temporarily yield control, then the job continues automatically. Aiming, attacking or shoving, deliberate running or sprinting, and **Cancel job** stop it. **Resume job** continues the same job in the current session after the takeover ends, retaining its progress and original locations while checking current items and storage again. Starting another job replaces the stopped checkpoint; disconnecting or returning to the main menu ends it. Resumed cleanup requires a fresh bin contents review.
 
