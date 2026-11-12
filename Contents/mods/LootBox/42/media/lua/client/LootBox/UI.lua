@@ -682,8 +682,13 @@ function Window:onDestinationChanged()
     self.includeBags.enable = not matching
     self.includeBags.tooltip = matching and "Matching transfers always search every carried container, including nested bags."
         or "Include nested contents in the selected sources. Native access rules still apply. Nonempty bags themselves remain protected."
-    self.scope.tooltip["My carried items"] = matching and "Matching transfers always use all carried containers as their source."
-        or "Items in your inventory. Bag contents are included when enabled below."
+    for _, option in ipairs(self.scope.options) do
+        if option.data == "inventory" then
+            option.tooltip = matching and "Matching transfers always use all carried containers as their source."
+                or "Items in your inventory. Bag contents are included when enabled below."
+            break
+        end
+    end
     self:onScopeChanged()
     self.endpoint:setVisible(kind == "container" or kind == "vehicle" or kind == "labels" or matching)
     if self.startButton then
@@ -1874,6 +1879,10 @@ function UI.quickAction(playerIndex, context, request, pickArea)
     local plan
     plan, err = app:preview(request)
     if not plan then
+        if app:status().canPreview == false then
+            UI.showProgress(playerIndex, "This shortcut did not start. " .. tostring(err))
+            return nil, err
+        end
         local nextContext = {}
         for key, val in pairs(context) do nextContext[key] = val end
         nextContext.request = request
