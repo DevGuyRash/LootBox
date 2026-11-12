@@ -187,7 +187,9 @@ function World:carryDelta(item, destination)
 end
 
 function World:carrying()
-    return self.player:getInventoryWeight(), self.player:getMaxWeight()
+    local inventory = self.player:getInventory()
+    local maximum = call(self.player, "isUnlimitedCarry") == true and math.huge or inventory:getEffectiveCapacity(self.player)
+    return inventory:getCapacityWeight(), maximum
 end
 
 function World:square(container)
@@ -1050,18 +1052,16 @@ function World:destinations(request, item)
     end
     if destination.kind == "inventory" then
         local inventory = call(self.player, "getInventory")
-        add(inventory)
-        if request.includeBags then
-            for _, record in ipairs(self:records(inventory, true)) do
-                if isBag(record.item) then add(call(record.item, "getInventory")) end
-            end
-            local order, factors = {}, {}
-            for index, container in ipairs(result) do order[container], factors[container] = index, self:carryFactor(container) end
-            table.sort(result, function(a, b)
-                if factors[a] ~= factors[b] then return factors[a] < factors[b] end
-                return order[a] < order[b]
-            end)
+        for _, record in ipairs(self:records(inventory, true)) do
+            if isBag(record.item) then add(call(record.item, "getInventory")) end
         end
+        local order, factors = {}, {}
+        for index, container in ipairs(result) do order[container], factors[container] = index, self:carryFactor(container) end
+        table.sort(result, function(a, b)
+            if factors[a] ~= factors[b] then return factors[a] < factors[b] end
+            return order[a] < order[b]
+        end)
+        add(inventory)
     elseif destination.kind == "floor" then
         if ISInventoryPage and ISInventoryPage.GetFloorContainer then add(ISInventoryPage.GetFloorContainer(call(self.player, "getPlayerNum"))) end
     elseif destination.kind == "container" then

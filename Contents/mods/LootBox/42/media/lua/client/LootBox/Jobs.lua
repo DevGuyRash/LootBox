@@ -87,13 +87,16 @@ function Jobs:choose(request, item, reservations)
             and destination:isItemAllowed(item) and destination:hasRoomFor(self.player, item) then
             local reserved = reservations and reservations[destination] or 0
             local capacity = destination:getEffectiveCapacity(self.player)
-            if destination:getType() == "floor" or destination:getCapacityWeight() + reserved + weight(item) <= capacity then
-                local delta = self.world:carryDelta(item, destination)
-                local current, maximum = self.world:carrying()
+            local delta = self.world:carryDelta(item, destination)
+            local current, maximum = self.world:carrying()
+            local main = destination == self.player:getInventory()
+            local added = main and math.max(0, delta) or weight(item)
+            if destination:getType() == "floor" or (main and maximum == math.huge)
+                or destination:getCapacityWeight() + reserved + added <= capacity then
                 local reservedCarry = reservations and reservations.carriedMass or 0
                 if delta <= 0 or current + reservedCarry + delta <= maximum + 0.0001 then
                     if reservations then
-                        reservations[destination] = reserved + weight(item)
+                        reservations[destination] = reserved + added
                         reservations.carriedMass = reservedCarry + math.max(0, delta)
                     end
                     return destination
@@ -102,7 +105,7 @@ function Jobs:choose(request, item, reservations)
             end
         end
     end
-    return nil, carryBlocked and "Normal carrying limit reached; use carried bags or deliver the current load first"
+    return nil, carryBlocked and "Native hard carrying limit reached; deliver the current load first"
         or "No matching destination with room for this item"
 end
 
@@ -349,7 +352,7 @@ function Jobs:prepareOperation(work)
         if not self.activeGraph:matchesFilter(self.plan.request.filter, self.world:describe(item)) then return nil, "Item no longer matches the selection" end
         local delta = self.world:carryDelta(item, destination)
         local current, maximum = self.world:carrying()
-        if delta > 0 and current + delta > maximum + 0.0001 then return nil, "Normal carrying limit reached; the item was left in place" end
+        if delta > 0 and current + delta > maximum + 0.0001 then return nil, "Native hard carrying limit reached; the item was left in place" end
         op.item, op.source, op.destination = item, source, destination
         local steps = {}
         if work.sourcePoint then steps[#steps + 1] = {kind = "approach", location = work.sourcePoint}
@@ -447,7 +450,7 @@ function Jobs:continueOperation()
         if not self.activeGraph:matchesFilter(self.plan.request.filter, self.world:describe(item)) then self:finishOperation(work, false, "Item no longer matches the selection"); return end
         local delta = self.world:carryDelta(item, operation.destination)
         local current, maximum = self.world:carrying()
-        if delta > 0 and current + delta > maximum + 0.0001 then self:finishOperation(work, false, "Normal carrying limit reached; the item was left in place"); return end
+        if delta > 0 and current + delta > maximum + 0.0001 then self:finishOperation(work, false, "Native hard carrying limit reached; the item was left in place"); return end
         operation.item = item
     end
     local accepted, reason, code = self.native:begin(operation)
