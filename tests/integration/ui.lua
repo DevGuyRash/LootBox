@@ -79,7 +79,14 @@ end
 function Widgets.label(parent, x, y, text) return control(parent, text, x, y, 0, Widgets.H) end
 function Widgets.heading(parent, x, y, text) return control(parent, text, x, y, 0, Widgets.H) end
 function Widgets.text(parent, x, y, width, height, text)
-    return control(parent, text, x, y, width, height)
+    local widget = control(parent, text, x, y, width, height)
+    function widget:removeScrollBars() self.vscroll = nil end
+    function widget:paginate()
+        local lineWidth = getTextManager():MeasureStringX(UIFont.Small, self.text)
+        self.scrollHeight = math.max(1, math.ceil(lineWidth / math.max(1, self.width))) * getTextManager():getFontHeight(UIFont.Small) + 4
+    end
+    function widget:getScrollHeight() return self.scrollHeight or self.height end
+    return widget
 end
 function Widgets.setText(panel, text)
     if panel.text ~= text then panel.text = text; panel.scroll = 0 end
@@ -109,15 +116,26 @@ end
 function Widgets.list(parent, x, y, width, height, target, callback, selection)
     local widget = control(parent, "", x, y, width, height)
     widget.items, widget.target, widget.callback, widget.selection = {}, target, callback, selection
+    widget.scrollHeight = 0
+    function widget:getScrollHeight() return self.scrollHeight end
+    function widget:setScrollHeight(height) self.scrollHeight = height; self:setYScroll(self:getYScroll()) end
+    function widget:setYScroll(value) self.scroll = math.max(-math.max(0, self.scrollHeight - self.height), math.min(0, value)) end
+    function widget:onMouseWheel(delta) self:setYScroll(self:getYScroll() - delta * Widgets.H * 3); return true end
     function widget:addItem(text, data, tooltip)
-        local row = { text = text, item = data, tooltip = tooltip, index = #self.items + 1 }
+        local row = { text = text, item = data, tooltip = tooltip, index = #self.items + 1, height = Widgets.H }
         self.items[#self.items + 1] = row
+        self:setScrollHeight(self.scrollHeight + row.height)
         return row
     end
-    function widget:clear() self.items, self.selected, self.scroll = {}, 0, 0 end
+    function widget:clear() self.items, self.selected, self.scroll, self.scrollHeight = {}, 0, 0, 0 end
     return widget
 end
 package.loaded["LootBox/Widgets"] = Widgets
+UIFont = {Small = "small"}
+function getTextManager() return {
+    getFontHeight = function() return Widgets.H - 12 end,
+    MeasureStringX = function(_, _, text) return #text * math.max(7, (Widgets.H - 12) / 2) end,
+} end
 function getCore() return {getScreenWidth = function() return 1280 end, getScreenHeight = function() return 900 end} end
 function getText(key) return key end
 function getTextOrNull() return nil end
@@ -607,10 +625,12 @@ end)
 test("settings and Help resize retain unsaved choices and reading position", function(f)
     f.preferences.contextMenus, f.preferences.showTips = true, true
     local settings = managerWindow(f, "settings")
-    settings.preferenceWidgets.contextMenus:setSelected(1, false)
-    local body, checkbox = settings.body, settings.preferenceWidgets.contextMenus
+    settings.preferenceSelection.contextMenus = false
+    local body, selection, viewport = settings.body, settings.preferenceSelection, settings.preferenceViewport
+    local rows = viewport.items
     resize(settings, 760, 710)
-    assert(settings.body == body and settings.preferenceWidgets.contextMenus == checkbox and not checkbox:isSelected(1))
+    assert(settings.body == body and settings.preferenceSelection == selection and settings.preferenceViewport == viewport)
+    assert(viewport.items == rows and not selection.contextMenus)
     assert(f.preferences.contextMenus == true)
     local help = managerWindow(f, "help", {guide = "buildings"})
     help.guideSearch:setText("building")
@@ -751,6 +771,72 @@ test("default and minimum frames retain a full decision row at larger font sizes
         assert(not f.cancelled and f.starts == 0 and not f.resumes)
     end
     Widgets.H, package.loaded["LootBox/UI"] = originalH, originalModule
+end)
+
+test("Settings keeps every preference reachable above Save across native font sizes", function()
+    local originalModule, originalH = package.loaded["LootBox/UI"], Widgets.H
+    for _, rowHeight in ipairs({28, 31, 38, 45, 50}) do
+        Widgets.H = rowHeight
+        package.loaded["LootBox/UI"] = nil
+        local scaled = require "LootBox/UI"
+        local f = fixture()
+        f.preferences.contextMenus = true
+        local window = scaled.Window:new(0, {}, "settings")
+        window:createChildren()
+        resize(window, window.minimumWidth, window.minimumHeight)
+        local viewport, choices = window.preferenceViewport, window.preferenceSelection
+        local rows, save = viewport.items
+        for _, widget in ipairs(window.body.controls) do if widget.text == "Save preferences" then save = widget end end
+        assert(#rows == 11 and save and viewport.height >= rowHeight)
+        assert(viewport.y + viewport.height < save.y)
+        local preferences, sections, lastY = 0, 0, 0
+        for _, row in ipairs(rows) do
+            if row.item.key then
+                preferences = preferences + 1
+                assert(#row.item.details > 0 and row.height >= rowHeight + #row.item.details * (rowHeight - 12))
+                for _, line in ipairs(row.item.details) do
+                    assert(getTextManager():MeasureStringX(UIFont.Small, line) <= viewport.width - 50)
+                end
+            else sections = sections + 1; assert(row.item.selectable == false) end
+            lastY = lastY + row.height
+        end
+        assert(preferences == 9 and sections == 2)
+        viewport.callback(viewport.target, rows[1].item)
+        assert(choices.contextMenus == true and viewport.selected == 0)
+        viewport.callback(viewport.target, rows[2].item)
+        assert(choices.contextMenus == false and f.preferences.contextMenus == true)
+        viewport:onMouseWheel(1000)
+        local last = rows[#rows]
+        assert(lastY - last.height + viewport:getYScroll() >= 0)
+        assert(lastY + viewport:getYScroll() <= viewport.height)
+        local scroll = viewport:getYScroll()
+        resize(window, 1200, 850)
+        assert(window.preferenceViewport == viewport and viewport.items == rows and window.preferenceSelection == choices)
+        assert(choices.contextMenus == false and viewport:getYScroll() <= 0)
+        assert(viewport:getYScroll() >= scroll and not f.cancelled and f.starts == 0)
+    end
+    Widgets.H, package.loaded["LootBox/UI"] = originalH, originalModule
+end)
+
+test("Settings changes only persist through its fixed Save control", function(f)
+    f.preferences.contextMenus, f.preferences.showTips = true, true
+    local saves
+    local previous = App.setPreferences
+    App.setPreferences = function(values) saves = values; return true end
+    local window = managerWindow(f, "settings")
+    local viewport, choices = window.preferenceViewport, window.preferenceSelection
+    viewport.callback(viewport.target, viewport.items[2].item)
+    viewport.callback(viewport.target, viewport.items[#viewport.items].item)
+    resize(window, 760, 710)
+    viewport:onMouseWheel(1000)
+    assert(saves == nil and f.preferences.contextMenus and f.preferences.showTips)
+    press(window.body, "Save preferences")
+    assert(saves.contextMenus == false and saves.showTips == false)
+    local count = 0
+    for _, value in pairs(saves) do assert(type(value) == "boolean"); count = count + 1 end
+    assert(count == 9 and window.preferenceSelection == choices)
+    assert(window.messagePanel.text:find("Preferences saved", 1, true) and not f.cancelled and f.starts == 0)
+    App.setPreferences = previous
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")
