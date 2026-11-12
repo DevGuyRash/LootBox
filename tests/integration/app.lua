@@ -3,6 +3,7 @@ package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.pat
 -- World/action boundaries are doubles. The actual App, category graph, catalog,
 -- and data-only Store run together; native file I/O has a separate smoke check.
 local files, denied, jobState, resumeCalls, resumeError = {}, false, "idle", 0, nil
+local calls = {created = 0, previews = 0, starts = 0, pauses = 0, recoveries = 0}
 function getFileReader(path)
     if not files[path] then return nil end
     local read = false
@@ -38,8 +39,15 @@ package.loaded["LootBox/World"] = { new = function(_, state)
         end }
 end }
 package.loaded["LootBox/Jobs"] = { new = function()
+    calls.created = calls.created + 1
     return { status = function() return { state = jobState } end, cancel = function() return true end,
-        tick = function() end, start = function() return true end, resume = function()
+        tick = function() end,
+        preview = function(_, request) calls.previews = calls.previews + 1; calls.request = request; return {request = request} end,
+        start = function(_, plan, options) calls.starts = calls.starts + 1; calls.plan, calls.options = plan, options; return true end,
+        pause = function() calls.pauses = calls.pauses + 1; jobState = "paused"; return true end,
+        recoverPersonalGear = function() calls.recoveries = calls.recoveries + 1; return true end,
+        approveBin = function(_, review, options) calls.review, calls.approvalOptions = review, options; return true end,
+        resume = function()
             resumeCalls = resumeCalls + 1
             if resumeError then return nil, resumeError end
             jobState = "running"
@@ -60,6 +68,11 @@ local function test(name, run)
 end
 
 local medicine, supplies
+test("passive session lookup leaves the main menu and categories free of player jobs", function()
+    assert(App.peek(0) == nil and calls.created == 0)
+    assert(App.catalog() and App.peek(0) == nil and calls.created == 0)
+end)
+
 test("main-menu custom categories preserve native and nested memberships", function()
     medicine = assert(App.saveCategory({ name = "Medical", types = { "Base.Bandage" }, includes = {} }))
     supplies = assert(App.saveCategory({ name = "Run supplies", types = {}, includes = { medicine, "native:Food" } }))
@@ -153,6 +166,52 @@ test("Resume forwards success and a current native refusal to the existing job",
     resumeError = nil
     assert(app:resume() and resumeCalls == 2 and app:status().state == "running")
     jobState = "idle"
+end)
+
+test("an existing player session can be inspected without rebuilding its job or recovery", function()
+    local app = assert(App.get(0))
+    local created = calls.created
+    assert(App.peek(0) == app and App.peek(0).recovery == app.recovery)
+    assert(calls.created == created)
+end)
+
+test("Pause and bin review mode choices reach only the existing job", function()
+    local app = assert(App.get(0))
+    local plan, options, review = {}, {reviewBins = false}, {}
+    local created, pauses = calls.created, calls.pauses
+    assert(app:start(plan, options) and calls.plan == plan and calls.options == options)
+    assert(app:approveBin(review, options) and calls.review == review and calls.approvalOptions == options)
+    assert(app:pause() and calls.pauses == pauses + 1 and app:status().state == "paused")
+    assert(calls.created == created)
+    jobState = "idle"
+end)
+
+test("paused and pausing jobs retain their category meanings until explicitly cancelled", function()
+    local before = #assert(App.catalog()).categories
+    for _, state in ipairs({"paused", "pausing"}) do
+        jobState = state
+        local id, reason = App.saveCategory({name = "Cannot change a paused job", types = {}, includes = {}})
+        assert(id == nil and reason and #assert(App.catalog()).categories == before)
+    end
+    jobState = "idle"
+end)
+
+test("pending gear recovery blocks both new previews and previously reviewed starts", function()
+    local app = assert(App.get(0))
+    local recovery = app.recovery
+    app.recovery = {status = function() return {pending = true, count = 1, reason = "Recover the backpack in the porch cabinet"} end}
+    local previews, starts, recoveries = calls.previews, calls.starts, calls.recoveries
+    local plan, reason = app:preview({scope = "room"})
+    assert(not plan and reason:find("backpack", 1, true) and calls.previews == previews)
+    local started
+    started, reason = app:start({})
+    assert(not started and reason:find("backpack", 1, true) and calls.starts == starts)
+    local status = app:status()
+    assert(status.recovery.pending and status.recovery.count == 1)
+    assert(app:recoverPersonalGear() and calls.recoveries == recoveries + 1)
+    app.recovery = recovery
+    local request = {scope = "room"}
+    assert(app:preview(request) and calls.previews == previews + 1 and calls.request == request)
 end)
 
 test("a validly encoded malformed category document remains read-only", function()

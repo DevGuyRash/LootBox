@@ -45,7 +45,8 @@ function ISCollapsableWindow:onResize() self.nativeResizes = (self.nativeResizes
 function ISCollapsableWindow:update() end
 
 local App = {
-    get = function() return current.app end,
+    get = function() current.gets = (current.gets or 0) + 1; return current.app end,
+    peek = function() current.peeks = (current.peeks or 0) + 1; return current.sessionAvailable and current.app end,
     getPreferences = function() return current.preferences end,
     catalog = function() return current.catalog end,
 }
@@ -137,7 +138,10 @@ function getTextManager() return {
     getFontHeight = function() return Widgets.H - 12 end,
     MeasureStringX = function(_, _, text) return #text * math.max(7, (Widgets.H - 12) / 2) end,
 } end
-function getCore() return {getScreenWidth = function() return 1280 end, getScreenHeight = function() return 900 end} end
+function getCore() return {getScreenWidth = function() return 1280 end, getScreenHeight = function() return 900 end,
+    isDoingTextEntry = function() return current.typing == true end,
+    isKey = function(_, binding, key) assert(binding == "LootBoxCurrentJob"); return key == current.boundKey end} end
+function getNumActivePlayers() return current.activePlayers or 1 end
 function getText(key) return key end
 function getTextOrNull() return nil end
 function getItemNameFromFullType(id) return id end
@@ -146,25 +150,35 @@ local realReviewNew = UI.QuickReview.new
 
 local function fakeReview(_, playerIndex, context, request, plan, notice)
     current.review = { playerIndex = playerIndex, context = context, request = request, plan = plan, notice = notice,
-        initialise = function() end, addToUIManager = function() end, close = function() end }
+        initialise = function() end, addToUIManager = function() end,
+        setVisible = function(self, visible) self.visible = visible end,
+        bringToTop = function(self) self.raised = (self.raised or 0) + 1 end,
+        close = function(self) self.closed = true; UI.quickWindows[playerIndex] = nil end }
     return current.review
 end
 UI.QuickReview.new = fakeReview
-UI.showProgress = function(_, notice) current.progress = { notice = notice }; return current.progress end
+UI.showProgress = function(_, notice)
+    current.progressShows = (current.progressShows or 0) + 1
+    current.progress = { notice = notice }
+    return current.progress
+end
 UI.open = function(playerIndex, context, mode)
     current.opened = { playerIndex = playerIndex, context = context, mode = mode }
     return { messageText = function(_, text) current.opened.message = text end }
 end
 local function fixture()
-    local f = { previews = 0, starts = 0, remembered = 0, preferences = { confirmQuickMoves = true } }
+    local f = { previews = 0, starts = 0, remembered = 0, preferences = { confirmQuickMoves = true },
+        sessionAvailable = true, boundKey = 65, recovery = {pending = false},
+        jobStatus = {state = "needs_review", reviewId = 1, done = 0, total = 8, reasons = {}} }
     current = f
-    UI.quickWindows, UI.areaPickers = {}, {}
+    UI.quickWindows, UI.areaPickers, UI.progressWindows, UI.reviewVisits = {}, {}, {}, {}
     UI.windows = {}
     f.plan = { moves = { { itemName = "Bandage", to = "Crate" } }, skipped = {}, pending = 0 }
     f.app = {
         preview = function(_, request) f.previews = f.previews + 1; f.reviewed = request; return f.plan end,
-        start = function(_, plan)
+        start = function(_, plan, options)
             f.starts = f.starts + 1
+            f.startOptions = options
             assert(plan == f.plan, "A quick action must start its current reviewed plan")
             if f.startError then return nil, f.startError end
             return true
@@ -192,6 +206,19 @@ local function fixture()
     f.app.itemLabels = function() return {} end
     f.app.isKept = function() return false end
     f.app.cancel = function() f.cancelled = true; return true end
+    f.app.status = function() return f.jobStatus end
+    f.app.recoveryStatus = function() return f.recovery end
+    f.app.recoverPersonalGear = function()
+        f.recoveries = (f.recoveries or 0) + 1
+        if f.recoveryError then return nil, f.recoveryError end
+        return true
+    end
+    f.app.pause = function()
+        f.pauses = (f.pauses or 0) + 1
+        if f.pauseError then return nil, f.pauseError end
+        f.jobStatus.state, f.jobStatus.canPause, f.jobStatus.canResume = "paused", false, true
+        return true
+    end
     f.app.resume = function()
         f.resumes = (f.resumes or 0) + 1
         if f.resumeError then return nil, f.resumeError end
@@ -206,9 +233,10 @@ local function fixture()
         if f.reviewError then return nil, f.reviewError end
         return f.binPlan
     end
-    f.app.approveBin = function(_, token)
+    f.app.approveBin = function(_, token, options)
         assert(token == f.binPlan, "Approval must use the displayed bin review")
         f.approvals = (f.approvals or 0) + 1
+        f.approvalOptions = options
         if f.approvalError then return nil, f.approvalError end
         f.paused = false
         return true
@@ -857,6 +885,209 @@ test("container reviews name native main inventory as both a source and destinat
     assert(description(reviewWindow(f, plan, {}, setup), "Move all unprotected items from Small Backpack to My main inventory."))
     setup.sourceContainer, setup.destination = main, {kind = "floor"}
     assert(description(reviewWindow(f, plan, {}, setup), "Move all unprotected items from My main inventory to the floor."))
+end)
+
+test("cleanup review defaults to approval visits and offers an explicit job-only skip", function(f)
+    local default = reviewWindow(f, f.plan, {})
+    press(default, "Start cleanup and delete")
+    assert(f.starts == 1 and f.startOptions == nil)
+    local skipped = reviewWindow(f, f.plan, {})
+    press(skipped, "Start and skip bin reviews")
+    assert(f.starts == 2 and f.startOptions.reviewBins == false)
+    assert(f.preferences.confirmQuickMoves == true and skipped.removed)
+end)
+
+test("arrival approval can skip later reviews without replacing the active job", function(f)
+    local window, activeJob = reviewWindow(f), f.activeJob
+    press(window, "Approve and skip further bin reviews")
+    assert(f.approvals == 1 and f.approvalOptions.reviewBins == false)
+    assert(f.starts == 0 and f.activeJob == activeJob and window.removed)
+end)
+
+test("both arrival approval choices remain disabled for a protected bin", function(f)
+    f.binPlan.canApprove = false
+    local window = reviewWindow(f)
+    assert(not window.runButton.enabled and not window.skipReviewsButton.enabled)
+    assert(not f.approvals and f.starts == 0)
+end)
+
+test("failed skip approval keeps the displayed token and error available", function(f)
+    f.approvalError = "A protected item arrived in the bin"
+    local window = reviewWindow(f)
+    press(window, "Approve and skip further bin reviews")
+    assert(not window.removed and window.context.binReview == f.binPlan)
+    assert(window.messagePanel.text == f.approvalError and f.paused and f.starts == 0)
+end)
+
+test("the full cleanup preview offers the same explicit skip choice", function(f)
+    local window = managerWindow(f, "home")
+    window.request, window.plan = request("trash"), f.plan
+    window:show("preview")
+    press(window.body, "Start and skip bin reviews")
+    assert(f.starts == 1 and f.startOptions.reviewBins == false and window.visible == false and f.progress)
+end)
+
+test("arrival review opens with progress closed and dismissal stays respected", function(f)
+    assert(UI.progressWindows[0] == nil)
+    UI.tick()
+    local first = f.review
+    assert(first and first.plan == f.binPlan and f.binReviews == 1)
+    first:close()
+    UI.tick(); UI.tick()
+    assert(f.binReviews == 1 and UI.quickWindows[0] == nil and f.paused and f.starts == 0)
+    UI.showBinReview(0)
+    assert(f.binReviews == 2 and f.review ~= first and f.review.plan == f.binPlan)
+end)
+
+test("reopening the visible arrival review does not replace its approval token", function(f)
+    local first = UI.showBinReview(0)
+    local token = first.context.binReview
+    local same = UI.showBinReview(0)
+    UI.tick()
+    assert(same == first and f.binReviews == 1 and same.context.binReview == token and first.raised == 1)
+end)
+
+test("a fresh arrival generation opens again after the old visit was dismissed", function(f)
+    UI.tick()
+    f.review:close()
+    f.jobStatus.state = "running"
+    UI.tick()
+    assert(f.binReviews == 1)
+    f.jobStatus.state, f.jobStatus.reviewId = "needs_review", 2
+    f.binPlan = {moves = {}, skipped = {}, warnings = {}, pending = 0, canApprove = true}
+    UI.tick(); UI.tick()
+    assert(f.binReviews == 2 and f.review.context.binReview == f.binPlan and f.review.context.reviewId == 2)
+end)
+
+test("a replacement player session gets its own fresh review even when visit numbers match", function(f)
+    UI.tick()
+    local oldWindow, oldToken = f.review, f.binPlan
+    local replacement = {}
+    for key, entry in pairs(f.app) do replacement[key] = entry end
+    f.app = replacement
+    f.binPlan = {moves = {{itemName = "New session item"}}, skipped = {}, warnings = {}, pending = 0, canApprove = true}
+    UI.tick()
+    assert(f.binReviews == 2 and f.review ~= oldWindow and f.review.context.binReview ~= oldToken)
+    assert(f.review.context.binReview == f.binPlan and oldWindow.closed)
+end)
+
+test("typing defers an arrival popup without consuming the pending visit", function(f)
+    f.typing = true
+    UI.tick(); UI.tick()
+    assert(not f.review and not f.binReviews)
+    f.typing = false
+    UI.tick()
+    assert(f.review and f.binReviews == 1)
+end)
+
+test("a failed automatic review is shown once and remains manually retryable", function(f)
+    f.reviewError = "The bin unloaded before its contents could be reviewed"
+    UI.tick(); UI.tick(); UI.tick()
+    assert(f.binReviews == 1 and f.progressShows == 1 and f.progress.notice == f.reviewError)
+    f.reviewError = nil
+    UI.showBinReview(0)
+    assert(f.binReviews == 2 and f.review and f.review.context.binReview == f.binPlan)
+end)
+
+test("arrival polling never creates a player session or approves a bin", function(f)
+    f.sessionAvailable = false
+    UI.tick(); UI.tick()
+    assert(f.peeks == 2 and not f.gets and not f.review and not f.approvals and f.starts == 0)
+    f.sessionAvailable = true
+    f.app = {status = function() return {state = "needs_review", reviewId = 1} end,
+        reviewBin = function() f.binReviews = (f.binReviews or 0) + 1; return f.binPlan end}
+    UI.tick()
+    assert(f.binReviews == 1 and f.review)
+end)
+
+test("Pause and Resume remain explicit while progress shows current settled counts", function(f)
+    local window = progressWindow(f)
+    f.jobStatus = {state = "running", canPause = true, done = 5, moved = 3, cleared = 2, total = 9, reasons = {}}
+    window:update()
+    assert(window.pauseButton.visible and not window.resumeButton.visible)
+    assert(window.countLabel.text:find("5 processed of 9", 1, true))
+    assert(window.countLabel.text:find("3 moved, 2 cleared in place", 1, true))
+    press(window, "Pause job")
+    window:update()
+    assert(f.pauses == 1 and window.resumeButton.visible and not window.pauseButton.visible)
+    assert(window.cancelButton.enabled and f.starts == 0)
+    press(window, "Resume job")
+    assert(f.resumes == 1 and f.jobStatus.state == "running" and f.starts == 0)
+end)
+
+test("a refused pause stays visible without altering the running job", function(f)
+    local window = progressWindow(f)
+    f.jobStatus.state, f.jobStatus.canPause = "running", true
+    f.pauseError = "The pending native action has not settled"
+    window:update(); press(window, "Pause job"); window:update()
+    assert(window.reasonPanel.text:find(f.pauseError, 1, true) and f.jobStatus.state == "running")
+    assert(not f.cancelled and f.starts == 0 and not f.resumes)
+end)
+
+test("pending personal gear remains reachable after the ordinary job stops", function(f)
+    local window = progressWindow(f)
+    f.jobStatus.state = "failed"
+    f.recovery = {pending = true, count = 2, location = "Porch cabinet, floor 0", reason = "Original hand is occupied"}
+    window:update()
+    assert(window.recoverButton.visible and window.recoverButton.enabled)
+    assert(window.reasonPanel.text:find(f.recovery.location, 1, true))
+    f.recoveryError = "Clear the original hand first"
+    press(window, "Recover gear"); window:update()
+    assert(f.recoveries == 1 and window.reasonPanel.text:find(f.recoveryError, 1, true))
+    f.jobStatus.state, f.jobStatus.canPause = "running", true
+    window:update()
+    assert(not window.recoverButton.enabled)
+    f.jobStatus.state, f.jobStatus.canPause = "pausing", false
+    window:update()
+    assert(not window.recoverButton.enabled)
+end)
+
+test("the Current job key follows native rebinding and ignores text entry", function(f)
+    f.jobStatus.state = "paused"
+    UI.onKeyStartPressed(64)
+    assert(not f.progress)
+    UI.onKeyStartPressed(65)
+    assert(f.progressShows == 1 and f.starts == 0)
+    f.boundKey = 211
+    UI.onKeyStartPressed(65)
+    assert(f.progressShows == 1)
+    f.typing = true
+    UI.onKeyStartPressed(211)
+    assert(f.progressShows == 1)
+    f.typing = false
+    UI.onKeyStartPressed(211)
+    assert(f.progressShows == 2)
+end)
+
+test("the manual Current job key can open persisted recovery after entering a world", function(f)
+    f.jobStatus.state = "idle"
+    UI.onKeyStartPressed(f.boundKey)
+    assert(not f.progress and f.gets == 1)
+    f.recovery.pending = true
+    UI.onKeyStartPressed(f.boundKey)
+    assert(f.progressShows == 1 and f.gets == 2)
+    function getSpecificPlayer() return nil end
+    UI.onKeyStartPressed(f.boundKey)
+    assert(f.progressShows == 1 and f.gets == 2)
+end)
+
+test("install registers a native rebindable F7 action without duplicating existing bindings", function()
+    local registrations, menuInstalls = {tick = {}, key = {}}, 0
+    local options = {addTitle = function() end, addDescription = function() end, addButton = function() end}
+    PZAPI = {ModOptions = {getOptions = function() return options end}}
+    Events = {OnTick = {Add = function(fn) registrations.tick[#registrations.tick + 1] = fn end},
+        OnKeyStartPressed = {Add = function(fn) registrations.key[#registrations.key + 1] = fn end}}
+    package.loaded["LootBox/Menus"] = {install = function() menuInstalls = menuInstalls + 1 end}
+    package.loaded.keyBinding = true
+    Keyboard, keyBinding = {KEY_F7 = 65}, {{value = "ForeignAction", key = 9}}
+    UI.installed = nil
+    UI.install(); UI.install()
+    assert(#keyBinding == 3 and keyBinding[1].key == 9 and keyBinding[3].value == "LootBoxCurrentJob" and keyBinding[3].key == 65)
+    assert(#registrations.tick == 1 and #registrations.key == 1 and menuInstalls == 1)
+    keyBinding[3].key = 211
+    UI.installed = nil
+    UI.install()
+    assert(#keyBinding == 3 and keyBinding[3].key == 211)
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")

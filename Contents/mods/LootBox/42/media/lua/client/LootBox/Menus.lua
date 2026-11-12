@@ -41,6 +41,7 @@ local iconPaths = {
     rememberVehicle = "media/ui/LootableMaps/map_key.png",
     contents = "media/ui/Container_Crate.png",
     selectAmount = "media/ui/LootableMaps/map_checkmark.png",
+    currentJob = "media/ui/craftingMenus/BuildProperty_Clock_16.png",
 }
 
 local function call(object, method, ...)
@@ -203,6 +204,10 @@ end
 local function common(menu, playerIndex, context, app, preferences)
     if menu.lootBoxCommon then return end
     menu.lootBoxCommon = true
+    if app:status().state ~= "idle" or app:recoveryStatus().pending then
+        add(menu, "currentJob", "Current job", function() interface.showProgress(playerIndex) end,
+            "Return to progress, pause or resume the current job, or recover temporarily stored gear. The Current job key can be changed in Options > Key bindings.")
+    end
     local setups, problem = app:getSetups()
     if preferences.savedShortcuts and setups and #setups.presets > 0 then
         local saved = submenu(menu, "saved", "Saved setups")
@@ -212,7 +217,7 @@ local function common(menu, playerIndex, context, app, preferences)
                 local setup, err = app:loadSetup(id, context)
                 if not setup then open(playerIndex, context, "compose", err); return end
                 quick(playerIndex, context, setup, setup.scope == "area" and not setup.area)
-            end, "Run " .. name .. " with freshly bound targets. Cleanup always requires a new review.")
+            end, "Run " .. name .. " with freshly bound targets. Every cleanup starts with a fresh plan and a choice of bin review mode.")
         end
     end
     add(menu, "manager", "Open LootBox", function() open(playerIndex, context, "home", problem) end,
