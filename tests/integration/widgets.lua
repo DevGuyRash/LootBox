@@ -287,4 +287,43 @@ test("category badges and names have separate colors without removing selection 
     contained(widget)
 end)
 
+test("a tall preference row paints visible details after its title scrolls away", function()
+    local widget = newList({setting = true})
+    widget.scroll = -Widgets.H
+    local row = {index = 1, text = "Preference title", height = Widgets.H + 3 * fontHeight + 10,
+        item = {key = "setting", details = {"First explanation", "Second explanation", "Third explanation"}}}
+    assert(widget:doDrawItem(0, row, true) == row.height)
+    local shown = texts(widget)
+    assert(#shown == 2 and shown[1].text == "Second explanation" and shown[2].text == "Third explanation")
+    assert(hasColor(shown[1], Widgets.colors.text) and count(widget, "border") == 0)
+    contained(widget)
+end)
+
+test("section rows never draw a checkbox or selection marker", function()
+    local widget = newList({section = true})
+    widget.selected = 1
+    widget:doDrawItem(0, {index = 1, text = "Review and reuse", height = Widgets.H,
+        item = {key = "section", selectable = false, tone = "custom"}}, true)
+    local shown = texts(widget)
+    assert(#shown == 1 and hasColor(shown[1], Widgets.colors.custom) and count(widget, "border") == 0)
+    contained(widget)
+end)
+
+test("variable height preference rows never paint into fixed headers or footers", function()
+    for _, height in ipairs({12, 19, 26, 33, 38}) do
+        fontHeight = height
+        for offset = -240, 120, 3 do
+            local widget = newList({setting = true})
+            widget.height, widget.itemheight, widget.scroll = 180, height + 12, offset
+            local row = {index = 1, text = "Preference", height = widget.itemheight + 3 * height + 10,
+                item = {key = "setting", details = {"One explanation", "Two explanations", "Three explanations"}}}
+            local y = 0
+            for _ = 1, 3 do y = widget:doDrawItem(y, row, true) end
+            assert(y == 3 * row.height)
+            contained(widget)
+        end
+    end
+    fontHeight = 16
+end)
+
 print(passed .. " widget viewport cases passed (explicit native drawing boundary doubles)")

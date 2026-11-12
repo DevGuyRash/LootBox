@@ -181,11 +181,13 @@ function W.list(parent, x, y, width, height, target, onSelect, selection)
     child.selection = selection
     if onSelect then child:setOnMouseDownFunction(target, onSelect) end
     child.doDrawItem = function(self, rowY, row, alternate)
+        local rowHeight = row.height or self.itemheight
         local top = rowY + self:getYScroll()
-        local bottom = top + self.itemheight
-        if bottom <= 1 or top >= self.height - 1 then return rowY + self.itemheight end
-        local checked = self.selection and self.selection[row.item.key]
-        local selected = row.index == self.selected or checked
+        local bottom = top + rowHeight
+        if bottom <= 1 or top >= self.height - 1 then return rowY + rowHeight end
+        local selectable = row.item.selectable ~= false
+        local checked = selectable and self.selection and self.selection[row.item.key]
+        local selected = selectable and (row.index == self.selected or checked)
         local fill = selected and W.colors.raised or W.colors.base
         local first, last = math.max(1, top), math.min(self.height - 1, bottom)
         self:drawRect(1, first - self:getYScroll(), self.width - 2, last - first,
@@ -195,8 +197,8 @@ function W.list(parent, x, y, width, height, target, onSelect, selection)
         local visibleTextY = textY + self:getYScroll()
         if visibleTextY >= 1 and visibleTextY + fontHeight <= self.height - 1 then
             local color = W.colors[row.item.tone or (checked and "success" or "text")] or W.colors.text
-            local textX = self.selection and 30 or 10
-            if self.selection then
+            local textX = self.selection and selectable and 30 or 10
+            if self.selection and selectable then
                 local boxY = rowY + math.floor((self.itemheight - 12) / 2)
                 self:drawRectBorder(9, boxY, 12, 12, 1, color.r, color.g, color.b)
                 if checked then self:drawRect(12, boxY + 3, 6, 6, 1, color.r, color.g, color.b) end
@@ -227,7 +229,18 @@ function W.list(parent, x, y, width, height, target, onSelect, selection)
                 end
             end
         end
-        return rowY + self.itemheight
+        local detailX = self.selection and selectable and 30 or 10
+        local available = self.width - detailX - (self:isVScrollBarVisible() and 20 or 10)
+        for index, text in ipairs(row.item.details or {}) do
+            local detailY = rowY + self.itemheight + (index - 1) * fontHeight
+            local visibleY = detailY + self:getYScroll()
+            if visibleY >= 1 and visibleY + fontHeight <= self.height - 1 then
+                local tint = W.colors.text
+                self:drawText(fit(text, available, self.font), detailX, detailY,
+                    tint.r, tint.g, tint.b, 1, self.font)
+            end
+        end
+        return rowY + rowHeight
     end
     parent:addChild(child)
     return child
