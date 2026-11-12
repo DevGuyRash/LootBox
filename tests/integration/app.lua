@@ -179,7 +179,7 @@ test("Pause and bin review mode choices reach only the existing job", function()
     local app = assert(App.get(0))
     local plan, options, review = {}, {reviewBins = false}, {}
     local created, pauses = calls.created, calls.pauses
-    assert(app:start(plan, options) and calls.plan == plan and calls.options == options)
+    assert(app:start(plan, options) and calls.plan == plan and calls.options.reviewBins == false and options.reviewBins == false)
     assert(app:approveBin(review, options) and calls.review == review and calls.approvalOptions == options)
     assert(app:pause() and calls.pauses == pauses + 1 and app:status().state == "paused")
     assert(calls.created == created)
@@ -212,6 +212,46 @@ test("pending gear recovery blocks both new previews and previously reviewed sta
     app.recovery = recovery
     local request = {scope = "room"}
     assert(app:preview(request) and calls.previews == previews + 1 and calls.request == request)
+end)
+
+test("review scopes are independent and use explicit preference values", function()
+    assert(App.setPreferences({confirmQuickMoves = false, confirmQuickCleanup = true, confirmBinReviews = false}))
+    local ordinary, ordinaryKey = App.reviewPreference({destination = {kind = "matching"}})
+    local cleanup, cleanupKey = App.reviewPreference({destination = {kind = "trash"}})
+    local bins, binsKey = App.reviewPreference(nil, true)
+    assert(ordinary == false and ordinaryKey == "confirmQuickMoves")
+    assert(cleanup == true and cleanupKey == "confirmQuickCleanup")
+    assert(bins == false and binsKey == "confirmBinReviews")
+end)
+
+test("new jobs use the current bin preference while explicit one-job options win without mutation", function()
+    local app = assert(App.get(0))
+    assert(App.setPreferences({confirmBinReviews = false}))
+    assert(app:start({}) and calls.options.reviewBins == false)
+    assert(App.setPreferences({confirmBinReviews = true}))
+    assert(app:start({}) and calls.options.reviewBins == true)
+    local options = {reviewBins = false, marker = "current job only"}
+    assert(app:start({}, options) and calls.options.reviewBins == false and calls.options.marker == options.marker)
+    assert(options.reviewBins == false and calls.options ~= options)
+    assert(App.getPreferences().confirmBinReviews == true)
+end)
+
+test("unreadable preferences require reviews until a current explicit choice is supplied", function()
+    local prior = App.getPreferences()
+    assert(Store.save("LootBox/preferences", {unknownSetting = true}))
+    App.reset()
+    for _, query in ipairs({{destination = {kind = "inventory"}}, {destination = {kind = "trash"}}}) do
+        local required, _, err = App.reviewPreference(query)
+        assert(required and err)
+    end
+    local required, _, err = App.reviewPreference(nil, true)
+    assert(required and err and not App.setPreferences({confirmBinReviews = false}))
+    local app = assert(App.get(0))
+    assert(app:start({}) and calls.options.reviewBins == true)
+    assert(app:start({}, {reviewBins = false}) and calls.options.reviewBins == false)
+    assert(Store.load("LootBox/preferences").unknownSetting == true)
+    assert(Store.save("LootBox/preferences", prior))
+    App.reset()
 end)
 
 test("a validly encoded malformed category document remains read-only", function()

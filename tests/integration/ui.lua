@@ -47,7 +47,18 @@ function ISCollapsableWindow:update() end
 local App = {
     get = function() current.gets = (current.gets or 0) + 1; return current.app end,
     peek = function() current.peeks = (current.peeks or 0) + 1; return current.sessionAvailable and current.app end,
-    getPreferences = function() return current.preferences end,
+    getPreferences = function() return current.preferences, current.preferenceError end,
+    reviewPreference = function(request, binReview)
+        local key = binReview and "confirmBinReviews"
+            or (request and request.destination and request.destination.kind == "trash" and "confirmQuickCleanup" or "confirmQuickMoves")
+        return current.preferenceError ~= nil or current.preferences[key] == true, key, current.preferenceError
+    end,
+    setPreferences = function(patch)
+        current.preferenceWrites = (current.preferenceWrites or 0) + 1
+        if current.preferenceSaveError then return nil, current.preferenceSaveError end
+        for key, value in pairs(patch) do current.preferences[key] = value end
+        return true
+    end,
     catalog = function() return current.catalog end,
 }
 package.loaded["LootBox/App"] = App
@@ -94,8 +105,9 @@ function Widgets.setText(panel, text)
     if panel.text ~= text then panel.text = text; panel.scroll = 0 end
 end
 function Widgets.entry(parent, x, y, width, text) return control(parent, text or "", x, y, width, Widgets.H) end
-function Widgets.check(parent, x, y, width, text, selected)
+function Widgets.check(parent, x, y, width, text, selected, target, callback, tooltip)
     local widget = control(parent, text, x, y, width, Widgets.H)
+    widget.target, widget.callback, widget.tooltip = target, callback, tooltip
     widget.checked = selected == true
     function widget:setSelected(_, v) self.checked = v end
     function widget:isSelected() return self.checked end
@@ -103,16 +115,17 @@ function Widgets.check(parent, x, y, width, text, selected)
 end
 function Widgets.combo(parent, x, y, width)
     local widget = control(parent, "", x, y, width, Widgets.H)
-    widget.options, widget.selected = {}, 0
+    widget.options, widget.selected, widget.tooltip = {}, 0, {}
     function widget:addOptionWithData(text, data, tooltip)
         self.options[#self.options + 1] = {text = text, data = data, tooltip = tooltip}
+        self.tooltip[text] = tooltip
         if self.selected == 0 then self.selected = 1 end
     end
     function widget:selectData(data)
         for i, option in ipairs(self.options) do if option.data == data then self.selected = i; return end end
     end
     function widget:getOptionData(i) return self.options[i] and self.options[i].data end
-    function widget:clear() self.options, self.selected = {}, 0 end
+    function widget:clear() self.options, self.selected, self.tooltip = {}, 0, {} end
     return widget
 end
 function Widgets.list(parent, x, y, width, height, target, callback, selection)
@@ -167,7 +180,7 @@ UI.open = function(playerIndex, context, mode)
     return { messageText = function(_, text) current.opened.message = text end }
 end
 local function fixture()
-    local f = { previews = 0, starts = 0, remembered = 0, preferences = { confirmQuickMoves = true },
+    local f = { previews = 0, starts = 0, remembered = 0, preferences = { confirmQuickMoves = true, confirmQuickCleanup = true, confirmBinReviews = true, showQuickProgress = true },
         sessionAvailable = true, boundKey = 65, recovery = {pending = false},
         jobStatus = {state = "needs_review", reviewId = 1, done = 0, total = 8, reasons = {}} }
     current = f
@@ -346,7 +359,7 @@ local function test(name, run)
     print("PASS " .. name)
 end
 
-test("ordinary shortcuts show a compact review by default", function(f)
+test("ordinary shortcuts show a compact review when enabled", function(f)
     local result = UI.quickAction(0, {}, request())
     assert(result == f.review and f.review.plan == f.plan)
     assert(f.previews == 1 and f.starts == 0)
@@ -358,7 +371,7 @@ test("disabling quick confirmation starts only the current ordinary reviewed pla
     assert(result == f.progress and f.previews == 1 and f.starts == 1 and not f.review)
 end)
 
-test("cleanup always shows a fresh explicit review even with quick confirmation off", function(f)
+test("cleanup review can remain enabled independently of ordinary quick confirmation", function(f)
     f.preferences.confirmQuickMoves = false
     local result = UI.quickAction(0, {}, request("trash"))
     assert(result == f.review and result.request.destination.kind == "trash")
@@ -418,6 +431,7 @@ test("adjusting a full preview retains the task selector search and setup name",
         show = function(self, mode) self.shown = mode end,
         messageText = function(self, text) self.message = text end,
     }
+    setmetatable(window, {__index = UI.Window})
     UI.Window.preview(window)
     assert(window.shown == "preview" and window.request == setup)
     assert(window.operationValue == "clean" and window.selectorKindValue == "items")
@@ -816,7 +830,7 @@ test("Settings keeps every preference reachable above Save across native font si
         local viewport, choices = window.preferenceViewport, window.preferenceSelection
         local rows, save = viewport.items
         for _, widget in ipairs(window.body.controls) do if widget.text == "Save preferences" then save = widget end end
-        assert(#rows == 11 and save and viewport.height >= rowHeight)
+        assert(#rows == 15 and save and viewport.height >= rowHeight)
         assert(viewport.y + viewport.height < save.y)
         local preferences, sections, lastY = 0, 0, 0
         for _, row in ipairs(rows) do
@@ -829,7 +843,7 @@ test("Settings keeps every preference reachable above Save across native font si
             else sections = sections + 1; assert(row.item.selectable == false) end
             lastY = lastY + row.height
         end
-        assert(preferences == 9 and sections == 2)
+        assert(preferences == 13 and sections == 2)
         viewport.callback(viewport.target, rows[1].item)
         assert(choices.contextMenus == true and viewport.selected == 0)
         viewport.callback(viewport.target, rows[2].item)
@@ -863,7 +877,7 @@ test("Settings changes only persist through its fixed Save control", function(f)
     assert(saves.contextMenus == false and saves.showTips == false)
     local count = 0
     for _, value in pairs(saves) do assert(type(value) == "boolean"); count = count + 1 end
-    assert(count == 9 and window.preferenceSelection == choices)
+    assert(count == 13 and window.preferenceSelection == choices)
     assert(window.messagePanel.text:find("Preferences saved", 1, true) and not f.cancelled and f.starts == 0)
     App.setPreferences = previous
 end)
@@ -1098,6 +1112,220 @@ test("capacity-dependent bag setup uses its own warning status in the job review
     assert(row[1].text == "Plank" and row[1].tone == "item")
     assert(row[2].text == "After bag setup" and row[2].tone == "warning")
     assert(row[3].text:find("Carried storage after bag setup", 1, true) and row[3].tone == "text")
+end)
+
+local function tick(widget, selected)
+    widget:setSelected(1, selected)
+    if widget.callback then widget.callback(widget.target, 1, selected) end
+end
+
+test("ordinary and cleanup quick actions can both run quietly without review", function(f)
+    f.preferences.confirmQuickMoves, f.preferences.confirmQuickCleanup, f.preferences.showQuickProgress = false, false, false
+    assert(UI.quickAction(0, {}, request("inventory")) == true)
+    assert(UI.quickAction(0, {}, request("trash")) == true)
+    assert(f.starts == 2 and f.previews == 2 and not f.review and not f.progress and not f.opened)
+end)
+
+test("matching quick requests keep their portable mode and use the ordinary review choice", function(f)
+    f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
+    local setup = request("matching"); setup.destination.mode = "displayed"
+    assert(UI.quickAction(0, {kind = "matching"}, setup) == true)
+    assert(f.reviewed.destination.kind == "matching" and f.reviewed.destination.mode == "displayed")
+    assert(f.reviewed.scope == "inventory" and f.reviewed.includeBags and not f.progress)
+end)
+
+test("quiet quick starts close an older visible preview without opening another panel", function(f)
+    local old = UI.quickAction(0, {}, request())
+    assert(old == f.review)
+    f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
+    assert(UI.quickAction(0, {}, request()) == true)
+    assert(old.closed and UI.quickWindows[0] == nil and not f.progress and f.starts == 1)
+end)
+
+test("quick progress is optional and important startup notices remain visible", function(f)
+    f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, true
+    assert(UI.quickAction(0, {}, request()) == f.progress and f.progressShows == 1)
+    f.preferences.showQuickProgress, f.saveError = false, "Cannot save the setup"
+    assert(UI.quickAction(0, {}, request()) == f.progress and f.progressShows == 2)
+    assert(f.progress.notice:find(f.saveError, 1, true) and f.starts == 2)
+end)
+
+test("unreadable review preferences show a review rather than silently using direct defaults", function(f)
+    f.preferences.confirmQuickMoves, f.preferences.confirmQuickCleanup = false, false
+    f.preferenceError = "Damaged review preferences"
+    local review = UI.quickAction(0, {}, request("trash"))
+    assert(review == f.review and review.notice:find(f.preferenceError, 1, true))
+    assert(f.starts == 0 and not f.progress and not f.preferenceWrites)
+end)
+
+test("a transfer preview opt-out persists only after its valid start", function(f)
+    local window = reviewWindow(f, f.plan, {}, request("inventory"))
+    assert(not window.skipPreviewCheck:isSelected(1))
+    tick(window.skipPreviewCheck, true)
+    assert(not f.preferenceWrites)
+    resize(window, 540, 440)
+    assert(window.skipPreviewCheck:isSelected(1))
+    inside(window.skipPreviewCheck, window)
+    press(window, "Start quick job")
+    assert(f.starts == 1 and f.preferenceWrites == 1 and f.preferences.confirmQuickMoves == false)
+    assert(f.preferences.confirmQuickCleanup and f.preferences.confirmBinReviews)
+end)
+
+test("cancelling a preview does not save its pending opt-out", function(f)
+    local window = reviewWindow(f, f.plan, {}, request("inventory"))
+    tick(window.skipPreviewCheck, true)
+    press(window, "Cancel")
+    assert(window.removed and f.starts == 0 and not f.preferenceWrites and f.preferences.confirmQuickMoves)
+end)
+
+test("a rejected start keeps both the preview and its remembered preference unchanged", function(f)
+    f.startError = "The source changed"
+    local window = reviewWindow(f, f.plan, {}, request("inventory"))
+    tick(window.skipPreviewCheck, true)
+    press(window, "Start quick job")
+    assert(not window.removed and window.messagePanel.text:find(f.startError, 1, true))
+    assert(not f.preferenceWrites and f.preferences.confirmQuickMoves)
+end)
+
+test("cleanup preview opt-out does not change transfer or arrival-review preferences", function(f)
+    local window = reviewWindow(f, f.plan, {}, request("trash"))
+    tick(window.skipPreviewCheck, true)
+    press(window, "Start cleanup and delete")
+    assert(f.starts == 1 and f.preferences.confirmQuickCleanup == false)
+    assert(f.preferences.confirmQuickMoves and f.preferences.confirmBinReviews and f.preferenceWrites == 1)
+end)
+
+test("a bin review can remember automatic approval after its valid token succeeds", function(f)
+    local window = reviewWindow(f)
+    tick(window.skipPreviewCheck, true)
+    press(window, "Approve bin and continue")
+    assert(f.approvals == 1 and f.approvalOptions.reviewBins == false and f.preferences.confirmBinReviews == false)
+    assert(f.preferences.confirmQuickMoves and f.preferences.confirmQuickCleanup and f.preferenceWrites == 1)
+    assert(f.starts == 0)
+end)
+
+test("invalid bin approval cannot persist an opt-out", function(f)
+    f.approvalError = "Review this bin again"
+    local window = reviewWindow(f)
+    tick(window.skipPreviewCheck, true)
+    press(window, "Approve bin and continue")
+    assert(not window.removed and window.messagePanel.text:find(f.approvalError, 1, true))
+    assert(not f.preferenceWrites and f.preferences.confirmBinReviews and f.paused)
+end)
+
+test("an explicit preview can re-enable future reviews after a successful start", function(f)
+    f.preferences.confirmQuickMoves = false
+    local window = reviewWindow(f, f.plan, {}, request("inventory"))
+    assert(window.skipPreviewCheck:isSelected(1))
+    tick(window.skipPreviewCheck, false)
+    press(window, "Start quick job")
+    assert(f.preferences.confirmQuickMoves == true and f.preferenceWrites == 1 and f.starts == 1)
+end)
+
+test("a preference-write failure leaves the running job intact and explains the unsaved choice", function(f)
+    f.preferenceSaveError = "The local preference file is read-only"
+    local window = reviewWindow(f, f.plan, {}, request("inventory"))
+    tick(window.skipPreviewCheck, true)
+    press(window, "Start quick job")
+    assert(window.removed and f.starts == 1 and f.preferences.confirmQuickMoves)
+    assert(f.progress.notice:find(f.preferenceSaveError, 1, true) and f.preferenceWrites == 1)
+end)
+
+test("manual Start runs directly while explicit Preview remains available", function(f)
+    f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
+    local window = managerWindow(f, "compose", {request = request("inventory")})
+    press(window.body, "Start job")
+    assert(f.starts == 1 and f.progress and window.visible == false)
+end)
+
+test("explicit Preview opens a plan even when automatic reviews are disabled", function(f)
+    f.preferences.confirmQuickMoves = false
+    local window = managerWindow(f, "compose", {request = request("inventory")})
+    press(window.body, "Preview job")
+    assert(window.mode == "preview" and f.previews == 1 and f.starts == 0)
+    assert(window.skipPreviewCheck:isSelected(1))
+end)
+
+test("manual Start honors enabled reviews instead of bypassing the chosen preference", function(f)
+    local window = managerWindow(f, "compose", {request = request("inventory")})
+    press(window.body, "Start job")
+    assert(window.mode == "preview" and f.starts == 0)
+    tick(window.skipPreviewCheck, true)
+    press(window.body, "Adjust setup")
+    press(window.body, "Preview job")
+    assert(window.skipPreviewCheck:isSelected(1))
+    press(window.body, "Start job")
+    assert(f.starts == 1 and not f.preferences.confirmQuickMoves)
+end)
+
+test("matching mode fixes all carried sources and restores the previous source choices on exit", function(f)
+    local setup = request("inventory"); setup.scope, setup.includeBags, setup.includeInventory = "room", false, true
+    local window = managerWindow(f, "compose", {request = setup})
+    window.destination:selectData("matching"); window:onDestinationChanged()
+    assert(window.scope:getOptionData(window.scope.selected) == "inventory" and window.scope.enabled == false)
+    assert(window.includeBags:isSelected(1) and window.includeBags.enable == false)
+    assert(window.includeBags.tooltip:find("every carried container", 1, true))
+    window.endpoint:selectData("displayed")
+    local chosen = assert(window:readRequest())
+    assert(chosen.scope == "inventory" and chosen.includeBags and not chosen.includeInventory)
+    assert(chosen.destination.kind == "matching" and chosen.destination.mode == "displayed")
+    resize(window, 900, 740)
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == "displayed")
+    window.destination:selectData("inventory"); window:onDestinationChanged()
+    assert(window.scope:getOptionData(window.scope.selected) == "room" and window.scope.enabled)
+    assert(not window.includeBags:isSelected(1) and window.includeBags.enable and window.includeInventory:isSelected(1))
+end)
+
+test("cleanup previews omit a redundant one-job skip button when arrival reviews are already off", function(f)
+    f.preferences.confirmBinReviews = false
+    local window = reviewWindow(f, f.plan, {}, request("trash"))
+    assert(window.skipReviewsButton == nil and window.runButton.enabled)
+    inside(window.skipPreviewCheck, window)
+end)
+
+test("an untouched preview checkbox cannot overwrite a newer Settings choice", function(f)
+    local window = reviewWindow(f, f.plan, {}, request("inventory"))
+    assert(not window.skipPreviewCheck:isSelected(1))
+    f.preferences.confirmQuickMoves = false
+    press(window, "Start quick job")
+    assert(f.starts == 1 and f.preferences.confirmQuickMoves == false and not f.preferenceWrites)
+end)
+
+test("an explicit bin review can enable future bin approvals without forcing a one-job skip", function(f)
+    f.preferences.confirmBinReviews = false
+    local window = reviewWindow(f)
+    assert(window.skipPreviewCheck:isSelected(1))
+    tick(window.skipPreviewCheck, false)
+    press(window, "Approve bin and continue")
+    assert(f.approvals == 1 and f.approvalOptions == nil and f.preferences.confirmBinReviews)
+    assert(f.preferenceWrites == 1)
+end)
+
+test("a one-job skip remains separate from remembered arrival-review preferences", function(f)
+    local window = reviewWindow(f)
+    assert(not window.skipPreviewCheck:isSelected(1))
+    press(window, "Approve and skip further bin reviews")
+    assert(f.approvals == 1 and f.approvalOptions.reviewBins == false)
+    assert(f.preferences.confirmBinReviews and not f.preferenceWrites)
+end)
+
+test("Adjust setup carries a changed review choice into the full composer without saving early", function(f)
+    local window = reviewWindow(f, f.plan, {}, request("inventory"))
+    tick(window.skipPreviewCheck, true)
+    press(window, "Adjust setup")
+    assert(f.opened and not f.preferenceWrites and f.preferences.confirmQuickMoves)
+    local full = managerWindow(f, "compose", f.opened.context)
+    press(full.body, "Preview job")
+    assert(full.skipPreviewCheck:isSelected(1) and not f.preferenceWrites)
+    press(full.body, "Start job")
+    assert(f.starts == 1 and f.preferenceWrites == 1 and not f.preferences.confirmQuickMoves)
+end)
+
+test("a quiet quick action with no planned moves does not require an empty approval window", function(f)
+    f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
+    f.plan.moves = {}
+    assert(UI.quickAction(0, {}, request()) == true)
+    assert(f.starts == 1 and not f.review and not f.progress)
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")
