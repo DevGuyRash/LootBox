@@ -129,7 +129,7 @@ function W.combo(parent, x, y, width, target, callback, tooltip)
     child.backgroundColorMouseOver = W.color("raised")
     child.borderColor = W.color("border")
     child.textColor = W.color("text")
-    child.tooltip = tooltip
+    child:setToolTipMap({defaultTooltip = tooltip})
     parent:addChild(child)
     return child
 end

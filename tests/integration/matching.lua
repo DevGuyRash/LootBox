@@ -402,9 +402,9 @@ test("Smart Take empty matches paused input and native failures cannot start par
     assert(#f.quick == 0 and f.progress[1].player == 3 and f.progress[1].reason == f.smartError)
 end)
 
-test("Smart matching uses a measured native image and readable destination tooltip", function(f)
+test("Smart matching names its action and measures the full label with its native image", function(f)
     local handler = f:smart("matching")
-    assert(handler.control.title == "SMART" and handler.control.width == 73 and handler.control.height == 18)
+    assert(handler.control.title == "Smart Take Matching" and handler.control.width == 171 and handler.control.height == 18)
     assert(handler.control.iconRight.path == "media/ui/inventoryPanes/TakeSameTypeOneContainer.png")
     assert(handler.control.tooltip:find("similar items first", 1, true))
     assert(f:smart("all").control.title == "Smart Take All")

@@ -182,14 +182,15 @@ function SmartTake:shouldBeVisible()
 end
 
 function SmartTake:getControl()
-    local button = self:getButtonControl(self.mode == "all" and "Smart Take All" or "SMART")
+    local title = self.mode == "all" and "Smart Take All" or "Smart Take Matching"
+    local button = self:getButtonControl(title)
     local height = getTextManager():getFontHeight(UIFont.Small)
     if self.mode == "matching" then
         local texture = getTexture("media/ui/inventoryPanes/TakeSameTypeOneContainer.png")
         local width = texture:getWidth() / texture:getHeight() * height
         button.titleLeft = true
         button.iconRight, button.iconRightHeight, button.iconRightWidth = texture, height, width
-        button:setWidth(getTextManager():MeasureStringX(UIFont.Small, "SMART") + width + 10)
+        button:setWidth(getTextManager():MeasureStringX(UIFont.Small, title) + width + 10)
     end
     button:setHeight(height + 4)
     button.textColor = {r = 0.68, g = 0.86, b = 0.75, a = 1}

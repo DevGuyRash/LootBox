@@ -35,6 +35,27 @@ function ISScrollingListBox:new(x, y, width, height)
     return object
 end
 
+ISComboBox = {}
+function ISComboBox:new(x, y, width, height)
+    local object = {x = x, y = y, width = width, height = height, options = {}, selected = 0, tooltip = nil}
+    function object:initialise() end
+    function object:setToolTipMap(values) self.tooltip = values end
+    function object:addOptionWithData(text, data, tooltip)
+        self.options[#self.options + 1] = {text = text, data = data, tooltip = tooltip}
+        if self.selected == 0 then self.selected = 1 end
+    end
+    function object:getOptionTooltip(index)
+        local option = self.options[index]
+        if option then
+            if type(option) == "table" then
+                if option.tooltip then return option.tooltip end
+                if self.tooltip then return self.tooltip[option.text] or self.tooltip.defaultTooltip end
+            elseif self.tooltip then return self.tooltip[option] or self.tooltip.defaultTooltip end
+        end
+    end
+    return object
+end
+
 local Widgets = require "LootBox/Widgets"
 local parent = { addChild = function() end }
 local function newList(selection)
@@ -324,6 +345,24 @@ test("variable height preference rows never paint into fixed headers or footers"
         end
     end
     fontHeight = 16
+end)
+
+test("combo default help uses the native map while per-option help retains precedence", function()
+    local widget = Widgets.combo(parent, 0, 0, 200, nil, nil, "Choose a saved workflow")
+    widget:addOptionWithData("Choose a setup", false)
+    widget:addOptionWithData("Medical supplies", "medical", "Only first aid items")
+    assert(type(widget.tooltip) == "table" and widget:getOptionTooltip(1) == "Choose a saved workflow")
+    assert(widget:getOptionTooltip(2) == "Only first aid items")
+    widget.tooltip["Medical supplies"] = "Map fallback must not replace option help"
+    assert(widget:getOptionTooltip(2) == "Only first aid items")
+end)
+
+test("a combo without default help safely reads plain and individually described options", function()
+    local widget = Widgets.combo(parent, 0, 0, 200, nil, nil)
+    widget:addOptionWithData("No help", false)
+    widget:addOptionWithData("Carried items", "inventory", "Includes eligible bags")
+    assert(type(widget.tooltip) == "table" and widget:getOptionTooltip(1) == nil)
+    assert(widget:getOptionTooltip(2) == "Includes eligible bags" and widget:getOptionTooltip(3) == nil)
 end)
 
 print(passed .. " widget viewport cases passed (explicit native drawing boundary doubles)")
