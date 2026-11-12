@@ -446,6 +446,16 @@ function Instance:preview(request)
     self.jobs.graph = graph
     return self.jobs:preview(request)
 end
+function Instance:previewCondense()
+    if self.error or loadError then return nil, self.error or loadError end
+    local recovery = self.recovery:status()
+    if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before condensing" end
+    local preferences, err = App.getPreferences()
+    if err then return nil, err end
+    self.jobs.graph = graph
+    return self.jobs:previewCondense({rebalance = preferences.condenseRebalance,
+        useUnequipped = preferences.condenseUseUnequipped, nested = preferences.condenseNested})
+end
 function Instance:start(plan, options)
     local recovery = self.recovery:status()
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end

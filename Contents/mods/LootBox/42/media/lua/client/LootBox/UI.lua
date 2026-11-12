@@ -29,6 +29,23 @@ local reviewChoices = {
     confirmBinReviews = {label = "Skip future bin reviews", tooltip = "Remember this after successful approval. Eligible bins will be inspected and approved automatically for this and future jobs. Protected items, permissions and native rules still apply."},
 }
 
+local function condenseMode(info)
+    return info and info.mode == "rebalance" and "Optimize bag contents" or "Pack main inventory"
+end
+
+local function condenseScope(info)
+    local scope = info and info.useUnequipped and "Equipped and unequipped bags" or "Equipped bags only"
+    return scope .. (info and info.nested and "; nested contents included" or "; nested contents left in place")
+end
+
+local function condenseDescription(info)
+    local text = condenseScope(info) .. ". Bag objects stay where they are."
+    if info and info.estimatedSaving then
+        text = text .. string.format("\nFirst arrangement estimate: %.2f encumbrance reduced. Later arrangements are checked as the job runs.", info.estimatedSaving)
+    end
+    return text
+end
+
 local function rememberReviewChoice(widget, key, notice)
     if not widget then return notice end
     if widget.initialReviewSelection ~= nil and widget:isSelected(1) == widget.initialReviewSelection then return notice end
@@ -101,7 +118,7 @@ local function copyRequest(request)
     request = request or {}
     local filter, destination = request.filter or {}, request.destination or {}
     local result = { scope = request.scope or "inventory", sourceContainer = request.sourceContainer,
-        includeInventory = request.includeInventory == true, includeBags = request.includeBags ~= false,
+        includeInventory = request.includeInventory == true, includeBags = request.includeBags ~= false, excludeUnwanted = request.excludeUnwanted == true,
         filter = { ids = {}, types = {}, all = filter.all == true },
         destination = { kind = destination.kind or "inventory", ref = destination.ref, mode = destination.mode } }
     for _, id in ipairs(filter.ids or {}) do result.filter.ids[#result.filter.ids + 1] = id end
@@ -209,6 +226,9 @@ local function routeText(request)
 end
 
 local function pendingSummary(plan)
+    if plan.condense then
+        return tostring(plan.condense.eligible or 0) .. " eligible items   " .. tostring(plan.condense.bagCount or 0) .. " eligible bags"
+    end
     local rooms = plan.building and plan.building.roomsTotal or 0
     local sources = math.max(0, (plan.pending or 0) - rooms)
     if rooms > 0 then
@@ -223,14 +243,16 @@ local function reviewRows(widget, plan)
         detailRow(widget, tostring(rooms) .. " building rooms", "To search", "The job walks through their floors and adds matching items as it finds them.", "accent")
     end
     local pending = math.max(0, (plan.pending or 0) - rooms)
-    if pending > 0 then
+    if pending > 0 and plan.condense then
+        detailRow(widget, "Further arrangements", "Recheck", "Current contents and native capacity are checked after each completed arrangement.", "accent")
+    elseif pending > 0 then
         detailRow(widget, tostring(pending) .. " sources", "To inspect", "Contents will be checked after approach. Empty multiplayer replies can remain unconfirmed.", "accent")
     end
     for _, row in ipairs(plan.moves or {}) do
         local bagSetup = row.status == "Recheck after bag setup"
-        detailRow(widget, row.itemName, plan.bin and "Will be deleted" or (bagSetup and "After bag setup" or "Planned"),
+        detailRow(widget, row.itemName, plan.bin and "Will be deleted" or (plan.condense and row.status or (bagSetup and "After bag setup" or "Planned")),
             tostring(row.from or "Source") .. " -> " .. tostring(row.to or "Destination"),
-            plan.bin and "danger" or (bagSetup and "warning" or "success"))
+            plan.bin and "danger" or (plan.condense and row.tone or (bagSetup and "warning" or "success")))
     end
     for _, row in ipairs(plan.skipped or {}) do
         detailRow(widget, row.itemName, row.status or "Stays here", row.reason or "No destination", row.tone or "warning")
@@ -739,6 +761,7 @@ function Window:readRequest(validate)
     local scope, kind = value(self.scope), value(self.destination)
     local request = { scope = scope, sourceContainer = value(self.sourceEndpoint) or self.context.sourceContainer or self.context.container,
         includeInventory = self.includeInventory:isSelected(1), includeBags = self.includeBags:isSelected(1),
+        excludeUnwanted = self.request.excludeUnwanted == true,
         filter = filter, destination = { kind = kind } }
     if kind == "matching" then
         scope = "inventory"
@@ -1281,10 +1304,14 @@ local preferenceRows = {
     { key = "confirmQuickMoves", title = "Review quick transfers first", description = "Optional preview for ordinary quick transfers and the Start job button. Off starts directly after current item and capacity checks; Preview job always remains available." },
     { key = "confirmQuickCleanup", title = "Review quick cleanup first", description = "Optional deletion preview for quick cleanup and Start cleanup. Off lets those actions delete eligible items directly. Bin review has its own setting." },
     { key = "confirmBinReviews", title = "Review bins on arrival", description = "Optional contents approval at each newly inspected bin. Off approves eligible bins automatically. Protected items, permissions and native deletion rules still apply." },
-    { key = "matchingTransferButtons", title = "All-container matching transfer buttons", description = "Add an ALL-source companion beside each native matching-transfer icon. Transfer matches from every carried container to the displayed or nearby containers." },
+    { key = "matchingTransferButtons", title = "Smart Take and all-container transfer buttons", description = "Add Smart Take All and Smart Take Matching beside native loot controls, plus ALL-source matching-transfer companions. Smart Take checks all carried bags and fills similar bags before other bags and main inventory." },
     { key = "showQuickProgress", title = "Open Current job for quick actions", description = "Show Progress after a direct quick action starts. Off keeps quick actions quiet; F7 and Current job still show their result. Important startup notices remain visible." },
     { key = "rememberLastSetup", title = "Remember my last action setup", description = "Restore the last source, destination, selection and bag options when continuing a setup." },
     { key = "showTips", title = "Show workflow tips", description = "Show additional guidance in the Home view. Tooltips and the Help field guide stay available." },
+    { key = "condenseButton", title = "Show Condense before Transfer All", description = "Add a Condense button to the inventory footer. It uses main inventory and eligible carried bags, independently of the pane you are viewing." },
+    { key = "condenseRebalance", title = "Condense: optimize bag contents", description = "Off packs main-inventory items heaviest first into the best useful bags and leaves existing contents alone. On also redistributes contents and considers useful multi-item exchanges. It searches for an improvement, without promising a global optimum." },
+    { key = "condenseUseUnequipped", title = "Condense: include unequipped bags", description = "Off leaves unequipped loot bags and their contents alone. On makes other carried bags eligible too. They are never automatically equipped, and their printed reduction does not apply while unequipped." },
+    { key = "condenseNested", title = "Condense: include nested contents", description = "Allow nested contents within eligible carried bags to participate. Bag objects stay fixed. An inner bag uses its outer carried bag's actual reduction; the percentages do not multiply." },
 }
 
 local function wrapPreferenceDescription(text, width)
@@ -1317,6 +1344,7 @@ function Window:buildSettings()
     local rows = {}
     for index, row in ipairs(preferenceRows) do
         if index == 7 then viewport:addItem("Review and reuse", {selectable = false, tone = "custom"}) end
+        if row.key == "condenseButton" then viewport:addItem("Condense", {selectable = false, tone = "custom", condenseSection = true}) end
         rows[#rows + 1] = viewport:addItem(row.title, {key = row.key, description = row.description},
             row.title .. "\n" .. row.description)
     end
@@ -1324,7 +1352,7 @@ function Window:buildSettings()
     local y = body.height - 3 * H
     local save = button(body, 0, y, 180, "Save preferences", self, Window.savePreferences,
         "Save only LootBox preferences. Other mods' Options settings are not reloaded.", "accent")
-    self.messagePanel = wrapped(body, 0, y + H + 5, width, 2 * H - 5, err or "Changes apply to the next right-click menu you open.")
+    self.messagePanel = wrapped(body, 0, y + H + 5, width, 2 * H - 5, err or "Changes apply to future actions. Toolbar visibility updates immediately.")
     body.layout = function()
         local scroll = viewport:getYScroll()
         place(introduction, 0, H + 4, body.width)
@@ -1347,13 +1375,20 @@ function Window:buildSettings()
         place(self.messagePanel, 0, footer + H + 5, body.width)
     end
     body.layout()
+    if self.context.settingsSection == "condense" then
+        local offset = 0
+        for _, row in ipairs(viewport.items) do
+            if row.item.condenseSection then viewport:setYScroll(-offset); break end
+            offset = offset + row.height
+        end
+    end
 end
 
 function Window:savePreferences()
     local nextPreferences = {}
     for _, row in ipairs(preferenceRows) do nextPreferences[row.key] = self.preferenceSelection[row.key] == true end
     local ok, err = App.setPreferences(nextPreferences)
-    self:messageText(ok and "Preferences saved. Open a new right-click menu to see the result." or err)
+    self:messageText(ok and "Preferences saved. Future actions use these choices; toolbar visibility updates immediately." or err)
 end
 
 function Window:close()
@@ -1466,10 +1501,10 @@ function QuickReview:new(playerIndex, context, request, plan, notice)
     local o = ISCollapsableWindow.new(self, (getCore():getScreenWidth() - width) / 2,
         (getCore():getScreenHeight() - height) / 2, width, height)
     o.playerIndex, o.context, o.request, o.plan, o.notice = playerIndex, context, request, plan, notice
-    o.title = context.binReview and "LootBox - review bin contents"
+    o.title = context.condense and "LootBox - review Condense" or context.binReview and "LootBox - review bin contents"
         or (request.destination.kind == "trash" and "LootBox - review deletion" or "LootBox - quick action")
     o.resizable, o.backgroundColor, o.borderColor = true, W.color("base"), W.color("border")
-    local minimumHeight = math.max(440, o:titleBarHeight() + (request.destination.kind == "trash" and 12 or 10) * H + 3 * GAP + bottomInset(o))
+    local minimumHeight = math.max(440, o:titleBarHeight() + (request.destination.kind == "trash" and 12 or (context.condense and 11 or 10)) * H + 3 * GAP + bottomInset(o))
     o.minimumWidth, o.minimumHeight = math.min(540, width), math.min(minimumHeight, availableHeight)
     o:setHeight(math.max(height, o.minimumHeight))
     o:setY((getCore():getScreenHeight() - o.height) / 2)
@@ -1483,17 +1518,18 @@ function QuickReview:createChildren()
     local y, width = self:titleBarHeight() + GAP, self.width - 2 * GAP
     local moves, skipped, pending = #(self.plan.moves or {}), #(self.plan.skipped or {}), self.plan.pending or 0
     local binReview = self.context.binReview
+    local condense = self.context.condense and self.plan.condense or nil
     local trash = self.request.destination.kind == "trash"
     local showSkip = trash and (binReview ~= nil or App.reviewPreference(nil, true))
     local footerRows = showSkip and 6 or 5
-    local heading = W.heading(self, GAP, y, binReview and ("Use " .. tostring(self.plan.bin.name) .. " for cleanup?")
+    local heading = W.heading(self, GAP, y, condense and condenseMode(condense) or binReview and ("Use " .. tostring(self.plan.bin.name) .. " for cleanup?")
         or (tostring(moves) .. (self.plan.building and " observed moves" or " planned moves")))
     if binReview then heading.r, heading.g, heading.b = C.item.r, C.item.g, C.item.b end
-    local summary = label(self, GAP, y + H, binReview and (tostring(moves + skipped) .. " existing items observed   "
+    local summary = label(self, GAP, y + H, condense and pendingSummary(self.plan) or binReview and (tostring(moves + skipped) .. " existing items observed   "
         .. (skipped > 0 and tostring(skipped) .. " protected - approval blocked" or "Job waiting for your choice"))
         or (tostring(skipped) .. " stay here   " .. pendingSummary(self.plan)), true)
     if binReview and skipped > 0 then summary.r, summary.g, summary.b = C.warning.r, C.warning.g, C.warning.b end
-    local description = routeText(self.request)
+    local description = condense and condenseDescription(condense) or routeText(self.request)
     if binReview then
         local bin, point = self.plan.bin, self.plan.bin.point
         description = "Floor " .. tostring(point.z) .. " at " .. tostring(point.x) .. ", " .. tostring(point.y)
@@ -1502,13 +1538,14 @@ function QuickReview:createChildren()
         end
         description = description .. "\n" .. (bin.routing or "Approve this destination, or try another bin while keeping the current job.")
     end
-    local descriptionHeight = binReview and 3 * H or 2 * H
+    local descriptionHeight = (binReview or condense) and 3 * H or 2 * H
     local descriptionPanel = wrapped(self, GAP, y + 2 * H, width, descriptionHeight, description)
     local listY, footerY = y + 2 * H + descriptionHeight + GAP, self.height - footerRows * H - bottomInset(self)
     self.rows = list(self, GAP, listY, width, footerY - listY - GAP, self)
     reviewRows(self.rows, self.plan)
     if moves == 0 and pending == 0 and skipped == 0 then
-        self.rows:addItem(binReview and "No existing items are currently observed in this bin." or "No eligible matching items were observed.", { tone = "muted" },
+        self.rows:addItem(condense and (condense.reason or "No useful arrangement was found for the current eligible bags.")
+            or (binReview and "No existing items are currently observed in this bin." or "No eligible matching items were observed."), { tone = "muted" },
             binReview and "This is a client observation. Multiplayer cannot certify an empty bin or make shared-bin deletion atomic."
                 or "Adjust the item selection or source. Unopened multiplayer sources may remain unconfirmed.")
     end
@@ -1524,7 +1561,12 @@ function QuickReview:createChildren()
     self.skipPreviewCheck.initialReviewSelection = initial
     local backButton = button(self, GAP, footerY, 100, binReview and "Back" or "Cancel", self, function(s) s:close() end,
         binReview and "Close this window and leave the current job paused for review." or "Close this review without starting a job.")
-    local adjustButton = button(self, GAP + 110, footerY, binReview and 145 or 115, binReview and "Try another bin" or "Adjust setup", self, function(s)
+    local adjustButton = button(self, GAP + 110, footerY, (binReview or condense) and 145 or 115,
+        condense and "Condense settings" or (binReview and "Try another bin" or "Adjust setup"), self, function(s)
+        if s.context.condense then
+            s:close(); UI.open(s.playerIndex, {settingsSection = "condense"}, "settings")
+            return
+        end
         if s.context.binReview then
             local app, problem = App.get(s.playerIndex)
             if not app then W.setText(s.messagePanel, problem); return end
@@ -1539,8 +1581,9 @@ function QuickReview:createChildren()
         context.skipPreviewKey, context.skipPreviewDraft = s.skipPreviewKey, s.skipPreviewCheck:isSelected(1)
         context.skipPreviewInitial = s.skipPreviewCheck.initialReviewSelection
         s:close(); UI.open(s.playerIndex, context, "compose")
-    end, binReview and "Skip this bin and let the current job try another eligible destination." or "Open the full manager with this exact setup.")
-    local runText = binReview and "Approve bin and continue" or (trash and "Start cleanup and delete" or "Start quick job")
+    end, condense and "Choose packing mode and eligible bags. Press Condense again afterward for a fresh plan."
+        or (binReview and "Skip this bin and let the current job try another eligible destination." or "Open the full manager with this exact setup."))
+    local runText = condense and "Start Condense" or binReview and "Approve bin and continue" or (trash and "Start cleanup and delete" or "Start quick job")
     self.runButton = button(self, self.width - GAP - 240, footerY, 240, runText, self, function(s)
         local app, problem = App.get(s.playerIndex)
         if not app then W.setText(s.messagePanel, problem); return end
@@ -1568,9 +1611,10 @@ function QuickReview:createChildren()
         self.skipReviewsButton:setEnable(binReview and self.plan.canApprove == true or (not binReview and (moves > 0 or pending > 0)))
     end
     self.messagePanel = wrapped(self, GAP, footerY + (showSkip and 3 or 2) * H + 8, width, 3 * H - 8,
-        self.notice or (binReview and "Approve permits whole-bin deletion of the observed contents above and items this job delivers. The job keeps its selection and search progress. Protected or changed contents block approval. Back leaves the job waiting."
+        self.notice or (condense and (condense.reason or "Condense checks one arrangement at a time. Optimization may temporarily use main inventory. Native working-space limits and protected items remain respected.")
+            or (binReview and "Approve permits whole-bin deletion of the observed contents above and items this job delivers. The job keeps its selection and search progress. Protected or changed contents block approval. Back leaves the job waiting."
             or (trash and "Deletion is permanent. The native trash command empties the entire bin; protected or new unapproved contents block deletion."
-            or "Capacity, access and item ownership are rechecked while the job runs.")))
+            or "Capacity, access and item ownership are rechecked while the job runs."))))
     self.layout = function()
         local w = self.width - 2 * GAP
         local footer = self.height - footerRows * H - bottomInset(self)
@@ -1676,20 +1720,41 @@ function Progress:update()
     if not getSpecificPlayer(self.playerIndex) then self:close(); return end
     local app = App.get(self.playerIndex)
     local status = app:status()
-    self.statusLabel:setName(status.waiting and "Waiting for your action" or states[status.state] or "Working")
+    local condense = status.condense
+    self.statusLabel:setName(status.waiting and "Waiting for your action"
+        or (condense and status.state == "running" and "Condensing" or states[status.state] or "Working"))
     local color = status.state == "failed" and C.danger
         or ((status.state == "pausing" or status.state == "paused" or status.state == "cancelled" or status.state == "needs_review" or status.waiting) and C.warning)
         or (status.state == "running" and C.accent or C.success)
     self.statusLabel.r, self.statusLabel.g, self.statusLabel.b = color.r, color.g, color.b
     local counts = tostring(status.done or 0) .. ((status.cleared or 0) > 0 and " processed of " or " moved of ") .. tostring(status.total or 0)
-    if (status.cleared or 0) > 0 then
+    if condense then
+        counts = tostring(condense.itemsMoved or 0) .. " items reorganized   " .. tostring(condense.transfers or 0) .. " transfers"
+    elseif (status.cleared or 0) > 0 then
         counts = counts .. "   " .. tostring(status.moved or 0) .. " moved, " .. tostring(status.cleared) .. " cleared in place"
     end
     self.countLabel:setName(counts .. "   " .. tostring(status.skipped or 0) .. " notes to review")
     local survey = status.survey
-    W.setText(self.surveyPanel, survey and ("Rooms processed " .. tostring(survey.roomsDone) .. " of " .. tostring(survey.roomsTotal)
-        .. ". Sections searched " .. tostring(survey.sectionsSearched) .. ", unsearched " .. tostring(survey.sectionsUnsearched) .. ".") or "")
+    self.surveyPanel.textColor = W.color(condense and "item" or "text")
+    if condense then
+        W.setText(self.surveyPanel, condenseMode(condense)
+            .. string.format("\nCurrent carried weight %.2f; started at %.2f.", condense.currentWeight or 0, condense.beforeWeight or 0))
+    else
+        W.setText(self.surveyPanel, survey and ("Rooms processed " .. tostring(survey.roomsDone) .. " of " .. tostring(survey.roomsTotal)
+            .. ". Sections searched " .. tostring(survey.sectionsSearched) .. ", unsearched " .. tostring(survey.sectionsUnsearched) .. ".") or "")
+    end
     local text = status.waiting or status.reason or ""
+    if condense then
+        local saved = condense.saved or 0
+        text = text .. (text ~= "" and "\n" or "") .. (saved < 0
+            and string.format("Temporary increase from rearrangement: %.2f.", -saved)
+            or string.format("Estimated reduction from transfers: %.2f.", saved))
+        if (condense.buffered or 0) > 0 then
+            text = text .. " " .. tostring(condense.buffered) .. " working-space items remain in carried storage."
+            if status.state ~= "running" then text = text .. " Resume to finish the arrangement." end
+        end
+        if condense.limited then text = text .. " Search is bounded; this is the best improvement found." end
+    end
     if status.routing then text = text .. (text ~= "" and "\n" or "") .. "Destination choice: " .. status.routing end
     if self.notice then text = text .. (text ~= "" and "\n" or "") .. self.notice end
     local recovery = app:recoveryStatus()
@@ -1833,6 +1898,36 @@ function UI.quickAction(playerIndex, context, request, pickArea)
     end
     if UI.quickWindows[playerIndex] then UI.quickWindows[playerIndex]:close() end
     local review = QuickReview:new(playerIndex, context, request, plan, notice)
+    review:initialise(); review:addToUIManager()
+    UI.quickWindows[playerIndex] = review
+    return review
+end
+
+function UI.condense(playerIndex)
+    playerIndex = playerIndex or 0
+    if UI.windows[playerIndex] then W.unfocus(UI.windows[playerIndex].body) end
+    local app, err = App.get(playerIndex)
+    if not app then return nil, err end
+    local plan
+    plan, err = app:previewCondense()
+    if not plan then UI.showProgress(playerIndex, err); return nil, err end
+    local request = {scope = "inventory", includeBags = true,
+        filter = {all = true, ids = {}, types = {}}, destination = {kind = "condense"}}
+    local required, _, preferenceError = App.reviewPreference(request)
+    local notice = preferenceError and ("Review settings could not be read; this review is shown: " .. tostring(preferenceError)) or nil
+    if not required then
+        local ok
+        ok, err = app:start(plan)
+        if ok then
+            if UI.quickWindows[playerIndex] then UI.quickWindows[playerIndex]:close() end
+            local preferences = App.getPreferences()
+            if preferences.showQuickProgress == true then return UI.showProgress(playerIndex) end
+            return true
+        end
+        notice = "Condense could not start: " .. tostring(err)
+    end
+    if UI.quickWindows[playerIndex] then UI.quickWindows[playerIndex]:close() end
+    local review = QuickReview:new(playerIndex, {condense = true}, request, plan, notice)
     review:initialise(); review:addToUIManager()
     UI.quickWindows[playerIndex] = review
     return review

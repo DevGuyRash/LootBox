@@ -24,6 +24,7 @@ function Base:getButtonControl(title)
 end
 
 package.loaded["ISUI/InventoryWindow/ISInventoryWindowContainerControls"] = true
+package.loaded["ISUI/LootWindow/ISLootWindowContainerControls"] = true
 package.loaded["LootBox/App"] = {
     getPreferences = function() return current.preferences, current.preferenceError end,
     get = function(playerNum) current.appPlayer = playerNum; return current.app end,
@@ -51,24 +52,32 @@ local function fixture()
     current = f
     local inventory = {isEmpty = function() return f.emptyInventory == true end}
     local selectedBag = {isEmpty = function() return true end}
-    local displayed = {isEmpty = function() return f.emptyTarget == true end}
+    local displayed = {isEmpty = function() return f.emptyTarget == true end,
+        isEmptyOrUnwanted = function(_, player) assert(player == f.player); return f.emptyTarget or f.onlyUnwanted or false end}
+    f.displayed = displayed
     f.inventoryPane = {inventory = selectedBag, refreshContainerCount = 1,
         setItemsToHighlight = function(s, owner, items)
             if items ~= nil then s.owner, s.highlighted = owner, items
             elseif s.owner == owner then s.owner, s.highlighted = nil, nil end
         end}
     f.inventoryWindow = {inventoryPane = f.inventoryPane, player = 3}
-    f.loot = {inventoryPane = {inventory = displayed, refreshContainerCount = 1}}
+    f.loot = {inventoryPane = {inventory = displayed, refreshContainerCount = 1,
+        setItemsToHighlight = f.inventoryPane.setItemsToHighlight}}
     f.player = {getInventory = function() return inventory end,
         getCurrentSquare = function() return not f.noSquare and {} or nil end}
     f.app = {world = {matchingRecords = function(_, mode)
         f.calls, f.lastMode = f.calls + 1, mode
         if f.matchingError then return nil, nil, f.matchingError end
         return f.records, {}
+    end, smartLootRecords = function(_, mode, source)
+        f.smartCalls, f.smartMode, f.smartSource = (f.smartCalls or 0) + 1, mode, source
+        if f.smartError then return nil, f.smartError end
+        return f.records
     end}}
     local one = {Type = "ISInventoryWindowControlHandler_TransferSameType", perform = function() end}
     local all = {Type = "ISInventoryWindowControlHandler_TransferSameTypeMultiContainer", perform = function() end}
-    local transfer = {Type = "NativeTransferAll"}
+    local transfer = {Type = "ISInventoryWindowControlHandler_TransferAll"}
+    f.transferPeer = transfer
     f.foreign = {Type = "ForeignModControl"}
     f.peers = {one, all}
     f.originalCallbacks = {one.perform, all.perform}
@@ -81,7 +90,26 @@ local function fixture()
         end
         classes[#classes + 1] = class
     end}
-    f.ui = {quickAction = function(playerNum, context, request)
+    local objectAll = {Type = "ISLootWindowObjectControlHandler_TakeAll", perform = function() end}
+    local objectMatching = {Type = "ISLootWindowObjectControlHandler_TakeSameType", perform = function() end}
+    local floorAll = {Type = "ISLootWindowFloorControlHandler_TakeAll", perform = function() end}
+    local floorMatching = {Type = "ISLootWindowFloorControlHandler_TakeSameType", perform = function() end}
+    f.lootForeign = {Type = "ForeignLootControl"}
+    f.lootPeers = {objectAll, objectMatching, floorAll, floorMatching}
+    f.lootCallbacks = {objectAll.perform, objectMatching.perform, floorAll.perform, floorMatching.perform}
+    ISLootWindowContainerControls_HandlerList = {objectAll, objectMatching, f.lootForeign}
+    ISLootWindowContainerControls_FloorHandlerList = {floorAll, floorMatching}
+    local function add(list, class)
+        for index, candidate in ipairs(list) do
+            if candidate.Type == class.Type then list[index] = class; return end
+        end
+        list[#list + 1] = class
+    end
+    ISLootWindowContainerControls = {
+        AddHandler = function(class) add(ISLootWindowContainerControls_HandlerList, class) end,
+        AddFloorHandler = function(class) add(ISLootWindowContainerControls_FloorHandlerList, class) end,
+    }
+    f.ui = {condense = function(playerNum) f.condensePlayer = playerNum end, quickAction = function(playerNum, context, request)
         f.quick[#f.quick + 1] = {player = playerNum, context = context, request = request}
     end, showProgress = function(playerNum, reason)
         f.progress[#f.progress + 1] = {player = playerNum, reason = reason}
@@ -97,6 +125,18 @@ local function fixture()
         value:getControl()
         return value
     end
+    function f:smart(mode, floor)
+        for _, class in ipairs(self.module.smartClasses) do
+            if class.mode == mode and class.floor == (floor == true) then
+                local value = class:new()
+                value.playerNum, value.playerObj, value.lootWindow = 3, self.player, self.loot
+                value.container = displayed
+                value:getControl()
+                return value
+            end
+        end
+        error("Missing Smart Take class")
+    end
     return f
 end
 
@@ -108,8 +148,9 @@ end
 
 test("companions follow their native peers and retain foreign handler order", function(f)
     local classes = ISInventoryWindowContainerControls_HandlerList
-    assert(#classes == 6 and classes[2] == f.peers[1] and classes[3] == f.module.Displayed)
-    assert(classes[4] == f.foreign and classes[5] == f.peers[2] and classes[6] == f.module.Nearby)
+    assert(#classes == 7 and classes[1] == f.module.Condense and classes[2] == f.transferPeer)
+    assert(classes[3] == f.peers[1] and classes[4] == f.module.Displayed)
+    assert(classes[5] == f.foreign and classes[6] == f.peers[2] and classes[7] == f.module.Nearby)
     assert(f.peers[1].perform == f.originalCallbacks[1] and f.peers[2].perform == f.originalCallbacks[2])
 end)
 
@@ -118,7 +159,7 @@ test("repeated installation cannot duplicate or move controls", function(f)
     for index, value in ipairs(ISInventoryWindowContainerControls_HandlerList) do before[index] = value end
     f.module.install(f.ui)
     for index, value in ipairs(ISInventoryWindowContainerControls_HandlerList) do assert(value == before[index]) end
-    assert(#ISInventoryWindowContainerControls_HandlerList == 6)
+    assert(#ISInventoryWindowContainerControls_HandlerList == 7)
 end)
 
 test("native matching images get a distinct all-source badge with measured sizing", function(f)
@@ -157,7 +198,7 @@ end)
 
 test("removing a native peer does not leave an orphan companion", function(f)
     local classes = ISInventoryWindowContainerControls_HandlerList
-    table.remove(classes, 2)
+    for index, class in ipairs(classes) do if class == f.peers[1] then table.remove(classes, index); break end end
     assert(not f:handler("displayed"):shouldBeVisible())
     assert(f:handler("nearby"):shouldBeVisible())
 end)
@@ -262,7 +303,123 @@ test("older builds without the native control system retain a harmless optional 
     package.loaded["LootBox/Matching"] = nil
     local unavailable = require "LootBox/Matching"
     assert(unavailable.install(f.ui) == false and unavailable.Displayed == nil)
-    assert(#ISInventoryWindowContainerControls_HandlerList == 6 and #f.quick == 0)
+    assert(#ISInventoryWindowContainerControls_HandlerList == 7 and #f.quick == 0)
+end)
+
+test("Smart Take companions follow each native object and floor peer without changing callbacks", function(f)
+    local object, floor = ISLootWindowContainerControls_HandlerList, ISLootWindowContainerControls_FloorHandlerList
+    assert(#object == 5 and object[1] == f.lootPeers[1] and object[3] == f.lootPeers[2] and object[5] == f.lootForeign)
+    assert(object[2].mode == "all" and object[4].mode == "matching")
+    assert(#floor == 4 and floor[1] == f.lootPeers[3] and floor[3] == f.lootPeers[4])
+    assert(floor[2].floor and floor[2].mode == "all" and floor[4].floor and floor[4].mode == "matching")
+    for index, peer in ipairs(f.lootPeers) do assert(peer.perform == f.lootCallbacks[index]) end
+    local beforeObject, beforeFloor = {}, {}
+    for index, class in ipairs(object) do beforeObject[index] = class end
+    for index, class in ipairs(floor) do beforeFloor[index] = class end
+    f.module.install(f.ui)
+    assert(#object == 5 and #floor == 4)
+    for index, class in ipairs(object) do assert(class == beforeObject[index]) end
+    for index, class in ipairs(floor) do assert(class == beforeFloor[index]) end
+end)
+
+test("Smart Take All captures one displayed source and uses all carried destinations for its player", function(f)
+    for _, floor in ipairs({false, true}) do
+        f.records = {{item = item("Base.Nails")}}
+        local handler = f:smart("all", floor)
+        assert(handler:shouldBeVisible())
+        handler:perform()
+        local call = f.quick[#f.quick]
+        assert(call.player == 3 and f.appPlayer == 3 and call.context.container == f.displayed)
+        assert(call.request.scope == "container" and call.request.sourceContainer == f.displayed)
+        assert(call.request.includeInventory == false and call.request.includeBags == false and call.request.excludeUnwanted == true)
+        assert(call.request.filter.all == true and call.request.destination.kind == "inventory")
+        f.loot.inventoryPane.inventory = {}
+        assert(call.request.sourceContainer == f.displayed)
+    end
+end)
+
+test("Smart Take Matching checks fresh records and deduplicates actual types on each click", function(f)
+    local handler, old, fresh = f:smart("matching"), item("Base.Nails"), item("Base.Bandage")
+    f.records = {{item = old}}; handler:onMouseOverButton()
+    f.records = {{item = fresh}, {item = fresh}, {item = item("Base.Bandage")}}
+    handler:perform()
+    assert(f.smartCalls == 2 and f.smartMode == "matching" and f.smartSource == f.displayed)
+    local chosen = f.quick[1].request
+    assert(chosen.filter.all == false and #chosen.filter.types == 1 and chosen.filter.types[1] == "Base.Bandage")
+    assert(chosen.destination.kind == "inventory" and chosen.sourceContainer == f.displayed)
+    f.records = {{item = old}}; handler:perform()
+    assert(f.smartCalls == 3 and f.quick[2].request.filter.types[1] == "Base.Nails")
+end)
+
+test("Smart matching remains visible when the selected carried bag is empty", function(f)
+    assert(f.inventoryPane.inventory:isEmpty() and f:smart("matching"):shouldBeVisible())
+    f.emptyInventory = true
+    assert(not f:smart("matching"):shouldBeVisible() and f:smart("all"):shouldBeVisible())
+end)
+
+test("Smart Take hover follows the displayed container and clears only its own highlight", function(f)
+    local handler, nail, bandage = f:smart("matching", true), item("Base.Nails"), item("Base.Bandage")
+    f.records = {{item = nail}}; handler:onMouseOverButton()
+    assert(f.loot.inventoryPane.owner == handler.control and f.loot.inventoryPane.highlighted[nail])
+    f.records, f.now = {{item = bandage}}, 1249; handler:onMouseOverButton()
+    assert(f.smartCalls == 1 and f.loot.inventoryPane.highlighted[nail])
+    f.now = 1250; handler:onMouseOverButton()
+    assert(f.smartCalls == 2 and f.loot.inventoryPane.highlighted[bandage])
+    handler.container = {}; handler:onMouseOverButton(); assert(f.smartCalls == 3 and f.smartSource == handler.container)
+    local foreign = {}; f.loot.inventoryPane:setItemsToHighlight(foreign, {foreign = true})
+    handler:onMouseOutButton()
+    assert(f.loot.inventoryPane.owner == foreign and f.loot.inventoryPane.highlighted.foreign)
+    handler:onMouseOverButton(); handler:onMouseOutButton()
+    assert(f.loot.inventoryPane.owner == nil and not handler.isMouseOver)
+end)
+
+test("Smart Take visibility follows tutorial preference world state and native unwanted-only sources", function(f)
+    local handler = f:smart("all")
+    handler:onMouseOverButton()
+    f.tutorial = true; assert(not handler:shouldBeVisible() and f.loot.inventoryPane.owner == nil)
+    f.tutorial, f.preferences.matchingTransferButtons = false, false; assert(not handler:shouldBeVisible())
+    f.preferences.matchingTransferButtons, f.preferenceError = true, "Damaged preferences"; assert(not handler:shouldBeVisible())
+    f.preferenceError, f.noSquare = nil, true; assert(not handler:shouldBeVisible())
+    f.noSquare, f.onlyUnwanted = false, true; assert(not handler:shouldBeVisible())
+    f.onlyUnwanted, f.emptyTarget = false, true; assert(not handler:shouldBeVisible())
+end)
+
+test("removing object or floor native peers hides only the corresponding Smart Take action", function(f)
+    for _, floor in ipairs({false, true}) do
+        local list = floor and ISLootWindowContainerControls_FloorHandlerList or ISLootWindowContainerControls_HandlerList
+        for index, class in ipairs(list) do
+            if class.Type == (floor and f.lootPeers[3].Type or f.lootPeers[1].Type) then table.remove(list, index); break end
+        end
+        assert(not f:smart("all", floor):shouldBeVisible() and f:smart("matching", floor):shouldBeVisible())
+    end
+end)
+
+test("Smart Take empty matches paused input and native failures cannot start partial jobs", function(f)
+    local handler = f:smart("matching")
+    handler:perform(); assert(#f.quick == 0 and #f.progress == 0)
+    f.paused = true; handler:perform(); assert(f.smartCalls == 1 and #f.quick == 0)
+    f.paused, f.smartError = false, "Displayed source changed"; handler:perform()
+    assert(#f.quick == 0 and f.progress[1].player == 3 and f.progress[1].reason == f.smartError)
+end)
+
+test("Smart matching uses a measured native image and readable destination tooltip", function(f)
+    local handler = f:smart("matching")
+    assert(handler.control.title == "SMART" and handler.control.width == 73 and handler.control.height == 18)
+    assert(handler.control.iconRight.path == "media/ui/inventoryPanes/TakeSameTypeOneContainer.png")
+    assert(handler.control.tooltip:find("similar items first", 1, true))
+    assert(f:smart("all").control.title == "Smart Take All")
+end)
+
+test("Condense belongs before Transfer All and follows its own visibility preference", function(f)
+    local handler = f.module.Condense:new()
+    handler.playerNum, handler.playerObj = 3, f.player
+    assert(handler:shouldBeVisible())
+    handler:getControl(); assert(handler.control.title == "Condense" and handler.control.tooltip:find("Equipped bags only", 1, true))
+    handler:perform(); assert(f.condensePlayer == 3)
+    f.condensePlayer, f.paused = nil, true; handler:perform(); assert(f.condensePlayer == nil)
+    f.paused, f.preferences.condenseButton = false, false; assert(not handler:shouldBeVisible())
+    f.preferences.condenseButton, f.tutorial = true, true; assert(not handler:shouldBeVisible())
+    f.tutorial, f.emptyInventory = false, true; assert(not handler:shouldBeVisible())
 end)
 
 print(passed .. " matching toolbar cases passed (explicit native handler and App boundary doubles)")
