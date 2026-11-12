@@ -157,7 +157,8 @@ function World:owns(container)
 end
 
 function World:canAccess(container)
-    return self:valid(container) and (self:owns(container) or permitted(self.player, self:square(container)))
+    local square = call(container, "getType") == "floor" and call(self.player, "getCurrentSquare") or self:square(container)
+    return self:valid(container) and (self:owns(container) or (square ~= nil and permitted(self.player, square)))
         and call(container, "isLockedToCharacter", self.player) ~= true
 end
 
@@ -1099,6 +1100,106 @@ function World:resolveTrashTarget(target)
     return nil, reason
 end
 
+function World:matchingOrder(records)
+    local loot = getPlayerLoot and getPlayerLoot(call(self.player, "getPlayerNum"))
+    local pane = loot and loot.inventoryPane
+    if not pane or type(pane.sortItemsByTypeAndWeight) ~= "function" then return records end
+    local items, byItem = {}, {}
+    for _, record in ipairs(records) do
+        items[#items + 1] = record.item
+        byItem[record.item] = record
+    end
+    local ok = pcall(pane.sortItemsByTypeAndWeight, pane, items)
+    if not ok then return nil, "The game's matching-transfer order could not be read" end
+    local result = {}
+    for _, item in ipairs(items) do result[#result + 1] = byItem[item] end
+    return result
+end
+
+function World:matchingTargets(mode, records)
+    if mode ~= "displayed" and mode ~= "nearby" then return nil, "Choose the displayed container or nearby containers" end
+    local rules = ISInventoryWindowControlHandler_TransferSameType
+    if not rules or type(rules.getItemsTable) ~= "function" then return nil, "The game's matching-transfer rules are unavailable" end
+    local loot = getPlayerLoot and getPlayerLoot(call(self.player, "getPlayerNum"))
+    if not loot or not loot.inventoryPane then return {} end
+    local containers, eligible, sourceMaps, aliases = {}, {}, {}, {}
+    local function itemMap(container)
+        local ok, result = pcall(rules.getItemsTable, rules, container)
+        if not ok or type(result) ~= "table" then return nil, "The game's matching-transfer rules could not read this container" end
+        return result
+    end
+    for _, record in ipairs(records or {}) do
+        if record.item and self:canAccess(record.source) and not self:protected(record.item) then
+            eligible[record.item] = true
+            if not sourceMaps[record.source] then
+                local map, err = itemMap(record.source)
+                if not map then return nil, err end
+                sourceMaps[record.source] = map
+            end
+        end
+    end
+    for _, map in pairs(sourceMaps) do
+        for fullType, items in pairs(map) do
+            aliases[fullType] = aliases[fullType] or {}
+            for _, item in ipairs(items) do if eligible[item] then aliases[fullType][item] = true end end
+        end
+    end
+    local seen = {}
+    local function add(container)
+        if not container or seen[container] or self:owns(container) or not self:canAccess(container) then return end
+        if self.recovery and self.recovery:isReservedContainer(container) then return end
+        seen[container] = true
+        containers[#containers + 1] = container
+    end
+    if mode == "displayed" then add(loot.inventoryPane.inventory)
+    else for _, button in ipairs(loot.backpacks or {}) do add(button.inventory) end end
+    local result = {}
+    for _, container in ipairs(containers) do
+        local map, err = itemMap(container)
+        if not map then return nil, err end
+        local types = {}
+        for fullType in pairs(map) do
+            for item in pairs(aliases[fullType] or {}) do types[tostring(item:getFullType())] = true end
+        end
+        local floor = call(container, "getType") == "floor"
+        local anchor = not floor and self:sourceAnchor(container) or nil
+        local point = floor and self:point() or nil
+        if anchor or point then result[#result + 1] = {ref = container, anchor = anchor, point = point, types = types} end
+    end
+    return result
+end
+
+function World:matchingRecords(mode)
+    local scan, err = self:scan({scope = "inventory", includeBags = true})
+    if not scan then return nil, nil, err end
+    local ordered
+    ordered, err = self:matchingOrder(scan.items)
+    if not ordered then return nil, nil, err end
+    local targets
+    targets, err = self:matchingTargets(mode, ordered)
+    if not targets then return nil, nil, err end
+    local records, seen = {}, {}
+    for _, record in ipairs(ordered) do
+        if not seen[record.item] and not self:protected(record.item) then
+            for _, target in ipairs(targets) do
+                if target.types[tostring(record.item:getFullType())] then
+                    seen[record.item] = true
+                    records[#records + 1] = record
+                    break
+                end
+            end
+        end
+    end
+    return records, targets
+end
+
+function World:matchingPoint(request, container)
+    if request.destination.kind ~= "matching" or call(container, "getType") ~= "floor" then return nil end
+    for _, target in ipairs(request.destination.targets or {}) do
+        if target.point then return {x = target.point.x, y = target.point.y, z = target.point.z} end
+    end
+end
+
 function World:destinations(request, item)
     local destination = request.destination or {}
     local result, seen = {}, {}
@@ -1127,6 +1228,19 @@ function World:destinations(request, item)
     elseif destination.kind == "container" then
         if not self:valid(destination.ref) then return nil, "Destination container is no longer available" end
         add(destination.ref)
+    elseif destination.kind == "matching" then
+        for _, target in ipairs(destination.targets or {}) do
+            if item and target.types[tostring(call(item, "getFullType"))] then
+                local container = target.ref
+                if target.anchor then container = self:resolveSource(target.anchor)
+                elseif target.point and ISInventoryPage and ISInventoryPage.GetFloorContainer then
+                    local square = getCell():getGridSquare(target.point.x, target.point.y, target.point.z)
+                    if not square or permitted(self.player, square) then container = ISInventoryPage.GetFloorContainer(call(self.player, "getPlayerNum"))
+                    else container = nil end
+                end
+                if container and not self:owns(container) and self:canAccess(container) then add(container) end
+            end
+        end
     elseif destination.kind == "vehicle" then
         local vehicle, err = destination.ref
         if not vehicle then vehicle, err = self:vehicle() end

@@ -60,13 +60,14 @@ local function test(name, run)
     print("PASS " .. name)
 end
 
-test("interface preferences default on and callers receive independent copies", function()
+test("quick reviews default off while interface features stay on and copies remain independent", function()
     local preferences, err = App.getPreferences()
     assert(not err)
     for _, name in ipairs({ "contextMenus", "inventoryShortcuts", "worldShortcuts", "vehicleShortcuts",
-        "categoryShortcuts", "savedShortcuts", "confirmQuickMoves", "rememberLastSetup", "showTips" }) do
+        "categoryShortcuts", "savedShortcuts", "matchingTransferButtons", "rememberLastSetup", "showTips" }) do
         assert(preferences[name] == true)
     end
+    for _, name in ipairs({"confirmQuickMoves", "confirmQuickCleanup", "confirmBinReviews", "showQuickProgress"}) do assert(preferences[name] == false) end
     preferences.contextMenus = false
     assert(App.getPreferences().contextMenus == true)
 end)
@@ -266,6 +267,48 @@ test("setup count and malformed saved identities fail with the original document
     local _, err = app:getSetups()
     assert(err and not app:saveSetup("Do not overwrite", request()))
     assert(#Store.load(app.path .. "/setups").presets == 2)
+end)
+
+test("legacy explicit review values survive while missing review settings use direct defaults", function()
+    assert(Store.save("LootBox/preferences", {confirmQuickMoves = true, matchingTransferButtons = false}))
+    App.reset()
+    local preferences, err = App.getPreferences()
+    assert(not err and preferences.confirmQuickMoves == true and preferences.matchingTransferButtons == false)
+    assert(preferences.confirmQuickCleanup == false and preferences.confirmBinReviews == false and preferences.showQuickProgress == false)
+end)
+
+test("review and quick-progress choices persist independently across restarts", function()
+    assert(App.setPreferences({confirmQuickMoves = true, confirmQuickCleanup = true, confirmBinReviews = true, showQuickProgress = true}))
+    assert(App.setPreferences({confirmQuickCleanup = false}))
+    App.reset()
+    local preferences = App.getPreferences()
+    assert(preferences.confirmQuickMoves and not preferences.confirmQuickCleanup and preferences.confirmBinReviews and preferences.showQuickProgress)
+end)
+
+test("matching setups normalize all carried sources and retain only portable destination mode", function(app)
+    local setup = request("room", "matching")
+    setup.destination.mode = "displayed"
+    local native = {}; native.self = native
+    setup.sourceContainer, setup.destination.targets = native, {{container = native, types = {['Base.Apple'] = true}}}
+    local id = assert(app:saveSetup("All carried matches", setup))
+    assert(setup.scope == "room" and setup.includeBags == false and setup.includeInventory == true)
+    App.reset(); app = assert(App.get(0))
+    local resolved = assert(app:loadSetup(id, {}))
+    assert(resolved.scope == "inventory" and resolved.includeBags == true and resolved.includeInventory == false)
+    assert(resolved.destination.kind == "matching" and resolved.destination.mode == "displayed")
+    assert(resolved.sourceContainer == nil and resolved.destination.targets == nil and resolved.destination.ref == nil)
+end)
+
+test("matching modes are bounded and invalid updates preserve an existing setup", function(app)
+    local setup = request("inventory", "matching")
+    local id = assert(app:saveSetup("Nearby matches", setup))
+    assert(app:loadSetup(id, {}).destination.mode == "nearby")
+    for _, mode in ipairs({"everywhere", false, 3}) do
+        setup.destination.mode = mode
+        assert(not app:saveSetup("Invalid matching mode", setup, id))
+        local existing = app:getSetups().presets[1]
+        assert(existing.name == "Nearby matches" and existing.setup.destination.mode == "nearby")
+    end
 end)
 
 print(passed .. " setup and preference integration cases passed (explicit world/action and native file doubles)")

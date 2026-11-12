@@ -74,6 +74,11 @@ local function weight(item)
     return math.max(0, item:getUnequippedWeight())
 end
 
+local function carriedDestination(self, request)
+    return request.destination.kind == "inventory"
+        or (request.destination.kind == "container" and self.world:owns(request.destination.ref))
+end
+
 function Jobs:choose(request, item, reservations)
     local previousGraph = self.world.graph
     self.world.graph = self.activeGraph or self.graph
@@ -136,12 +141,19 @@ local function validate(request)
         return nil, "Select at least one category or item type"
     end
     local scopes = { inventory = true, reach = true, room = true, building = true, area = true, container = true, labeled = true }
-    local destinations = { inventory = true, floor = true, container = true, vehicle = true, labels = true, trash = true }
+    local destinations = { inventory = true, floor = true, container = true, vehicle = true, labels = true, trash = true, matching = true }
     if not scopes[request.scope] then return nil, "Choose a source scope" end
     if not destinations[request.destination.kind] then return nil, "Choose a destination" end
     if request.scope == "container" and not request.sourceContainer then return nil, "Choose a source container" end
     if request.scope == "labeled" and #(request.sourceLabels or {}) == 0 then return nil, "Choose a source label" end
     if request.destination.kind == "container" and not request.destination.ref then return nil, "Choose a destination container" end
+    if request.destination.kind == "matching" and request.destination.mode ~= nil
+        and request.destination.mode ~= "displayed" and request.destination.mode ~= "nearby" then
+        return nil, "Choose the displayed container or nearby containers for matching transfers"
+    end
+    if request.destination.kind == "matching" and (request.scope ~= "inventory" or request.includeBags ~= true) then
+        return nil, "Matching transfers use all carried containers, including bags"
+    end
     return true
 end
 
@@ -152,10 +164,23 @@ function Jobs:preview(request)
     local scan
     scan, err = self.world:scan(request)
     if not scan then return nil, err end
+    if request.destination.kind == "matching" then
+        request = cloneRequest(request)
+        request.destination.mode = request.destination.mode or "nearby"
+        local ordered
+        ordered, err = self.world:matchingOrder(scan.items or {})
+        if not ordered then return nil, err end
+        scan.items = ordered
+        local matching
+        matching, err = self.world:matchingTargets(request.destination.mode, scan.items or {})
+        if not matching then return nil, err end
+        request.destination.targets = matching
+    end
     self.revision = self.revision + 1
     local plan = { owner = self, revision = self.revision, request = cloneRequest(request),
         moves = {}, skipped = {}, warnings = {}, records = {}, sources = scan.sources or {},
         groundSquares = scan.groundSquares or {}, trash = {}, approved = {}, unknownSources = {} }
+    plan.request.destination.targets = nil
     local targets = {}
     for _, warning in ipairs(scan.warnings or {}) do table.insert(plan.warnings, warning) end
     local preparesBags = false
@@ -205,10 +230,10 @@ function Jobs:preview(request)
         end
         if #targets == 0 then return nil, "No usable known trash can. Approach a real trash can first." end
         if #targets > #plan.trash then
-            table.insert(plan.warnings, "Uninspected bins will be approached first. The job pauses for a fresh bin contents review before using them. Unseen existing contents are not approved by this preview.")
+            table.insert(plan.warnings, "Uninspected bins will be approached and inspected first. Your bin-review setting controls whether approval is automatic or shown in a review window.")
         end
         table.insert(plan.warnings, "Cleanup permanently empties the whole trash can, including the existing contents listed above.")
-        table.insert(plan.warnings, "Bin choice compares travel, carrying trips and bin emptyings. Initial travel is estimated; completed walks improve later choices. New bins require a fresh contents review.")
+        table.insert(plan.warnings, "Bin choice compares travel, carrying trips and bin emptyings. Initial travel is estimated; completed walks improve later choices. New bins are inspected before use.")
     end
     local reservations = {}
     for _, record in ipairs(scan.items or {}) do
@@ -724,6 +749,10 @@ end
 function Jobs:carryStep()
     local execution, sources = self.execution, {}
     if self.recovery and self.recovery:status().pending then execution.phase = execution.afterCarry or "source"; return end
+    if self.plan.request.destination.kind == "container" and self.world:owns(self.plan.request.destination.ref) then
+        execution.phase = execution.afterCarry or "source"
+        return
+    end
     for _, source in ipairs(self.plan.sources) do sources[#sources + 1] = source end
     for _, task in ipairs(execution.tasks) do
         if task.kind == "records" then
@@ -930,7 +959,7 @@ function Jobs:createExecution(plan)
         local record = self:captureRecord(entry)
         self:registerWork(execution, record)
         execution.seen[self.world:itemId(record.item) or record.item] = true
-        local key = record.groundSquare or record.source
+        local key = plan.request.destination.kind == "matching" and self.player:getInventory() or record.groundSquare or record.source
         if not groups[key] then groups[key] = {}; order[#order + 1] = key end
         groups[key][#groups[key] + 1] = record
     end
@@ -1074,7 +1103,7 @@ function Jobs:pickup(record)
     local execution, plan = self.execution, self.execution.plan
     if record.settled then self:nextRecord(); self:finishHeavyAttempt(record, false); return end
     self.view.itemName = record.itemName
-    self.view.reason = "Collecting selected items into carried storage."
+    self.view.reason = "Preparing selected items for transfer."
     self:recordSource(record, function(source, err)
         local ok
         if source then ok, err = self:matches(record, plan) end
@@ -1084,7 +1113,8 @@ function Jobs:pickup(record)
             self:finishHeavyAttempt(record, false)
             return
         end
-        if plan.request.destination.kind ~= "inventory" and self.world:owns(source) then
+        local direct = carriedDestination(self, plan.request)
+        if not direct and self.world:owns(source) then
             execution.batch[#execution.batch + 1] = record
             self:nextRecord()
             return
@@ -1107,13 +1137,13 @@ function Jobs:pickup(record)
             end
         end
         local destination, request, code
-        if plan.request.destination.kind == "inventory" then request = plan.request
+        if direct then request = plan.request
         else request = { includeBags = plan.request.includeBags, destination = { kind = "inventory" } } end
         destination, err, code = self:choose(request, record.item)
         if not destination then
-            if plan.request.destination.kind ~= "inventory" and #execution.batch > 0 then self:startDelivery("source")
+            if not direct and #execution.batch > 0 then self:startDelivery("source")
             else
-                if code == "capacity" and plan.request.destination.kind ~= "inventory" then
+                if code == "capacity" and not direct then
                     if self:onCapacityBlocked(record, err) then return end
                 else self:skip(record, err or "Cannot carry this item to its destination") end
                 self:nextRecord()
@@ -1121,7 +1151,7 @@ function Jobs:pickup(record)
             end
             return
         end
-        local hauling = plan.request.destination.kind ~= "inventory"
+        local hauling = not direct
         if hauling then self.hauled[self.world:itemId(record.item) or record.item] = record end
         record.carryContainer = hauling and destination or nil
         local operation = {kind = "transfer", item = record.item, source = source, destination = destination}
@@ -1167,6 +1197,13 @@ function Jobs:nextDelivery(record, ok, reason, destination)
 end
 
 function Jobs:place(record, destination)
+    local point
+    if destination:getType() == "floor" then
+        if self.plan.request.destination.kind == "matching" then
+            point = self.world:matchingPoint(self.plan.request, destination)
+            if not point then self:nextDelivery(record, false, "The original matching floor destination is unavailable"); return end
+        elseif self.plan.request.destination.ref then point = coordinates(self.plan.request.destination.ref) end
+    end
     local function transfer(ok, err, current)
         if not ok then self:nextDelivery(record, false, err); return end
         destination = current or destination
@@ -1182,14 +1219,18 @@ function Jobs:place(record, destination)
         if not self.world:owns(source) or not source:contains(record.item) then
             self:nextDelivery(record, false, "Hauled item is no longer carried"); return end
         local operation = {kind = "transfer", item = record.item, source = source, destination = destination, trashTarget = record.trashTarget}
-        if destination:getType() == "floor" and self.plan.request.destination.ref then operation.destinationPoint = coordinates(self.plan.request.destination.ref) end
+        if point then operation.destinationPoint = point end
         self:action(operation, function(moved, failure)
             if moved then record.item = operation.resultItem end
             self:nextDelivery(record, moved, failure, operation.destination)
         end)
     end
-    if self.plan.request.destination.kind == "floor" and self.plan.request.destination.ref then
-        self:action({kind = "approach", square = self.plan.request.destination.ref, exact = true}, transfer)
+    if point then
+        self:walkLocation(point, function(loaded, reason)
+            self.execution.phase = "delivery"
+            if not loaded then self:nextDelivery(record, false, reason); return end
+            self:action({kind = "approach", location = point, exact = true}, transfer)
+        end, nil, true)
     else self:approach(destination, transfer) end
 end
 
