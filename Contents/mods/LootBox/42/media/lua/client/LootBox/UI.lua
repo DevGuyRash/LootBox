@@ -1186,40 +1186,63 @@ local preferenceRows = {
     { key = "showTips", title = "Show workflow tips", description = "Show additional guidance in the Home view. Tooltips and the Help field guide stay available." },
 }
 
+local function wrapPreferenceDescription(text, width)
+    local lines, current = {}, ""
+    for word in text:gmatch("%S+") do
+        local candidate = current == "" and word or current .. " " .. word
+        if current ~= "" and getTextManager():MeasureStringX(UIFont.Small, candidate) > width then
+            lines[#lines + 1], current = current, word
+        else current = candidate end
+    end
+    if current ~= "" then lines[#lines + 1] = current end
+    return lines
+end
+
 function Window:buildSettings()
     local body, width = self.body, self.body.width
     local preferences, err = App.getPreferences()
     W.heading(body, 0, 0, "Make LootBox fit your play style")
     local introduction = wrapped(body, 0, H + 4, width, 2 * H, "Choose which contextual shortcuts appear and how repeated workflows are remembered. These preferences are local to you.")
-    local leftWidth, rightX = math.floor((width - 2 * GAP) * 0.57), math.floor((width - 2 * GAP) * 0.57) + 2 * GAP
-    W.label(body, 0, 3 * H, "Right-click shortcuts", "custom")
-    local reuseHeading = W.label(body, rightX, 3 * H, "Review and reuse", "custom")
-    self.preferenceWidgets = {}
-    local explanations = {}
+    introduction:removeScrollBars()
+    introduction.vscroll = nil
+    self.preferenceSelection = {}
+    for _, row in ipairs(preferenceRows) do self.preferenceSelection[row.key] = preferences[row.key] == true end
+    local viewport = list(body, 0, 0, width, H, self, function(s, row)
+        if row.key then s.preferenceSelection[row.key] = not s.preferenceSelection[row.key]
+        else s.preferenceViewport.selected = 0 end
+    end, self.preferenceSelection)
+    self.preferenceViewport = viewport
+    viewport:addItem("Right-click shortcuts", {selectable = false, tone = "custom"})
+    local rows = {}
     for index, row in ipairs(preferenceRows) do
-        local left = index <= 6
-        local x, rowIndex, colWidth = left and 0 or rightX, left and index - 1 or index - 7, left and leftWidth or width - rightX
-        local y = 4 * H + rowIndex * (2 * H + 12)
-        self.preferenceWidgets[row.key] = check(body, x, y, colWidth, row.title, preferences[row.key], self, nil, row.description)
-        explanations[row.key] = wrapped(body, x + 28, y + H, colWidth - 28, H + 12, row.description)
+        if index == 7 then viewport:addItem("Review and reuse", {selectable = false, tone = "custom"}) end
+        rows[#rows + 1] = viewport:addItem(row.title, {key = row.key, description = row.description},
+            row.title .. "\n" .. row.description)
     end
+    introduction.onMouseWheel = function(_, delta) return viewport:onMouseWheel(delta) end
     local y = body.height - 3 * H
     local save = button(body, 0, y, 180, "Save preferences", self, Window.savePreferences,
         "Save only LootBox preferences. Other mods' Options settings are not reloaded.", "accent")
     self.messagePanel = wrapped(body, 0, y + H + 5, width, 2 * H - 5, err or "Changes apply to the next right-click menu you open.")
     body.layout = function()
-        local left = math.floor((body.width - 2 * GAP) * 0.57)
-        local right = left + 2 * GAP
-        place(introduction, 0, nil, body.width)
-        place(reuseHeading, right)
-        for index, row in ipairs(preferenceRows) do
-            local onLeft = index <= 6
-            local x, available = onLeft and 0 or right, onLeft and left or body.width - right
-            place(self.preferenceWidgets[row.key], x, nil, available)
-            place(explanations[row.key], x + 28, nil, available - 28)
+        local scroll = viewport:getYScroll()
+        place(introduction, 0, H + 4, body.width)
+        introduction:paginate()
+        local introductionHeight = math.max(2 * H, introduction:getScrollHeight())
+        place(introduction, nil, nil, nil, introductionHeight)
+        local top, footer = H + 4 + introductionHeight + GAP, body.height - 3 * H
+        place(viewport, 0, top, body.width, footer - top - GAP)
+        local detailWidth, fontHeight = math.max(1, viewport.width - 50), getTextManager():getFontHeight(UIFont.Small)
+        for _, row in ipairs(rows) do
+            row.item.details = wrapPreferenceDescription(row.item.description, detailWidth)
+            row.height = H + #row.item.details * fontHeight + GAP
         end
-        local footer = body.height - 3 * H
-        place(save, 0, footer)
+        local contentHeight = 0
+        for _, row in ipairs(viewport.items) do contentHeight = contentHeight + row.height end
+        viewport:setScrollHeight(contentHeight)
+        viewport:setYScroll(scroll)
+        local saveWidth = math.max(180, getTextManager():MeasureStringX(UIFont.Small, "Save preferences") + 2 * GAP)
+        place(save, 0, footer, saveWidth)
         place(self.messagePanel, 0, footer + H + 5, body.width)
     end
     body.layout()
@@ -1227,7 +1250,7 @@ end
 
 function Window:savePreferences()
     local nextPreferences = {}
-    for key, widget in pairs(self.preferenceWidgets) do nextPreferences[key] = widget:isSelected(1) end
+    for _, row in ipairs(preferenceRows) do nextPreferences[row.key] = self.preferenceSelection[row.key] == true end
     local ok, err = App.setPreferences(nextPreferences)
     self:messageText(ok and "Preferences saved. Open a new right-click menu to see the result." or err)
 end
