@@ -6,6 +6,7 @@ local Catalog = require "LootBox/Catalog"
 local Guides = require "LootBox/Guides"
 local Menus = {}
 local interface
+local containerCallbacks = setmetatable({}, { __mode = "k" })
 
 local function call(object, method, ...)
     if not object then return nil end
@@ -46,7 +47,20 @@ local function submenu(menu, title, icon)
     local option = add(menu, title, nil, nil, nil, icon)
     local child = ISContextMenu:getNew(menu)
     menu:addSubMenu(option, child)
+    child.lootBoxSources, child.lootBoxCommon = {}, false
     return child
+end
+
+local function rootMenu(parent)
+    for _, option in ipairs(parent.options or {}) do
+        if option.name == "LootBox" and option.lootBoxMenu then return option.lootBoxMenu end
+    end
+    local option = add(parent, "LootBox", nil, nil, nil, "map_lightbulb")
+    local menu = ISContextMenu:getNew(parent)
+    parent:addSubMenu(option, menu)
+    option.lootBoxMenu = menu
+    menu.lootBoxSources, menu.lootBoxCommon = {}, false
+    return menu
 end
 
 local function open(playerIndex, context, mode, message)
@@ -76,9 +90,27 @@ local function containerName(container)
         local id = tostring(call(part, "getId") or "vehicle storage")
         return (getTextOrNull and getTextOrNull("IGUI_VehiclePart" .. id)) or id
     end
+    local parent = call(container, "getParent")
+    if native(parent, "IsoPlayer") then return "My inventory" end
+    if native(parent, "IsoDeadBody") then return "Corpse inventory" end
     local raw = tostring(call(container, "getType") or "storage")
     local translated = getTextOrNull and getTextOrNull("IGUI_ContainerTitle_" .. raw)
-    return translated or raw:gsub("^%l", string.upper)
+    local custom = parent and call(container, "getCustomName")
+    local name = (custom and custom ~= "" and custom) or translated or raw:gsub("^%l", string.upper)
+    if (call(parent, "getContainerCount") or 0) > 1 then
+        local slot = call(parent, "getContainerIndex", container)
+        if slot then name = name .. " [compartment " .. tostring(slot + 1) .. "]" end
+    end
+    return name
+end
+
+local function menuAllowed(playerIndex)
+    local player = getSpecificPlayer(playerIndex)
+    if not player or call(player, "isDead") then return false end
+    if isGamePaused and isGamePaused() then return false end
+    if getCore and call(getCore(), "isTutorial") then return false end
+    if ISInventoryPaneContextMenu and ISInventoryPaneContextMenu.dontCreateMenu then return false end
+    return true
 end
 
 local function categoryName(id)
@@ -124,6 +156,8 @@ local function storageTargets(context, container)
 end
 
 local function common(menu, playerIndex, context, app, preferences)
+    if menu.lootBoxCommon then return end
+    menu.lootBoxCommon = true
     local setups, problem = app:getSetups()
     if preferences.savedShortcuts and setups and #setups.presets > 0 then
         local saved = submenu(menu, "Saved setups", "map_vhs")
@@ -142,6 +176,136 @@ local function common(menu, playerIndex, context, app, preferences)
         "Read complete walkthroughs for looting, labels and sorting, nested bags, vehicles, cleanup, and reusable setups.", nil, "map_exclamation")
     add(menu, "Settings", function() open(playerIndex, context, "settings") end,
         "Choose which context shortcuts appear, quick-move confirmation, tips, and remembered setups.")
+end
+
+local function containerContext(playerIndex, source)
+    local player = getSpecificPlayer(playerIndex)
+    return { playerIndex = playerIndex, kind = "container", scope = "container",
+        container = source, sourceContainer = source, targetContainer = source,
+        containers = { source }, square = player:getCurrentSquare() }
+end
+
+local function routeContext(context, destination)
+    local result = {}
+    for key, value in pairs(context) do result[key] = value end
+    result.containers = { context.sourceContainer }
+    if destination then
+        result.targetContainer = destination
+        if destination ~= context.sourceContainer then result.containers[#result.containers + 1] = destination end
+    end
+    return result
+end
+
+local function visibleContainers(playerIndex, source)
+    local result, seen = {}, {}
+    if source then seen[source] = true end
+    local function collect(page, pane)
+        for index, button in ipairs(page and page.backpacks or {}) do
+            local container = button.inventory
+            if storage(container) and not seen[container] then
+                seen[container] = true
+                result[#result + 1] = { container = container, name = containerName(container), pane = pane, index = index }
+            end
+        end
+    end
+    collect(getPlayerInventory and getPlayerInventory(playerIndex), "Inventory")
+    collect(getPlayerLoot and getPlayerLoot(playerIndex), "Loot")
+    local counts = {}
+    for _, entry in ipairs(result) do counts[entry.name] = (counts[entry.name] or 0) + 1 end
+    for _, entry in ipairs(result) do
+        if counts[entry.name] > 1 then
+            entry.name = entry.name .. " (" .. entry.pane .. " icon " .. tostring(entry.index) .. ")"
+        end
+    end
+    return result
+end
+
+local function worldContainerNames(playerIndex, containers)
+    local names, counts, visible = {}, {}, {}
+    for _, container in ipairs(containers) do
+        local name = containerName(container)
+        names[container], counts[name] = name, (counts[name] or 0) + 1
+    end
+    for _, entry in ipairs(visibleContainers(playerIndex)) do visible[entry.container] = entry end
+    for index, container in ipairs(containers) do
+        local name = names[container]
+        if counts[name] > 1 then
+            local entry, parent = visible[container], call(container, "getParent")
+            local square = call(parent, "getSquare")
+            if entry then
+                names[container] = name .. " (" .. entry.pane .. " icon " .. tostring(entry.index) .. ")"
+            elseif square then
+                names[container] = name .. " (" .. tostring(call(square, "getX")) .. ", " .. tostring(call(square, "getY"))
+                    .. ", floor " .. tostring(call(square, "getZ")) .. "; object " .. tostring((call(parent, "getObjectIndex") or index - 1) + 1) .. ")"
+            else
+                names[container] = name .. " (source " .. tostring(index) .. ")"
+            end
+        end
+    end
+    return names
+end
+
+local function containerActions(menu, playerIndex, context, app)
+    local source = context.sourceContainer
+    menu.lootBoxSources = menu.lootBoxSources or {}
+    if menu.lootBoxSources[source] then return end
+    menu.lootBoxSources[source] = true
+    local player = getSpecificPlayer(playerIndex)
+    local inventory, carried = player:getInventory(), app.world:owns(source)
+    local name = containerName(source)
+    local function setup(kind, destination)
+        local target = routeContext(context, destination)
+        local action = request("container", kind, allItems(), target)
+        if kind == "container" then action.destination.ref = destination end
+        return action, target
+    end
+    local function move(kind, destination)
+        local action, target = setup(kind, destination)
+        quick(playerIndex, target, action)
+    end
+    if source ~= inventory then
+        add(menu, carried and "Unpack contents to main inventory..." or "Loot contents...", function()
+            move(carried and "container" or "inventory", carried and inventory or nil)
+        end, carried and ("Move eligible contents of " .. name .. " into your main inventory. The bag itself stays where it is.")
+            or ("Take eligible contents of " .. name .. " into your carried storage. Other open containers are excluded."), nil, "map_arrowsoutheast")
+    end
+    if call(source, "getType") ~= "floor" then
+        add(menu, "Empty contents onto floor here...", function() move("floor") end,
+            "Place eligible contents of " .. name .. " on the floor at your current position. Nothing is deleted and the container stays in place.")
+    end
+    add(menu, "Sort contents...", function() move("labels") end,
+        "Move eligible contents of " .. name .. " to storage with matching category labels. Unmatched or protected items stay with a reason.")
+    local moveMenu = submenu(menu, "Move contents to", "map_arrowsouthwest")
+    for _, entry in ipairs(visibleContainers(playerIndex, source)) do
+        local destination = entry.container
+        if not (carried and source ~= inventory and destination == inventory) then
+            add(moveMenu, entry.name .. "...", function() move("container", destination) end,
+                "Move eligible contents of " .. name .. " into " .. entry.name .. ". Icon positions count from the top of the named sidebar. Review access and capacity before starting.")
+        end
+    end
+    add(moveMenu, "My remembered vehicle...", function() move("vehicle") end,
+        "Haul eligible contents of " .. name .. " to your remembered car, using trunk storage before available seats.", nil, "map_steeringwheel")
+    add(menu, "Clean contents...", function() move("trash") end,
+        "Haul eligible contents of " .. name .. " to real trash cans for deletion. The source container stays in place. Existing bin contents require fresh approval.", nil, "map_exclamation")
+    add(menu, "Choose items and categories...", function()
+        local action, target = setup(source == inventory and "labels" or (carried and "container" or "inventory"),
+            carried and source ~= inventory and inventory or nil)
+        action.filter = { ids = {}, types = {}, all = false }
+        target.request = action
+        open(playerIndex, target, "compose")
+    end, "Open Actions with " .. name .. " as the source. Narrow the selection, change the destination, or choose whether to search inside bags.")
+    if storage(source) then
+        if source ~= inventory then
+            add(menu, "Put carried items in " .. name .. "...", function()
+                quick(playerIndex, context, request("inventory", "container", allItems(), context))
+            end, "Move eligible carried items into this exact container. Review the selection, protection, and capacity before starting.")
+        end
+        add(menu, "Label this container...", function()
+            local target = routeContext(context)
+            target.labelKind = "container"
+            open(playerIndex, target, "labels")
+        end, "Choose every category that belongs in " .. name .. ". These labels describe the container, not its individual items.")
+    end
 end
 
 local function typeActions(menu, playerIndex, context, app, filter, suffix)
@@ -277,7 +441,7 @@ end
 
 function Menus.inventoryMenu(playerIndex, parent, items)
     local preferences = App.getPreferences()
-    if not preferences.contextMenus then return end
+    if not preferences.contextMenus or not menuAllowed(playerIndex) then return end
     local app, item = App.get(playerIndex), selectedItem(items)
     if not app or not item then return end
     local player = getSpecificPlayer(playerIndex)
@@ -291,14 +455,66 @@ function Menus.inventoryMenu(playerIndex, parent, items)
         targetContainer = target, container = target, containers = {}, square = player:getCurrentSquare() }
     storageTargets(context, target)
     if native(item, "InventoryContainer") then storageTargets(context, item:getInventory()) end
-    local menu = submenu(parent, "LootBox", "map_lightbulb")
-    if preferences.inventoryShortcuts then itemMenu(menu, playerIndex, context, app, preferences) end
+    local menu = rootMenu(parent)
+    if preferences.inventoryShortcuts then
+        itemMenu(menu, playerIndex, context, app, preferences)
+        if native(item, "InventoryContainer") then
+            local contents = item:getInventory()
+            if contents then
+                local child = submenu(menu, "Contents of " .. containerName(contents))
+                containerActions(child, playerIndex, containerContext(playerIndex, contents), app)
+            end
+        end
+    end
     common(menu, playerIndex, context, app, preferences)
+end
+
+function Menus.containerMenu(playerIndex, parent, container)
+    local preferences = App.getPreferences()
+    if not preferences.contextMenus or not container or not parent or not menuAllowed(playerIndex) then return end
+    local app = App.get(playerIndex)
+    if not app then return end
+    local context = containerContext(playerIndex, container)
+    local menu = rootMenu(parent)
+    if preferences.inventoryShortcuts then containerActions(menu, playerIndex, context, app) end
+    common(menu, playerIndex, context, app, preferences)
+    return menu
+end
+
+function Menus.inventoryBackgroundMenu(playerIndex, parent, isLoot)
+    local page
+    if isLoot then page = getPlayerLoot(playerIndex) else page = getPlayerInventory(playerIndex) end
+    local container = page and page.inventoryPane and page.inventoryPane.inventory
+    Menus.containerMenu(playerIndex, parent, container)
+end
+
+function Menus.refreshContainers(page, phase)
+    if phase ~= "end" then return end
+    for _, button in ipairs(page.backpacks or {}) do
+        local previous = button.onRightMouseDown
+        if previous and previous ~= containerCallbacks[button] then
+            local function onRightMouseDown(clicked, x, y)
+                local result = previous(clicked, x, y)
+                local owner = clicked.parent and clicked.parent.parent
+                local container = clicked.inventory
+                if not owner or not container or call(container, "getContainingItem") then return result end
+                local parent = getPlayerContextMenu(owner.player)
+                if Menus.containerMenu(owner.player, parent, container) then
+                    parent.forceVisible, parent.visibleCheck = true, true
+                    parent:setVisible(true)
+                    parent:bringToTop()
+                end
+                return result
+            end
+            button.onRightMouseDown = onRightMouseDown
+            containerCallbacks[button] = onRightMouseDown
+        end
+    end
 end
 
 function Menus.worldMenu(playerIndex, parent, objects, test)
     local preferences = App.getPreferences()
-    if not preferences.contextMenus then return end
+    if not preferences.contextMenus or not menuAllowed(playerIndex) then return end
     local app = App.get(playerIndex)
     if not app then return end
     if test then return ISWorldObjectContextMenu.setTest() end
@@ -324,19 +540,15 @@ function Menus.worldMenu(playerIndex, parent, objects, test)
     context.container = context.containers[1]
     context.sourceContainer, context.targetContainer = context.container, context.container
     context.scope = context.container and "container" or "reach"
-    local menu = submenu(parent, "LootBox", "map_lightbulb")
+    local menu = rootMenu(parent)
     if context.container and preferences.worldShortcuts then
-        local name = containerName(context.container)
-        add(menu, "Take all unprotected contents...", function()
-            quick(playerIndex, context, request("container", "inventory", allItems(), context))
-        end, "Take eligible contents of " .. name .. " into carried storage. Use Adjust setup to choose categories instead.")
-        add(menu, "Put carried items in " .. name .. "...", function()
-            quick(playerIndex, context, request("inventory", "container", allItems(), context))
-        end, "Move eligible carried items to " .. name .. ". Preview the selection and capacity before starting.")
-        add(menu, "Label this storage...", function()
-            context.labelKind = "container"
-            open(playerIndex, context, "labels")
-        end, "Assign multiple categories to this actual clicked container. Other open loot panes are not used as a substitute.")
+        local names = worldContainerNames(playerIndex, context.containers)
+        for _, container in ipairs(context.containers) do
+            local source = container
+            local target = containerContext(playerIndex, source)
+            local contents = #context.containers > 1 and submenu(menu, "Contents of " .. names[source]) or menu
+            containerActions(contents, playerIndex, target, app)
+        end
     end
     if preferences.vehicleShortcuts and context.vehicle then vehicleActions(menu, playerIndex, context, app) end
     if preferences.worldShortcuts then worldActions(menu, playerIndex, context, app) end
@@ -347,6 +559,9 @@ function Menus.install(ui)
     if interface then return end
     interface = ui
     Events.OnFillInventoryObjectContextMenu.Add(Menus.inventoryMenu)
+    LuaEventManager.AddEvent("OnFillInventoryContextMenuNoItems")
+    Events.OnFillInventoryContextMenuNoItems.Add(Menus.inventoryBackgroundMenu)
+    Events.OnRefreshInventoryWindowContainers.Add(Menus.refreshContainers)
     Events.OnFillWorldObjectContextMenu.Add(Menus.worldMenu)
 end
 
