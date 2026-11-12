@@ -113,19 +113,29 @@ function Widgets.check(parent, x, y, width, text, selected, target, callback, to
     function widget:isSelected() return self.checked end
     return widget
 end
-function Widgets.combo(parent, x, y, width)
+function Widgets.combo(parent, x, y, width, target, callback, tooltip)
     local widget = control(parent, "", x, y, width, Widgets.H)
-    widget.options, widget.selected, widget.tooltip = {}, 0, {}
-    function widget:addOptionWithData(text, data, tooltip)
-        self.options[#self.options + 1] = {text = text, data = data, tooltip = tooltip}
-        self.tooltip[text] = tooltip
+    widget.options, widget.selected = {}, 0
+    function widget:setToolTipMap(values) self.tooltip = values end
+    widget:setToolTipMap({defaultTooltip = tooltip})
+    function widget:addOptionWithData(text, data, optionTooltip)
+        self.options[#self.options + 1] = {text = text, data = data, tooltip = optionTooltip}
         if self.selected == 0 then self.selected = 1 end
     end
     function widget:selectData(data)
         for i, option in ipairs(self.options) do if option.data == data then self.selected = i; return end end
     end
     function widget:getOptionData(i) return self.options[i] and self.options[i].data end
-    function widget:clear() self.options, self.selected, self.tooltip = {}, 0, {} end
+    function widget:getOptionTooltip(index)
+        local option = self.options[index]
+        if option then
+            if type(option) == "table" then
+                if option.tooltip then return option.tooltip end
+                if self.tooltip then return self.tooltip[option.text] or self.tooltip.defaultTooltip end
+            elseif self.tooltip then return self.tooltip[option] or self.tooltip.defaultTooltip end
+        end
+    end
+    function widget:clear() self.options, self.tooltip = {}, {} end
     return widget
 end
 function Widgets.list(parent, x, y, width, height, target, callback, selection)
@@ -182,13 +192,17 @@ end
 local function fixture()
     local f = { previews = 0, starts = 0, remembered = 0, preferences = { confirmQuickMoves = true, confirmQuickCleanup = true, confirmBinReviews = true, showQuickProgress = true },
         sessionAvailable = true, boundKey = 65, recovery = {pending = false},
-        jobStatus = {state = "needs_review", reviewId = 1, done = 0, total = 8, reasons = {}} }
+        jobStatus = {state = "needs_review", canPreview = true, reviewId = 1, done = 0, total = 8, reasons = {}} }
     current = f
     UI.quickWindows, UI.areaPickers, UI.progressWindows, UI.reviewVisits = {}, {}, {}, {}
     UI.windows = {}
     f.plan = { moves = { { itemName = "Bandage", to = "Crate" } }, skipped = {}, pending = 0 }
     f.app = {
-        preview = function(_, request) f.previews = f.previews + 1; f.reviewed = request; return f.plan end,
+        preview = function(_, request)
+            f.previews = f.previews + 1; f.reviewed = request
+            if f.previewError then return nil, f.previewError end
+            return f.plan
+        end,
         start = function(_, plan, options)
             f.starts = f.starts + 1
             f.startOptions = options
@@ -1366,6 +1380,53 @@ test("Condense review starts its reviewed plan and opens its settings section", 
     window = reviewWindow(f, f.plan, {condense = true}, setup)
     press(window, "Condense settings")
     assert(f.opened.mode == "settings" and f.opened.context.settingsSection == "condense" and f.starts == 1)
+end)
+
+test("composer scope tooltips follow native option precedence when matching is toggled", function(f)
+    local window = managerWindow(f, "compose", {request = request("inventory")})
+    local inventoryOption
+    for index, option in ipairs(window.scope.options) do
+        if option.data == "inventory" then inventoryOption = index; break end
+    end
+    assert(inventoryOption and window.scope:getOptionTooltip(inventoryOption):find("Bag contents are included", 1, true))
+    window.destination:selectData("matching"); window:onDestinationChanged()
+    assert(window.scope:getOptionTooltip(inventoryOption):find("always use all carried containers", 1, true))
+    window.destination:selectData("inventory"); window:onDestinationChanged()
+    assert(window.scope:getOptionTooltip(inventoryOption):find("Bag contents are included", 1, true))
+end)
+
+test("blocked quick previews show Current job without creating a composer or a second job", function(f)
+    f.previewError = "Finish or cancel the current job before previewing another"
+    f.jobStatus.canPreview = false
+    for _, state in ipairs({"running", "pausing", "cancelling", "paused", "needs_review", "idle"}) do
+        f.jobStatus.state = state
+        local result, err = UI.quickAction(0, {}, request("inventory"))
+        assert(result == nil and err == f.previewError)
+        assert(f.progress.notice:find(f.previewError, 1, true))
+        assert(not f.opened and not f.review and f.starts == 0 and f.remembered == 0)
+    end
+    assert(f.previews == 6 and f.progressShows == 6)
+end)
+
+test("invalid source previews retain the full adjustment route when the core allows previews", function(f)
+    local source = {getContainingItem = function() end, getVehiclePart = function() end,
+        getParent = function() end, getType = function() return "crate" end}
+    local setup = request("inventory")
+    setup.scope, setup.sourceContainer = "container", source
+    f.previewError = "The selected source is no longer available"
+    local result, err = UI.quickAction(0, {sourceContainer = source}, setup)
+    assert(result == nil and err == f.previewError)
+    assert(f.opened.mode == "compose" and f.opened.message == f.previewError)
+    assert(f.opened.context.request.sourceContainer == source and not f.progress)
+    local window = managerWindow(f, "compose", f.opened.context)
+    assert(window:readRequest().sourceContainer == source and f.starts == 0 and f.remembered == 0)
+end)
+
+test("a cancelled resumable checkpoint can still start a new quick action when the core permits it", function(f)
+    f.jobStatus.state, f.jobStatus.canResume = "cancelled", true
+    f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
+    assert(UI.quickAction(0, {}, request("inventory")) == true)
+    assert(f.starts == 1 and f.previews == 1 and not f.progress and not f.opened)
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")

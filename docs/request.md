@@ -148,3 +148,9 @@ For this continuation the user again explicitly waived Claude: "no claude for th
 "Does Condense also keep similar items together across bags when optimizing? If not, please make it do that too while still prioritizing weight reduction."
 
 "Then, please publish the mod using the SteamWorkshop after in ~/repos"
+
+## Matching button wording
+
+"Why does it just say SMART?"
+
+"also when surrounded by multiple containers and I hit smart take all it had a bunch of errors"
