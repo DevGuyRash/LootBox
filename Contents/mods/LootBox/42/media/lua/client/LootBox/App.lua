@@ -30,6 +30,13 @@ function App.getPreferences()
     return copy(preferences), preferencesError
 end
 
+function App.reviewPreference(request, binReview)
+    local key = binReview and "confirmBinReviews"
+        or (request and request.destination and request.destination.kind == "trash" and "confirmQuickCleanup" or "confirmQuickMoves")
+    local current, err = App.getPreferences()
+    return err ~= nil or current[key] == true, key, err
+end
+
 function App.setPreferences(patch)
     local candidate, err = App.getPreferences()
     if err then return nil, err end
@@ -444,7 +451,10 @@ function Instance:start(plan, options)
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
     local ok, err = self:persist()
     if not ok then return nil, err end
-    return self.jobs:start(plan, options)
+    local chosen = {}
+    for key, value in pairs(options or {}) do chosen[key] = value end
+    if chosen.reviewBins == nil then chosen.reviewBins = App.reviewPreference(nil, true) end
+    return self.jobs:start(plan, chosen)
 end
 function Instance:cancel() return self.jobs:cancel() end
 function Instance:pause() return self.jobs:pause() end

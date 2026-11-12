@@ -20,8 +20,26 @@ local states = { idle = "Ready for a job", running = "Working", cancelling = "St
     finished = "Finished", finished_with_skips = "Finished with notes" }
 local sourceNames = { inventory = "my carried items", reach = "within reach", room = "the current room",
     building = "the current building", area = "the selected area", labeled = "labeled containers", container = "the selected container" }
-local destinationNames = { inventory = "my carried storage", floor = "the floor", container = "the selected container",
-    vehicle = "my vehicle", labels = "matching labeled storage", trash = "trash cans" }
+local destinationNames = { inventory = "my inventory with Smart Load (bags first)", floor = "the floor", container = "the selected container",
+    vehicle = "my vehicle", labels = "matching labeled storage", matching = "containers holding matching item types", trash = "trash cans" }
+
+local reviewChoices = {
+    confirmQuickMoves = {label = "Skip future transfer previews", tooltip = "Remember this after a successful start. Future quick transfers start directly. You can enable reviews again in Settings."},
+    confirmQuickCleanup = {label = "Skip future cleanup previews", tooltip = "Remember this after a successful start. Future quick cleanup actions delete eligible items without this preview. Bin review is a separate setting."},
+    confirmBinReviews = {label = "Skip future bin reviews", tooltip = "Remember this after successful approval. Eligible bins will be inspected and approved automatically for this and future jobs. Protected items, permissions and native rules still apply."},
+}
+
+local function rememberReviewChoice(widget, key, notice)
+    if not widget then return notice end
+    if widget.initialReviewSelection ~= nil and widget:isSelected(1) == widget.initialReviewSelection then return notice end
+    local required = not widget:isSelected(1)
+    local preferences, problem = App.getPreferences()
+    if not problem and preferences[key] == required then return notice end
+    local ok, err = App.setPreferences({[key] = required})
+    if ok then return notice end
+    local message = "The job is running, but its review choice could not be saved: " .. tostring(err)
+    return notice and (notice .. "\n" .. message) or message
+end
 
 local function label(parent, x, y, text, dim)
     return W.label(parent, x, y, text, dim and "muted" or "text")
@@ -85,7 +103,7 @@ local function copyRequest(request)
     local result = { scope = request.scope or "inventory", sourceContainer = request.sourceContainer,
         includeInventory = request.includeInventory == true, includeBags = request.includeBags ~= false,
         filter = { ids = {}, types = {}, all = filter.all == true },
-        destination = { kind = destination.kind or "inventory", ref = destination.ref } }
+        destination = { kind = destination.kind or "inventory", ref = destination.ref, mode = destination.mode } }
     for _, id in ipairs(filter.ids or {}) do result.filter.ids[#result.filter.ids + 1] = id end
     for _, id in ipairs(filter.types or {}) do result.filter.types[#result.filter.types + 1] = id end
     if request.sourceLabels then
@@ -185,6 +203,7 @@ local function routeText(request)
     local destination = request.destination or {}
     local target = destination.kind == "container" and destination.ref and containerName(destination.ref)
         or (destination.kind == "vehicle" and destination.ref and vehicleName(destination.ref))
+        or (destination.kind == "matching" and (destination.mode == "displayed" and "the displayed loot container, matching item types" or "nearby containers, matching item types"))
         or destinationNames[destination.kind] or "the chosen destination"
     return "Move " .. selection .. " from " .. source .. " to " .. target .. "."
 end
@@ -229,6 +248,7 @@ function Window:new(playerIndex, context, mode)
     local o = ISCollapsableWindow.new(self, (getCore():getScreenWidth() - width) / 2,
         (getCore():getScreenHeight() - height) / 2, width, height)
     o.playerIndex, o.context, o.mode = playerIndex, context or {}, mode or "home"
+    o.skipPreviewKey, o.skipPreviewDraft, o.skipPreviewInitial = o.context.skipPreviewKey, o.context.skipPreviewDraft, o.context.skipPreviewInitial
     o.resizable, o.title, o.backgroundColor = true, "LootBox", W.color("base")
     local minimumHeight = math.max(710, o:titleBarHeight() + 14 * H + 7 * GAP + 20 + bottomInset(o))
     o.minimumWidth, o.minimumHeight = math.min(760, width), math.min(minimumHeight, availableHeight)
@@ -250,6 +270,7 @@ function Window:new(playerIndex, context, mode)
 end
 
 function Window:setRequest(request)
+    self.matchingSourceDraft = nil
     self.requestJustSet = self.body ~= nil
     self.request = copyRequest(request)
     self.selection = setOf(self.request.filter.ids)
@@ -316,6 +337,7 @@ function Window:rememberDraft()
 end
 
 function Window:show(mode)
+    if mode ~= "compose" and mode ~= "preview" then self.skipPreviewKey, self.skipPreviewDraft, self.skipPreviewInitial = nil, nil, nil end
     local replacing = self.requestJustSet
     self.requestJustSet = nil
     if not replacing then self:rememberDraft() end
@@ -420,7 +442,7 @@ function Window:buildHome()
     local tips
     if App.getPreferences().showTips then
         tips = wrapped(body, 0, 11 * H + 5 * GAP, 100, 3 * H,
-            "Quick actions use the same planner as the full window. Cleanup always asks you to review deletion.")
+            "Quick actions use the same planner as the full window. Transfer previews, cleanup previews and bin reviews are optional in Settings.")
     end
     self.messagePanel = wrapped(body, 0, 0, body.width, 2 * H, "")
     body.layout = function()
@@ -475,7 +497,7 @@ function Window:buildComposer()
         s:onDestinationChanged()
     end)
     self.operation:addOptionWithData("Move or sort items", "move", "Transfer a selection to a container, floor, labels or vehicle.")
-    self.operation:addOptionWithData("Loot matching items", "loot", "Collect matching items into your carried storage.")
+    self.operation:addOptionWithData("Loot matching items", "loot", "Use Smart Load to fill carried bags first, then main inventory.")
     self.operation:addOptionWithData("Clean and delete items", "clean", "Haul selected items to real trash cans, then delete approved batches.")
     self.operation:selectData(self.operationValue or "move")
     self.scope = combo(body, col + GAP, rowY, col, self, function(s) s:onScopeChanged() end)
@@ -491,12 +513,13 @@ function Window:buildComposer()
     if self.context.container or self.context.sourceContainer then self.scope:addOptionWithData("Container you clicked", "container", "Only the actual selected container supplies items.") end
     self.scope:selectData(self.request.scope)
     self.destination = combo(body, 2 * (col + GAP), rowY, col, self, function(s) s:onDestinationChanged() end)
-    self.destination:addOptionWithData("My carried storage", "inventory", "Collect items into your inventory and eligible carried bags.")
+    self.destination:addOptionWithData("My inventory (Smart Load)", "inventory", "Fill eligible carried bags first, preferring useful weight reduction, then use main inventory. Existing contents and native capacity still matter.")
     self.destination:addOptionWithData("Floor at this location", "floor", "Explicitly drop items at the clicked tile or your current square.")
     if self.context.container or self.context.targetContainer then self.destination:addOptionWithData("Container you clicked", "container", "Store items in the container selected for this context.") end
     self.destination:addOptionWithData("My remembered vehicle", "vehicle", "Prefer its trunk, then available native seat and other storage.")
     self.destination:addOptionWithData("Matching labeled storage", "labels", "Store items where any matching category label says they belong.")
-    self.destination:addOptionWithData("Known trash cans", "trash", "Fill native trash cans and delete batches. Existing contents require approval.")
+    self.destination:addOptionWithData("Matching item types", "matching", "Transfer only item types already represented in the displayed loot container or nearby containers.")
+    self.destination:addOptionWithData("Known trash cans", "trash", "Fill native trash cans and delete batches. Optional reviews are controlled in Settings; current protection and native rules always apply.")
     self.destination:selectData(self.request.destination.kind)
     local optionsY = rowY + H + 7
     self.includeInventory = check(body, 0, optionsY, col, "Also use my carried items", self.request.includeInventory, self, nil,
@@ -557,8 +580,10 @@ function Window:buildComposer()
     self.deleteSetupButton = button(body, saveX + 265, saveY, 95, "Delete setup", self, Window.deleteNamedSetup,
         "Delete this saved setup only. Items and categories are unchanged.")
     self.deleteSetupButton:setEnable(self.selectedSetupId ~= nil)
-    local preview = button(body, width - 160, saveY, 160, "Preview job", self, Window.preview,
-        "Inspect destinations, exclusions, capacity and deletion warnings before starting.", "accent")
+    local preview = button(body, width - 330, saveY + H + 5, 160, "Preview job", self, Window.preview,
+        "Explicitly inspect destinations, exclusions, capacity and deletion warnings before starting.")
+    self.startButton = button(body, width - 160, saveY + H + 5, 160, "Start job", self, Window.start,
+        "Plan against current items and start. Reviews appear only when you have enabled them in Settings.", "accent")
     local saveChecklist = button(body, 0, saveY + H + 5, 160, "Save loot checklist", self, Window.saveChecklist,
         "Remember only the item selection for Loot room and Loot area shortcuts.")
     local loadChecklist = button(body, 170, saveY + H + 5, 160, "Load loot checklist", self, Window.loadChecklist,
@@ -591,7 +616,8 @@ function Window:buildComposer()
         place(saveSetup, sx, save)
         place(self.updateSetupButton, sx + 150, save)
         place(self.deleteSetupButton, sx + 265, save)
-        place(preview, w - 160, save)
+        place(preview, w - 330, save + H + 5)
+        place(self.startButton, w - 160, save + H + 5)
         place(saveChecklist, 0, save + H + 5)
         place(loadChecklist, 170, save + H + 5)
         place(self.messagePanel, 0, save + 2 * H + 8, w)
@@ -615,7 +641,33 @@ end
 function Window:onDestinationChanged()
     self.endpoint:clear()
     local kind = value(self.destination)
-    self.endpoint:setVisible(kind == "container" or kind == "vehicle" or kind == "labels")
+    local matching = kind == "matching"
+    if matching then
+        if not self.matchingSourceDraft then
+            self.matchingSourceDraft = {scope = value(self.scope), includeBags = self.includeBags:isSelected(1),
+                includeInventory = self.includeInventory:isSelected(1)}
+        end
+        self.scope:selectData("inventory")
+        self.includeBags:setSelected(1, true)
+        self.includeInventory:setSelected(1, false)
+    elseif self.matchingSourceDraft then
+        self.scope:selectData(self.matchingSourceDraft.scope)
+        self.includeBags:setSelected(1, self.matchingSourceDraft.includeBags)
+        self.includeInventory:setSelected(1, self.matchingSourceDraft.includeInventory)
+        self.matchingSourceDraft = nil
+    end
+    self.scope:setEnabled(not matching)
+    self.includeBags.enable = not matching
+    self.includeBags.tooltip = matching and "Matching transfers always search every carried container, including nested bags."
+        or "Include nested contents in the selected sources. Native access rules still apply. Nonempty bags themselves remain protected."
+    self.scope.tooltip["My carried items"] = matching and "Matching transfers always use all carried containers as their source."
+        or "Items in your inventory. Bag contents are included when enabled below."
+    self:onScopeChanged()
+    self.endpoint:setVisible(kind == "container" or kind == "vehicle" or kind == "labels" or matching)
+    if self.startButton then
+        self.startButton:setTitle(kind == "trash" and "Start cleanup" or "Start job")
+        self.startButton.textColor = W.color(kind == "trash" and "danger" or "accent")
+    end
     if kind == "container" then
         local targetSeen = {}
         local targetContainer = self.context.targetContainer or self.context.container
@@ -633,12 +685,16 @@ function Window:onDestinationChanged()
         self.endpoint:addOptionWithData("Remembered vehicle", false, "Use the vehicle saved through Remember this vehicle.")
         for _, vehicle in ipairs(self:app():knownVehicles()) do self.endpoint:addOptionWithData(vehicleName(vehicle), vehicle, "Use this loaded vehicle for this job only.") end
         if self.context.vehicle then self.endpoint:addOptionWithData("Clicked " .. vehicleName(self.context.vehicle), self.context.vehicle) end
+    elseif kind == "matching" then
+        self.endpoint:addOptionWithData("All nearby containers", "nearby", "Match types already held by each nearby loot-window container. Items use the first matching destination with room.")
+        self.endpoint:addOptionWithData("Displayed loot container", "displayed", "Match types already held by the currently displayed loot container.")
     elseif kind == "labels" then
         self.endpoint:addOptionWithData("Any matching category label", false, "Match any label assigned to the destination containers.")
         for _, category in ipairs(categoryRows(self.catalogData)) do self.endpoint:addOptionWithData(category.name, category.id, category.id) end
     end
     if self.request.destination.kind == kind then
         if kind == "container" or kind == "vehicle" then self.endpoint:selectData(self.request.destination.ref or false)
+        elseif kind == "matching" then self.endpoint:selectData(self.request.destination.mode or "nearby")
         elseif kind == "labels" then self.endpoint:selectData(self.request.destination.labels and self.request.destination.labels[1] or false) end
     end
 end
@@ -684,6 +740,10 @@ function Window:readRequest(validate)
     local request = { scope = scope, sourceContainer = value(self.sourceEndpoint) or self.context.sourceContainer or self.context.container,
         includeInventory = self.includeInventory:isSelected(1), includeBags = self.includeBags:isSelected(1),
         filter = filter, destination = { kind = kind } }
+    if kind == "matching" then
+        scope = "inventory"
+        request.scope, request.includeInventory, request.includeBags = scope, false, true
+    end
     if scope == "labeled" then
         local id = value(self.sourceLabel)
         if not id and validate ~= false then return nil, "Choose which label the source containers must have." end
@@ -692,6 +752,7 @@ function Window:readRequest(validate)
     if kind == "container" then
         request.destination.ref = value(self.endpoint)
         if not request.destination.ref and validate ~= false then return nil, "Open LootBox from the destination container first." end
+    elseif kind == "matching" then request.destination.mode = value(self.endpoint) or "nearby"
     elseif kind == "vehicle" then request.destination.ref = value(self.endpoint) or nil
     elseif kind == "floor" then
         local player = getSpecificPlayer(self.playerIndex)
@@ -769,21 +830,33 @@ function Window:loadChecklist()
     self:messageText("Loot selection loaded. Your source and destination are unchanged.")
 end
 
-function Window:preview()
+function Window:prepareAction(direct)
     local request, err = self:readRequest()
     if not request then self:messageText(err); return end
     if not hasSelection(request) then self:messageText("Choose categories, item types, or All unprotected items."); return end
+    local app = self:app()
     local plan
-    plan, err = self:app():preview(request)
+    plan, err = app:preview(request)
     if not plan then self:messageText(err); return end
     self.request, self.plan = request, plan
     self.operationValue, self.selectorKindValue = value(self.operation), value(self.selectorKind)
     self.searchDraft, self.setupNameDraft = self.search:getText(), self.setupName:getText()
-    local remembered, saveError = self:app():rememberSetup(request)
+    local remembered, saveError = app:rememberSetup(request)
+    local notice = not remembered and ("The setup could not be remembered: " .. tostring(saveError)) or nil
+    local required, _, preferenceError = App.reviewPreference(request)
+    if direct and not required then
+        local ok
+        ok, err = app:start(plan)
+        if ok then W.unfocus(self.body); self:setVisible(false); UI.showProgress(self.playerIndex, notice); return end
+        notice = "The job could not start: " .. tostring(err)
+    elseif preferenceError then notice = "Review settings could not be read; this review is shown: " .. tostring(preferenceError) end
     self.requestJustSet = true
     self:show("preview")
-    if not remembered then self:messageText("The job can run, but its setup could not be remembered: " .. tostring(saveError)) end
+    if notice then self:messageText(notice) end
 end
+
+function Window:preview() return self:prepareAction(false) end
+function Window:start() return self:prepareAction(true) end
 
 function Window:buildPreview()
     local body, plan = self.body, self.plan
@@ -795,37 +868,48 @@ function Window:buildPreview()
         routeText(self.request) .. (self.request.destination.kind == "trash"
             and " The native trash command deletes the entire bin, including approved existing contents."
             or " Live capacity, access and item ownership are checked again during execution."))
-    local rows = list(body, 0, 4 * H + GAP, body.width, body.height - 8 * H - 2 * GAP, self)
+    local rows = list(body, 0, 4 * H + GAP, body.width, body.height - 9 * H - 2 * GAP, self)
     reviewRows(rows, plan)
-    local y = body.height - 3 * H
+    local required, key = App.reviewPreference(self.request)
+    if self.skipPreviewKey ~= key then self.skipPreviewDraft, self.skipPreviewInitial = not required, not required end
+    if self.skipPreviewInitial == nil then self.skipPreviewInitial = not required end
+    self.skipPreviewKey = key
+    local choice = reviewChoices[key]
+    local y = body.height - 4 * H
+    self.skipPreviewCheck = check(body, 0, y + H + 3, body.width, choice.label, self.skipPreviewDraft,
+        self, function(owner, index, selected) owner.skipPreviewDraft = selected == true end, choice.tooltip)
+    self.skipPreviewCheck.initialReviewSelection = self.skipPreviewInitial
     local adjust = button(body, 0, y, 140, "Adjust setup", self, function(s) s:show("compose") end, "Return to the same source, item selection and destination.")
     self.runButton = button(body, body.width - 250, y, 250, self.request.destination.kind == "trash" and "Start cleanup and delete" or "Start job", self, function(s)
         local ok, err = s:app():start(s.plan)
         if not ok then s:messageText(err); return end
-        W.unfocus(s.body); s:setVisible(false); UI.showProgress(s.playerIndex)
+        local notice = rememberReviewChoice(s.skipPreviewCheck, s.skipPreviewKey)
+        W.unfocus(s.body); s:setVisible(false); UI.showProgress(s.playerIndex, notice)
     end, self.request.destination.kind == "trash" and "Approve deletion of the reviewed items and existing bin contents." or "Begin native movement and transfers.",
         self.request.destination.kind == "trash" and "danger" or "accent")
     self.runButton:setEnable(#moves > 0 or (plan.pending or 0) > 0)
     if #moves == 0 and (plan.pending or 0) == 0 then self.runButton:setTooltip("Nothing eligible is planned. Read the exclusion reasons or adjust your setup.") end
     local skipReviews
-    if self.request.destination.kind == "trash" then
+    if self.request.destination.kind == "trash" and App.reviewPreference(nil, true) then
         skipReviews = button(body, body.width - 520, y, 260, "Start and skip bin reviews", self, function(s)
             local ok, err = s:app():start(s.plan, {reviewBins = false})
             if not ok then s:messageText(err); return end
-            W.unfocus(s.body); s:setVisible(false); UI.showProgress(s.playerIndex)
-        end, "Approve this cleanup and automatically accept eligible inspected bins for this job. Native access, protected items, changed contents, and server deletion rules are still checked.", "danger")
+            local notice = rememberReviewChoice(s.skipPreviewCheck, s.skipPreviewKey)
+            W.unfocus(s.body); s:setVisible(false); UI.showProgress(s.playerIndex, notice)
+        end, "Skip bin reviews for this job only. The checkbox remembers the separate preview choice for future actions. Protected items, permissions and native rules still apply.", "danger")
         skipReviews:setEnable(#moves > 0 or (plan.pending or 0) > 0)
     end
-    self.messagePanel = wrapped(body, 0, y + H + 5, body.width, 2 * H - 5, "")
+    self.messagePanel = wrapped(body, 0, y + 2 * H + 5, body.width, 2 * H - 5, "")
     body.layout = function()
         place(summary, 0, nil, body.width)
         place(description, 0, nil, body.width)
-        place(rows, 0, 4 * H + GAP, body.width, body.height - 8 * H - 2 * GAP)
-        local footer = body.height - 3 * H
+        place(rows, 0, 4 * H + GAP, body.width, body.height - 9 * H - 2 * GAP)
+        local footer = body.height - 4 * H
         place(adjust, 0, footer)
         place(self.runButton, body.width - 250, footer)
         place(skipReviews, body.width - 520, footer)
-        place(self.messagePanel, 0, footer + H + 5, body.width)
+        place(self.skipPreviewCheck, 0, footer + H + 3, body.width)
+        place(self.messagePanel, 0, footer + 2 * H + 5, body.width)
     end
     body.layout()
 end
@@ -1194,7 +1278,11 @@ local preferenceRows = {
     { key = "vehicleShortcuts", title = "Vehicle shortcuts", description = "Show vehicle memory, hauling and storage actions in the relevant context." },
     { key = "categoryShortcuts", title = "Category shortcuts", description = "Offer actions for categories relevant to the item you clicked." },
     { key = "savedShortcuts", title = "Saved setups in right-click menus", description = "Reuse your named setups from their current clicked context." },
-    { key = "confirmQuickMoves", title = "Review quick transfers first", description = "Show a compact review before ordinary quick moves. Cleanup always requires deletion approval." },
+    { key = "confirmQuickMoves", title = "Review quick transfers first", description = "Optional preview for ordinary quick transfers and the Start job button. Off starts directly after current item and capacity checks; Preview job always remains available." },
+    { key = "confirmQuickCleanup", title = "Review quick cleanup first", description = "Optional deletion preview for quick cleanup and Start cleanup. Off lets those actions delete eligible items directly. Bin review has its own setting." },
+    { key = "confirmBinReviews", title = "Review bins on arrival", description = "Optional contents approval at each newly inspected bin. Off approves eligible bins automatically. Protected items, permissions and native deletion rules still apply." },
+    { key = "matchingTransferButtons", title = "All-container matching transfer buttons", description = "Add an ALL-source companion beside each native matching-transfer icon. Transfer matches from every carried container to the displayed or nearby containers." },
+    { key = "showQuickProgress", title = "Open Current job for quick actions", description = "Show Progress after a direct quick action starts. Off keeps quick actions quiet; F7 and Current job still show their result. Important startup notices remain visible." },
     { key = "rememberLastSetup", title = "Remember my last action setup", description = "Restore the last source, destination, selection and bag options when continuing a setup." },
     { key = "showTips", title = "Show workflow tips", description = "Show additional guidance in the Home view. Tooltips and the Help field guide stay available." },
 }
@@ -1381,7 +1469,7 @@ function QuickReview:new(playerIndex, context, request, plan, notice)
     o.title = context.binReview and "LootBox - review bin contents"
         or (request.destination.kind == "trash" and "LootBox - review deletion" or "LootBox - quick action")
     o.resizable, o.backgroundColor, o.borderColor = true, W.color("base"), W.color("border")
-    local minimumHeight = math.max(440, o:titleBarHeight() + (request.destination.kind == "trash" and 11 or 9) * H + 3 * GAP + bottomInset(o))
+    local minimumHeight = math.max(440, o:titleBarHeight() + (request.destination.kind == "trash" and 12 or 10) * H + 3 * GAP + bottomInset(o))
     o.minimumWidth, o.minimumHeight = math.min(540, width), math.min(minimumHeight, availableHeight)
     o:setHeight(math.max(height, o.minimumHeight))
     o:setY((getCore():getScreenHeight() - o.height) / 2)
@@ -1396,7 +1484,8 @@ function QuickReview:createChildren()
     local moves, skipped, pending = #(self.plan.moves or {}), #(self.plan.skipped or {}), self.plan.pending or 0
     local binReview = self.context.binReview
     local trash = self.request.destination.kind == "trash"
-    local footerRows = trash and 5 or 4
+    local showSkip = trash and (binReview ~= nil or App.reviewPreference(nil, true))
+    local footerRows = showSkip and 6 or 5
     local heading = W.heading(self, GAP, y, binReview and ("Use " .. tostring(self.plan.bin.name) .. " for cleanup?")
         or (tostring(moves) .. (self.plan.building and " observed moves" or " planned moves")))
     if binReview then heading.r, heading.g, heading.b = C.item.r, C.item.g, C.item.b end
@@ -1423,6 +1512,16 @@ function QuickReview:createChildren()
             binReview and "This is a client observation. Multiplayer cannot certify an empty bin or make shared-bin deletion atomic."
                 or "Adjust the item selection or source. Unopened multiplayer sources may remain unconfirmed.")
     end
+    local required, key = App.reviewPreference(self.request, binReview ~= nil)
+    local choice = reviewChoices[key]
+    self.skipPreviewKey = key
+    local selected, initial
+    if self.context.skipPreviewKey == key then selected, initial = self.context.skipPreviewDraft, self.context.skipPreviewInitial end
+    if selected == nil then selected = not required end
+    if initial == nil then initial = not required end
+    self.skipPreviewCheck = check(self, GAP, footerY + (showSkip and 2 or 1) * H + 8, width, choice.label, selected,
+        self, nil, choice.tooltip)
+    self.skipPreviewCheck.initialReviewSelection = initial
     local backButton = button(self, GAP, footerY, 100, binReview and "Back" or "Cancel", self, function(s) s:close() end,
         binReview and "Close this window and leave the current job paused for review." or "Close this review without starting a job.")
     local adjustButton = button(self, GAP + 110, footerY, binReview and 145 or 115, binReview and "Try another bin" or "Adjust setup", self, function(s)
@@ -1437,6 +1536,8 @@ function QuickReview:createChildren()
         local context = {}
         for k, v in pairs(s.context or {}) do context[k] = v end
         context.request = s.request
+        context.skipPreviewKey, context.skipPreviewDraft = s.skipPreviewKey, s.skipPreviewCheck:isSelected(1)
+        context.skipPreviewInitial = s.skipPreviewCheck.initialReviewSelection
         s:close(); UI.open(s.playerIndex, context, "compose")
     end, binReview and "Skip this bin and let the current job try another eligible destination." or "Open the full manager with this exact setup.")
     local runText = binReview and "Approve bin and continue" or (trash and "Start cleanup and delete" or "Start quick job")
@@ -1444,15 +1545,15 @@ function QuickReview:createChildren()
         local app, problem = App.get(s.playerIndex)
         if not app then W.setText(s.messagePanel, problem); return end
         local ok, err
-        if s.context.binReview then ok, err = app:approveBin(s.context.binReview)
+        if s.context.binReview then ok, err = app:approveBin(s.context.binReview, s.skipPreviewCheck:isSelected(1) and {reviewBins = false} or nil)
         else ok, err = app:start(s.plan) end
         if not ok then W.setText(s.messagePanel, err); return end
-        local note = s.notice
+        local note = rememberReviewChoice(s.skipPreviewCheck, s.skipPreviewKey, s.notice)
         s:close(); UI.showProgress(s.playerIndex, note)
     end, binReview and "Approve native whole-bin deletion of these observed existing contents and the selected items delivered by this job."
         or (trash and "Approve whole-bin deletion of the reviewed items, including the listed existing contents." or "Start this reviewed native job."), trash and "danger" or "accent")
     self.runButton:setEnable(binReview and self.plan.canApprove == true or (not binReview and (moves > 0 or pending > 0)))
-    if trash then
+    if showSkip then
         self.skipReviewsButton = button(self, GAP, footerY + H + 5, width,
             binReview and "Approve and skip further bin reviews" or "Start and skip bin reviews", self, function(s)
                 local app, problem = App.get(s.playerIndex)
@@ -1461,12 +1562,12 @@ function QuickReview:createChildren()
                 if s.context.binReview then ok, err = app:approveBin(s.context.binReview, {reviewBins = false})
                 else ok, err = app:start(s.plan, {reviewBins = false}) end
                 if not ok then W.setText(s.messagePanel, err); return end
-                local note = s.notice
+                local note = rememberReviewChoice(s.skipPreviewCheck, s.skipPreviewKey, s.notice)
                 s:close(); UI.showProgress(s.playerIndex, note)
-            end, "Skip further bin approval windows for this job. Every bin is still inspected, and protected items, changed contents, native access and server deletion rules can still block it.", "danger")
+            end, "Skip bin reviews for this job only. Use the checkbox to remember your review choice for future jobs. Every bin is still inspected and protected items, changed contents and native rules can block it.", "danger")
         self.skipReviewsButton:setEnable(binReview and self.plan.canApprove == true or (not binReview and (moves > 0 or pending > 0)))
     end
-    self.messagePanel = wrapped(self, GAP, footerY + (trash and 2 or 1) * H + 5, width, 3 * H - 5,
+    self.messagePanel = wrapped(self, GAP, footerY + (showSkip and 3 or 2) * H + 8, width, 3 * H - 8,
         self.notice or (binReview and "Approve permits whole-bin deletion of the observed contents above and items this job delivers. The job keeps its selection and search progress. Protected or changed contents block approval. Back leaves the job waiting."
             or (trash and "Deletion is permanent. The native trash command empties the entire bin; protected or new unapproved contents block deletion."
             or "Capacity, access and item ownership are rechecked while the job runs.")))
@@ -1481,7 +1582,8 @@ function QuickReview:createChildren()
         place(adjustButton, GAP + 110, footer)
         place(self.runButton, self.width - GAP - 240, footer)
         place(self.skipReviewsButton, GAP, footer + H + 5, w)
-        place(self.messagePanel, GAP, footer + (trash and 2 or 1) * H + 5, w)
+        place(self.skipPreviewCheck, GAP, footer + (showSkip and 2 or 1) * H + 8, w)
+        place(self.messagePanel, GAP, footer + (showSkip and 3 or 2) * H + 8, w)
     end
     self.layout()
 end
@@ -1716,11 +1818,17 @@ function UI.quickAction(playerIndex, context, request, pickArea)
     end
     local saved, saveError = app:rememberSetup(request)
     local notice = not saved and ("The job can run, but its setup could not be remembered: " .. tostring(saveError)) or nil
-    local preferences = App.getPreferences()
-    if request.destination.kind ~= "trash" and preferences.confirmQuickMoves == false and (#(plan.moves or {}) > 0 or (plan.pending or 0) > 0) then
+    local required, _, preferenceError = App.reviewPreference(request)
+    if preferenceError then notice = "Review settings could not be read; this review is shown: " .. tostring(preferenceError) end
+    if not required then
         local ok
         ok, err = app:start(plan)
-        if ok then return UI.showProgress(playerIndex, notice) end
+        if ok then
+            if UI.quickWindows[playerIndex] then UI.quickWindows[playerIndex]:close() end
+            local preferences = App.getPreferences()
+            if preferences.showQuickProgress == true or notice then return UI.showProgress(playerIndex, notice) end
+            return true
+        end
         notice = "This shortcut could not start: " .. tostring(err)
     end
     if UI.quickWindows[playerIndex] then UI.quickWindows[playerIndex]:close() end

@@ -314,10 +314,10 @@ local function containerActions(menu, playerIndex, context, app)
         quick(playerIndex, target, action)
     end
     if source ~= inventory then
-        add(menu, carried and "unpack" or "loot", carried and "Unpack contents to main inventory..." or "Loot contents...", function()
+        add(menu, carried and "unpack" or "loot", carried and "Unpack contents to main inventory..." or "Loot contents (Smart Load)", function()
             move(carried and "container" or "inventory", carried and inventory or nil)
         end, carried and ("Move eligible contents of " .. name .. " into your main inventory. The bag itself stays where it is.")
-            or ("Take eligible contents of " .. name .. " into your carried storage. Other open containers are excluded."))
+            or ("Use Smart Load for eligible contents of " .. name .. ": fill carried bags first, then main inventory. Other source containers are excluded. Reviews are optional in Settings."))
     end
     if call(source, "getType") ~= "floor" then
         add(menu, "drop", "Empty contents onto floor here...", function() move("floor") end,
@@ -329,14 +329,15 @@ local function containerActions(menu, playerIndex, context, app)
     for _, entry in ipairs(visibleContainers(playerIndex, source)) do
         local destination = entry.container
         if not (carried and source ~= inventory and destination == inventory) then
-            add(moveMenu, "store", entry.name .. "...", function() move("container", destination) end,
-                "Move eligible contents of " .. name .. " into " .. entry.name .. ". Icon positions count from the top of the named sidebar. Review access and capacity before starting.")
+            local targetName = destination == inventory and "Main inventory only" or entry.name
+            add(moveMenu, "store", targetName .. "...", function() move("container", destination) end,
+                "Move eligible contents of " .. name .. " into " .. targetName .. ". This uses the selected container only; Smart Load uses all carried bags before main inventory. Icon positions count from the top of the named sidebar. Native access and capacity are checked.")
         end
     end
     add(moveMenu, "vehicle", "My remembered vehicle...", function() move("vehicle") end,
         "Haul eligible contents of " .. name .. " to your remembered car, using trunk storage before available seats.")
-    add(menu, "clean", "Clean contents...", function() move("trash") end,
-        "Haul eligible contents of " .. name .. " to real trash cans for deletion. The source container stays in place. Existing bin contents require fresh approval.")
+    add(menu, "clean", "Clean contents (delete)", function() move("trash") end,
+        "Delete eligible contents of " .. name .. " through real trash cans. The source container stays in place. Optional previews and bin reviews are controlled separately in Settings.")
     add(menu, "choose", "Choose items and categories...", function()
         local action, target = setup(source == inventory and "labels" or (carried and "container" or "inventory"),
             carried and source ~= inventory and inventory or nil)
@@ -348,7 +349,7 @@ local function containerActions(menu, playerIndex, context, app)
         if source ~= inventory then
             add(menu, "store", "Put carried items in " .. name .. "...", function()
                 quick(playerIndex, context, request("inventory", "container", allItems(), context))
-            end, "Move eligible carried items into this exact container. Review the selection, protection, and capacity before starting.")
+            end, "Move eligible carried items into this exact container. Protection, native access and capacity are checked; review is optional in Settings.")
         end
         add(menu, "label", "Label this container...", function()
             local target = routeContext(context)
@@ -362,7 +363,7 @@ local function typeActions(menu, playerIndex, context, app, filter, suffix)
     local exactType = #filter.types > 0
     if not context.carried then
         add(menu, "loot", "Take all " .. suffix, function() quick(playerIndex, context, request("container", "inventory", filter, context)) end,
-            "Take eligible matches from the clicked source into carried storage. Review includes nested contents when enabled.")
+            "Use Smart Load for eligible matches from the clicked source: carried bags first, then main inventory. Source bag contents are included when enabled.")
     end
     local target = context.targetContainer or context.container
     if storage(target) then

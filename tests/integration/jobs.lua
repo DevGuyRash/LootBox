@@ -745,7 +745,8 @@ test("floor destination remains pinned after walking to sources", function()
     local destination = f:addSquare(square("chosen floor", 20, 0))
     local selected = item(f.source)
     start(f, request("floor", destination))
-    assert(finish(f).done == 1)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1)
     assert(selected.world and selected.world:getSquare() == destination)
 end)
 
@@ -756,7 +757,8 @@ test("floor items can move between squares sharing one native floor view", funct
     selected.world = { getSquare = function() return origin end }
     f.ground = { selected }
     start(f, request("floor", destination))
-    assert(finish(f).done == 1)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1)
     assert(selected.world and selected.world:getSquare() == destination and #f.ground == 1)
 end)
 
@@ -766,7 +768,8 @@ test("adjacent floor destinations require standing on the chosen square", functi
     f.nearby[origin.name] = { [destination.name] = true }
     local selected = item(f.inventory)
     start(f, request("floor", destination))
-    assert(finish(f).done == 1)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1)
     assert(selected.world and selected.world:getSquare() == destination)
 end)
 
@@ -1795,7 +1798,7 @@ test("resuming a floor delivery keeps its original destination point", function(
     f.position = "source"
     assert(f.jobs:resume())
     local result = finish(f)
-    assert(result.done == 1 and result.skipped == 0 and selected:getWorldItem():getSquare() == target)
+    assert(result.state == "finished" and result.done == 1 and result.skipped == 0 and selected:getWorldItem():getSquare() == target)
     assert(f.position == "destination")
 end)
 
@@ -1866,7 +1869,7 @@ test("a resumed native adjacent floor result is counted without a duplicate drop
     f.holdTransferResult, f.position = false, "source"
     assert(f.jobs:resume())
     local result = finish(f)
-    assert(result.done == 1 and result.skipped == 0 and #f.transfers == 1)
+    assert(result.state == "finished" and result.done == 1 and result.skipped == 0 and #f.transfers == 1)
     assert(selected:getWorldItem():getSquare() == adjacent)
 end)
 
@@ -2285,6 +2288,219 @@ test("bag preparation keeps capacity-dependent selected items in the preview ins
     assert(#f.transfers == 0 and f.source:getItems():size() == 2)
     local normal = assert(f.jobs:preview(request("inventory")))
     assert(#normal.moves == 1 and #normal.skipped == 1, "Without useful bag preparation the live capacity exclusion remains truthful")
+end)
+
+local function matchingFixture(capacity)
+    local f = fixture(capacity or 20)
+    f.sources = {f.inventory}
+    f.displayed, f.nearbyTargets = f.destination, {f.destination}
+    f.targetTypes = {[f.destination] = {["Base.Nails"] = true}}
+    function f.world:matchingOrder(records)
+        if f.orderError then return nil, f.orderError end
+        if not f.nativeOrder then return records end
+        local byItem, ordered = {}, {}
+        for _, record in ipairs(records) do byItem[record.item] = record end
+        for _, value in ipairs(f.nativeOrder) do ordered[#ordered + 1] = assert(byItem[value]) end
+        return ordered
+    end
+    function f.world:matchingTargets(mode)
+        local result = {}
+        for _, target in ipairs(mode == "displayed" and {f.displayed} or f.nearbyTargets) do
+            local types = {}
+            for fullType, selected in pairs(f.targetTypes[target] or {}) do types[fullType] = selected end
+            local floor = target:getType() == "floor"
+            local point = floor and f.floorTarget or nil
+            result[#result + 1] = {ref = target, anchor = not floor and self:sourceAnchor(target) or nil,
+                point = point and {x = point.x, y = point.y, z = point.z}, types = types}
+        end
+        return result
+    end
+    function f.world:matchingPoint(input)
+        for _, target in ipairs(input.destination.targets or {}) do
+            if target.point then return {x = target.point.x, y = target.point.y, z = target.point.z} end
+        end
+    end
+    local ordinaryDestinations = f.world.destinations
+    function f.world:destinations(input, value)
+        if input.destination.kind ~= "matching" then return ordinaryDestinations(self, input, value) end
+        local result = {}
+        for _, target in ipairs(input.destination.targets or {}) do
+            if target.types[value:getFullType()] then
+                local current = target.anchor and self:resolveSource(target.anchor) or f.floor
+                if current then result[#result + 1] = current end
+            end
+        end
+        return result
+    end
+    return f
+end
+
+local function matchingRequest(mode)
+    return {scope = "inventory", includeBags = true, filter = {all = true, ids = {}, types = {}},
+        destination = {kind = "matching", mode = mode or "nearby"}}
+end
+
+test("matching transfers move main, outer bag and nested bag items directly to the captured target", function()
+    local f = matchingFixture(20)
+    local outer = f:carryContainer(container("outer carried bag", 10), 0.5)
+    local inner = f:carryContainer(container("nested carried bag", 10), 0.5)
+    f.sources = {f.inventory, outer, inner}
+    local mainItem, outerItem, innerItem = item(f.inventory), item(outer), item(inner)
+    start(f, matchingRequest("displayed"))
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 3 and status.moved == 3 and status.carried == 0 and status.skipped == 0)
+    assert(f.destination:contains(mainItem) and f.destination:contains(outerItem) and f.destination:contains(innerItem))
+    assert(f.inventory:isEmpty() and outer:isEmpty() and inner:isEmpty() and #f.transfers == 3)
+    assert(f.transfers[1].source == f.inventory and f.transfers[2].source == outer and f.transfers[3].source == inner)
+end)
+
+test("matching displayed transfers keep the clicked destination after the loot pane changes", function()
+    local f = matchingFixture(20)
+    local selected = item(f.inventory)
+    local other = container("new displayed storage", 10)
+    local plan = assert(f.jobs:preview(matchingRequest("displayed")))
+    f.displayed = other
+    assert(f.jobs:start(plan))
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1 and status.skipped == 0 and f.destination:contains(selected) and other:isEmpty())
+    assert(#f.transfers == 1)
+end)
+
+test("public review edits cannot replace private matching routes or their selection", function()
+    local f = matchingFixture(20)
+    local selected = item(f.inventory)
+    local other = container("unreviewed matching storage", 10)
+    local plan = assert(f.jobs:preview(matchingRequest("displayed")))
+    assert(plan.request.destination.targets == nil)
+    plan.request.destination.targets = {{ref = other, types = {["Base.Nails"] = true}}}
+    plan.request.destination.mode = "nearby"
+    assert(f.jobs:start(plan))
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1 and f.destination:contains(selected) and other:isEmpty())
+end)
+
+test("nearby matching routes use later eligible targets when the first fills", function()
+    local f = matchingFixture(10)
+    local bag = f:carryContainer(container("matching carry bag", 10), 0.5)
+    f.sources = {f.inventory, bag}
+    f.destination.capacity = 2
+    local second = container("second matching target", 3)
+    f.nearbyTargets = {f.destination, second}
+    f.targetTypes[second] = {["Base.Nails"] = true}
+    for _ = 1, 2 do item(f.inventory) end
+    for _ = 1, 3 do item(bag) end
+    start(f, matchingRequest())
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 5 and status.skipped == 0 and status.carried == 0)
+    assert(#f.destination.items == 2 and #second.items == 3 and #f.transfers == 5)
+    assert(f.inventory:isEmpty() and bag:isEmpty())
+end)
+
+test("native matching order across bags determines which items fit a limited target", function()
+    local f = matchingFixture(10)
+    local bag = f:carryContainer(container("middle weight bag", 10), 1)
+    f.sources = {f.inventory, bag}
+    local light = item(f.inventory, "Base.WaterBottle", 1)
+    local heavy = item(f.inventory, "Base.WaterBottle", 3)
+    local middle = item(bag, "Base.WaterBottle", 2)
+    f.destination.capacity = 4
+    f.targetTypes[f.destination] = {["Base.WaterBottle"] = true}
+    f.nativeOrder = {light, middle, heavy}
+    start(f, matchingRequest())
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 2 and status.skipped == 1 and #f.transfers == 2)
+    assert(f.destination:contains(light) and f.destination:contains(middle) and not f.destination:contains(heavy))
+    assert(f.inventory:contains(heavy) and bag:isEmpty())
+end)
+
+test("matching floor delivery resumes at its original point after the player leaves", function()
+    local f = matchingFixture(10)
+    local target = f:addSquare(square("matching original floor", 20, 0))
+    local elsewhere = f:addSquare(square("matching other floor", 50, 10, 1))
+    local selected = item(f.inventory)
+    f.displayed, f.floorTarget = f.floor, {x = target.x, y = target.y, z = target.z}
+    f.targetTypes[f.floor] = {["Base.Nails"] = true}
+    start(f, matchingRequest("displayed"))
+    awaitOperation(f, function(op) return op.kind == "transfer" and op.destination == f.floor end)
+    stopJob(f)
+    f.position, f.floorOnlyHere = elsewhere.name, true
+    f.floorTarget = {x = elsewhere.x, y = elsewhere.y, z = elsewhere.z}
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1 and status.skipped == 0 and #f.transfers == 1)
+    assert(selected:getWorldItem():getSquare() == target)
+    assert(f.floorDrops[selected.id].origin == coordinateKey({x = target.x, y = target.y, z = target.z}))
+end)
+
+test("matching transfers reject incomplete carried scope and invalid modes without moving items", function()
+    local f = matchingFixture(10)
+    local selected = item(f.inventory)
+    local input = matchingRequest()
+    input.scope = "room"
+    assert(not f.jobs:preview(input))
+    input.scope, input.includeBags = "inventory", false
+    assert(not f.jobs:preview(input))
+    input.includeBags, input.destination.mode = true, "unknown"
+    assert(not f.jobs:preview(input))
+    assert(f.inventory:contains(selected) and #f.operations == 0 and f.jobs:status().state == "idle")
+end)
+
+test("an unreachable captured matching floor leaves items carried instead of dropping at the new location", function()
+    local f = matchingFixture(10)
+    local target = f:addSquare(square("unloaded matching floor", 20, 0))
+    local selected = item(f.inventory)
+    f.displayed, f.floorTarget = f.floor, {x = target.x, y = target.y, z = target.z}
+    f.targetTypes[f.floor] = {["Base.Nails"] = true}
+    local plan = assert(f.jobs:preview(matchingRequest("displayed")))
+    f.grid[coordinateKey(target)], f.unloaded[target.name] = nil, true
+    assert(f.jobs:start(plan))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 0 and status.skipped == 1)
+    assert(f.inventory:contains(selected) and #f.transfers == 0 and #f.ground == 0)
+end)
+
+test("a native matching sort failure leaves every carried item untouched", function()
+    local f = matchingFixture(10)
+    local selected = item(f.inventory)
+    f.orderError = "Native matching sort failed"
+    local plan, err = f.jobs:preview(matchingRequest())
+    assert(not plan and err == f.orderError and f.inventory:contains(selected) and #f.operations == 0)
+end)
+
+test("an explicit carried bag receives a single direct transfer without a Smart Load detour", function()
+    local f = fixture(3)
+    local preferred = f:carryContainer(container("other reducing bag", 10), 0.1)
+    local selectedBag = f:carryContainer(container("selected reducing bag", 20), 0.25)
+    local selected = item(f.source, "Base.Heavy", 6)
+    local ordinary = f.world.destinations
+    function f.world:destinations(input, value)
+        if input.destination.kind == "inventory" then return {preferred, f.inventory} end
+        return ordinary(self, input, value)
+    end
+    start(f, request("container", selectedBag))
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1 and status.moved == 1 and status.carried == 0 and status.skipped == 0)
+    assert(#f.transfers == 1 and f.transfers[1].source == f.source and f.transfers[1].destination == selectedBag)
+    assert(selectedBag:contains(selected) and preferred:isEmpty() and f.inventory:isEmpty())
+end)
+
+test("an explicit main-inventory unpack does not prepare another bag or queue a hauling leg", function()
+    local f = fixture(10)
+    local sourceBag = f:carryContainer(container("unpacked personal bag", 10), 1)
+    local otherBag = f:carryContainer(container("unused gear bag", 10), 0.5)
+    local selected = item(sourceBag, "Base.Nails", 2)
+    f.sources = {sourceBag}
+    local Carry = require "LootBox/Carry"
+    local previous = Carry.next
+    local bagItem = {getInventory = function() return otherBag end}
+    Carry.next = function() return {kind = "gear", item = bagItem} end
+    start(f, request("container", f.inventory))
+    local status = finish(f)
+    Carry.next = previous
+    assert(status.state == "finished" and status.done == 1 and status.carried == 0 and status.skipped == 0)
+    assert(#f.transfers == 1 and f.transfers[1].source == sourceBag and f.transfers[1].destination == f.inventory)
+    assert(f.inventory:contains(selected) and sourceBag:isEmpty() and otherBag:isEmpty())
+    for _, op in ipairs(f.operations) do assert(op.kind ~= "gear") end
 end)
 
 print("PASS " .. tests .. " Jobs integration scenarios")
