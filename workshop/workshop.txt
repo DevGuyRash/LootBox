@@ -1,3 +1,4 @@
+id=3838652822
 version=1
 title=LootBox
 description=Client-side looting, sorting and inventory tools for Project Zomboid Build 42.

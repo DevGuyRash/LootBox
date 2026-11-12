@@ -6,6 +6,8 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 ## Install locally
 
+Subscribe to [LootBox on Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3838652822), or install the local package. The Workshop ID is `3838652822`, and the mod ID is `LootBox`.
+
 Extract the built `LootBox-0.9.1.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
