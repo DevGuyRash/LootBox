@@ -3,7 +3,8 @@ local Setups = {}
 Setups.defaults = { contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
     vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true,
     confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
-    matchingTransferButtons = true, showQuickProgress = false, rememberLastSetup = true, showTips = true }
+    matchingTransferButtons = true, showQuickProgress = false, rememberLastSetup = true, showTips = true,
+    condenseButton = true, condenseRebalance = false, condenseUseUnequipped = false, condenseNested = false }
 
 local scopes = { inventory = true, container = true, reach = true, room = true,
     building = true, area = true, labeled = true }
@@ -61,7 +62,8 @@ function Setups.request(value)
         or type(filter) ~= "table" then return nil, "Choose a valid source, selection, and destination" end
     local includeInventory, includeBags = boolean(value.includeInventory, false), boolean(value.includeBags, true)
     local all = boolean(filter.all, false)
-    if includeInventory == nil or includeBags == nil or all == nil then return nil, "Setup options must be on or off" end
+    local excludeUnwanted = boolean(value.excludeUnwanted, false)
+    if includeInventory == nil or includeBags == nil or all == nil or excludeUnwanted == nil then return nil, "Setup options must be on or off" end
     local ids, err = strings(filter.ids == nil and {} or filter.ids, true)
     if not ids then return nil, err end
     local types
@@ -74,7 +76,7 @@ function Setups.request(value)
     labels, err = strings(destination.labels == nil and {} or destination.labels, true)
     if not labels then return nil, err end
     if destination.kind == "matching" then scope, includeInventory, includeBags = "inventory", false, true end
-    local result = { scope = scope, includeInventory = includeInventory, includeBags = includeBags,
+    local result = { scope = scope, includeInventory = includeInventory, includeBags = includeBags, excludeUnwanted = excludeUnwanted,
         filter = { ids = ids, types = types, all = all }, sourceLabels = sourceLabels,
         destination = { kind = destination.kind, labels = labels } }
     if destination.kind == "matching" then

@@ -2,6 +2,7 @@ local Native = require "LootBox/Native"
 local Categories = require "LootBox/Categories"
 local Routing = require "LootBox/Routing"
 local Carry = require "LootBox/Carry"
+local Condense = require "LootBox/Condense"
 local Jobs = {}
 Jobs.__index = Jobs
 
@@ -58,7 +59,12 @@ function Jobs:status()
     result.canPause = self.execution ~= nil and not self.ending
     local execution = self.execution or self.suspended and self.suspended.execution
     result.reviewBins = not execution or execution.reviewBins ~= false
+    if execution and execution.condense then result.condense = execution.condense:status() end
     return result
+end
+
+local function planningBlocked(self)
+    return self.execution or self.ending or self.native:isBusy() or (self.suspended and self.view.state == "paused")
 end
 
 function Jobs:captureRecord(record)
@@ -122,6 +128,11 @@ function Jobs:choose(request, item, reservations)
         (carryBlocked or capacityBlocked) and "capacity" or nil
 end
 
+local function matchesSelection(graph, request, descriptor, item, player)
+    return graph:matchesFilter(request.filter, descriptor)
+        and not (request.excludeUnwanted == true and item.isUnwanted and item:isUnwanted(player))
+end
+
 local function validate(request)
     if type(request) ~= "table" or type(request.filter) ~= "table" or type(request.destination) ~= "table" then
         return nil, "Choose what to move, where to look, and a destination"
@@ -158,7 +169,7 @@ local function validate(request)
 end
 
 function Jobs:preview(request)
-    if self.execution or self.ending or self.native:isBusy() or (self.suspended and self.view.state == "paused") then return nil, "Finish or cancel the current job before previewing another" end
+    if planningBlocked(self) then return nil, "Finish or cancel the current job before previewing another" end
     local ok, err = validate(request)
     if not ok then return nil, err end
     local scan
@@ -187,7 +198,7 @@ function Jobs:preview(request)
     if request.destination.kind == "inventory" then
         local incoming = 0
         for _, record in ipairs(scan.items or {}) do
-            if not self.world:owns(record.source) and self.graph:matchesFilter(request.filter, record.descriptor)
+            if not self.world:owns(record.source) and matchesSelection(self.graph, request, record.descriptor, record.item, self.player)
                 and not self.world:protected(record.item) then incoming = incoming + weight(record.item) end
         end
         preparesBags = Carry.new(self.player, self.world):next(self.world:gearRecords(plan.sources), incoming) ~= nil
@@ -238,7 +249,7 @@ function Jobs:preview(request)
     local reservations = {}
     for _, record in ipairs(scan.items or {}) do
         local item = record.item
-        if self.graph:matchesFilter(request.filter, record.descriptor) then
+        if matchesSelection(self.graph, request, record.descriptor, record.item, self.player) then
             local protected, protection = self.world:protected(item)
             local reason, status
             if protected then reason, status = protection or "Protected item", "Protected"
@@ -297,14 +308,48 @@ function Jobs:preview(request)
     return plan
 end
 
+function Jobs:previewCondense(options)
+    if planningBlocked(self) then return nil, "Finish or cancel the current job before condensing" end
+    local controller, err = Condense.new(self.world, options)
+    if not controller then return nil, err end
+    local info
+    info, err = controller:preview()
+    if not info then return nil, err end
+    self.revision = self.revision + 1
+    local request = {scope = "inventory", includeBags = true, filter = {all = true, ids = {}, types = {}},
+        destination = {kind = "inventory"}}
+    local display = {}
+    for _, key in ipairs({"mode", "eligible", "bagCount", "beforeWeight", "estimatedSaving", "useUnequipped", "nested", "reason"}) do display[key] = info[key] end
+    display.useUnequipped, display.nested = options ~= nil and options.useUnequipped == true, options ~= nil and options.nested == true
+    local plan = {owner = self, revision = self.revision, action = "condense", condense = display,
+        request = cloneRequest(request), moves = {}, skipped = {}, warnings = {}, pending = info.planning and 1 or 0}
+    for _, row in ipairs(info.steps or {}) do
+        plan.moves[#plan.moves + 1] = {itemName = row.itemName, from = row.from, to = row.to,
+            status = row.temporary and "Temporary buffer" or "Reposition", tone = row.temporary and "warning" or "success"}
+    end
+    plan.warnings[1] = "This shows the first arrangement. Condense checks current items, bag eligibility and native capacity before every transfer."
+    self.reviewed = {token = plan, revision = self.revision, action = "condense", condense = controller,
+        request = request, graph = Categories.new(self.graph:list()), bins = {}, skipped = {}}
+    return plan
+end
+
 function Jobs:start(plan, options)
-    if self.execution or self.ending or self.native:isBusy() or (self.suspended and self.view.state == "paused") then return nil, "A LootBox job is already active" end
+    if planningBlocked(self) then return nil, "A LootBox job is already active" end
     local reviewed = self.reviewed
     if not reviewed or reviewed.token ~= plan or reviewed.revision ~= self.revision then
         return nil, "Preview this job again before starting" end
     self.reviewed = nil
     self.plan, self.cancelled, self.ending, self.hauled, self.suspended = reviewed, false, nil, {}, nil
     self.activeGraph, self.diagnostics = reviewed.graph, {count = 0, seen = {}}
+    if reviewed.action == "condense" then
+        local info = reviewed.condense:status()
+        self.view = {state = "running", done = 0, moved = 0, cleared = 0, total = info.eligible or 0,
+            skipped = 0, reasons = {}, carried = 0, unconfirmedSources = 0, condense = info,
+            reason = "Planning carried-item condensation."}
+        self.execution = {phase = "condense", condense = reviewed.condense, batch = {}, reviewBins = false}
+        self:diagnostic("start-condense")
+        return true
+    end
     self.view = { state = "running", done = 0, moved = 0, cleared = 0, deferred = 0, total = #reviewed.records, skipped = #reviewed.skipped,
         reasons = copyList(reviewed.skipped), carried = 0, unconfirmedSources = 0 }
     self.execution = self:createExecution(reviewed)
@@ -315,6 +360,40 @@ function Jobs:start(plan, options)
     if reviewed.survey then self.view.survey = reviewed.survey:status() end
     self:diagnostic("start")
     return true
+end
+
+function Jobs:condenseStep()
+    local controller = self.execution.condense
+    local op, reason, done = controller:next()
+    self.view.condense = controller:status()
+    if op then
+        op.condense = true
+        self.view.itemName = tostring(op.item:getName())
+        self.view.reason = "Reorganizing carried items using the current Condense settings."
+        self:action(op, function(ok, failure)
+            local continuing, problem = controller:settle(op, ok, failure)
+            local status = controller:status()
+            self.view.condense = status
+            self.view.done, self.view.moved = status.transfers or 0, status.transfers or 0
+            self.view.total = math.max(self.view.total, self.view.done)
+            if not continuing then self:finishWhenSettled("paused", problem or "Condense needs a fresh check before continuing") end
+        end)
+    elseif done then
+        local status = self.view.condense
+        if (status.buffered or 0) > 0 then self:finishWhenSettled("paused", reason or "A bag arrangement is incomplete; buffered items remain carried")
+        else
+            if status.limited then self:skip({itemName = "Condense"}, reason or status.reason or "The bounded improvement search reached its limit") end
+            self:complete(self.view.skipped > 0 and "finished_with_skips" or "finished", reason or status.reason or "Condense completed.")
+        end
+    elseif reason then self:finishWhenSettled("paused", reason)
+    else self.view.reason = "Planning useful capacity-safe bag arrangements." end
+end
+
+function Jobs:checkCondense(op)
+    if not op.condense then return true end
+    local controller = self.execution and self.execution.condense
+    if not controller then return nil, "The Condense arrangement is no longer active" end
+    return controller:validate(op)
 end
 
 function Jobs:diagnostic(event, reason, work)
@@ -416,13 +495,15 @@ function Jobs:prepareOperation(work)
         local item = source and source:getItemWithID(work.itemId)
         if not item or tostring(item:getFullType()) ~= work.fullType then return nil, "The selected item changed source while the job was stopped" end
         op.item, op.source, op.destination = item, source, destination
+        local allowed, failure, admission = self:checkCondense(op)
+        if not allowed then return nil, failure, nil, nil, admission end
         if op.personalRecovery then
             local allowed, reason = self.recovery:allows(op)
             if not allowed then return nil, reason end
         else
             local protected, reason = self.world:protected(item)
             if protected then return nil, "Protected: " .. tostring(reason or "Item is protected") end
-            if not self.activeGraph:matchesFilter(self.plan.request.filter, self.world:describe(item)) then return nil, "Item no longer matches the selection" end
+            if not matchesSelection(self.activeGraph, self.plan.request, self.world:describe(item), item, self.player) then return nil, "Item no longer matches the selection" end
         end
         local delta = self.world:carryDelta(item, destination)
         local current, maximum = self.world:carrying()
@@ -520,13 +601,15 @@ function Jobs:continueOperation()
             if not square or pointKey(coordinates(square)) ~= pointKey(work.sourcePoint) then self:finishOperation(work, false, "Floor item changed from its original location"); return end
         end
         operation.item = item
+        local allowed, failure, admission = self:checkCondense(operation)
+        if not allowed then self:finishOperation(work, false, failure, admission); return end
         if operation.personalRecovery then
             local allowed, reason = self.recovery:allows(operation)
             if not allowed then self:finishOperation(work, false, reason); return end
         else
             local protected, reason = self.world:protected(item)
             if protected then self:finishOperation(work, false, "Protected: " .. tostring(reason or "Item is protected")); return end
-            if not self.activeGraph:matchesFilter(self.plan.request.filter, self.world:describe(item)) then self:finishOperation(work, false, "Item no longer matches the selection"); return end
+            if not matchesSelection(self.activeGraph, self.plan.request, self.world:describe(item), item, self.player) then self:finishOperation(work, false, "Item no longer matches the selection"); return end
         end
         local delta = self.world:carryDelta(item, operation.destination)
         local current, maximum = self.world:carrying()
@@ -632,7 +715,7 @@ end
 function Jobs:matches(record, plan)
     local protected, protection = self.world:protected(record.item)
     if protected then return nil, "Protected: " .. tostring(protection or "Item is protected") end
-    if not self.activeGraph:matchesFilter(plan.request.filter, self.world:describe(record.item)) then
+    if not matchesSelection(self.activeGraph, plan.request, self.world:describe(record.item), record.item, self.player) then
         return nil, "Item no longer matches the selection" end
     return true
 end
@@ -988,7 +1071,7 @@ function Jobs:sectionTasks(scan)
     execution.tasks, execution.taskIndex, execution.records, execution.recordIndex = {}, 1, {}, 1
     for _, entry in ipairs(scan.items) do
         local id = self.world:itemId(entry.item) or entry.item
-        if not execution.seen[id] and self.activeGraph:matchesFilter(self.plan.request.filter, entry.descriptor) then
+        if not execution.seen[id] and matchesSelection(self.activeGraph, self.plan.request, entry.descriptor, entry.item, self.player) then
             execution.seen[id] = true
             if not (self.plan.request.destination.kind == "inventory" and self.world:owns(entry.source)) then
                 local key = entry.groundSquare or entry.source
@@ -1069,7 +1152,7 @@ function Jobs:addObserved(entries)
     local execution, result = self.execution, {}
     for _, entry in ipairs(entries) do
         local id = self.world:itemId(entry.item) or entry.item
-        if not execution.seen[id] and self.activeGraph:matchesFilter(execution.plan.request.filter, entry.descriptor) then
+        if not execution.seen[id] and matchesSelection(self.activeGraph, execution.plan.request, entry.descriptor, entry.item, self.player) then
             execution.seen[id] = true
             if not (execution.plan.request.destination.kind == "inventory" and self.world:owns(entry.source)) then
                 local record = self:captureRecord(entry)
@@ -1620,6 +1703,12 @@ function Jobs:carriedCount()
 end
 
 function Jobs:complete(state, reason)
+    if self.execution and self.execution.condense then
+        self.view.condense = self.execution.condense:status()
+        if (self.view.condense.buffered or 0) > 0 then
+            reason = (reason or "Condense stopped") .. "; a bag arrangement is incomplete and buffered items remain carried. Resume to finish or repair it."
+        end
+    end
     if state == "failed" and self.execution and self.execution.recoveryOnly then
         self.suspended = self.execution.resumeSaved
     end
@@ -1658,7 +1747,8 @@ function Jobs:advance()
     end
     if self.operation then self:continueOperation(); return end
     local execution = self.execution
-    if execution.phase == "recovery" then self:recoveryStep()
+    if execution.phase == "condense" then self:condenseStep()
+    elseif execution.phase == "recovery" then self:recoveryStep()
     elseif execution.phase == "heavyEmpty" then self:heavyEmptyStep()
     elseif execution.phase == "carry" then self:carryStep()
     elseif execution.phase == "source" then self:sourceStep()
@@ -1747,6 +1837,7 @@ function Jobs:resume()
     if reason then return nil, reason .. ". Stop that action before choosing Resume job." end
     self.execution, self.operation, self.activeGraph, self.binReview = saved.execution, saved.operation, saved.graph, nil
     self.suspended, self.view.state, self.view.reason = nil, "running", "Continuing the stopped job with current item and destination checks."
+    if self.execution.condense then self.execution.condense:onResume() end
     if self.operation and not self.operation.completed then
         self.operation.retry, self.operation.sourcePrepared, self.operation.walk = true, nil, nil
     end
