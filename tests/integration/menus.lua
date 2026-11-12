@@ -101,6 +101,7 @@ package.loaded["LootBox/Selection"] = {
 local Menus = require "LootBox/Menus"
 local Guides = require "LootBox/Guides"
 local interface = {
+    showProgress = function(playerIndex) current.progressPlayer = playerIndex end,
     open = function(playerIndex, context, mode)
         local opened = { playerIndex = playerIndex, context = context, mode = mode }
         current.opened = opened
@@ -130,7 +131,8 @@ local function item(source, kind)
 end
 
 local function fixture()
-    local f = { preferences = copy(defaults), definitions = {}, matches = {}, presets = {}, kept = {}, tested = 0 }
+    local f = { preferences = copy(defaults), definitions = {}, matches = {}, presets = {}, kept = {}, tested = 0,
+        jobStatus = {state = "idle"}, recovery = {pending = false} }
     current = f
     ISInventoryPaneContextMenu.dontCreateMenu = false
     ContainerButtonIcons = nil
@@ -147,6 +149,9 @@ local function fixture()
     f.viewed = f.crate
     f.checklist = { ids = { "native:Food" }, types = { "Base.Bandage" }, all = false }
     f.app = {
+        status = function() return f.jobStatus end,
+        recoveryStatus = function() return f.recovery end,
+        recoverPersonalGear = function() f.recoveries = (f.recoveries or 0) + 1; return not f.recoveryError, f.recoveryError end,
         world = {
             owns = function(_, source) return source and source.owned == true end,
             describe = function(_, selected) return { fullType = selected:getFullType(), categoryId = "native:Food" } end,
@@ -1077,6 +1082,51 @@ test("selection adapter installation and pane attachment follow native menu life
     assert(f.selectionAttached == f.lootPage.inventoryPane)
     registrations.refresh[1](f.inventoryPage, "end")
     assert(f.selectionAttached == f.inventoryPage.inventoryPane)
+end)
+
+test("Current job appears for active paused and finished work and keeps a distinct icon", function(f)
+    for _, state in ipairs({"running", "needs_review", "paused", "cancelled", "finished_with_skips", "finished"}) do
+        f.jobStatus.state = state
+        local _, menu = inventoryMenu(f)
+        local currentJob = needed(menu, "Current job")
+        distinctIcons(menu)
+        assert(currentJob.toolTip.description:find("Key bindings", 1, true))
+        click(menu, "Current job")
+        assert(f.progressPlayer == 0 and not f.quick and not f.opened)
+    end
+    f.jobStatus.state = "idle"
+    local _, menu = inventoryMenu(f)
+    assert(not option(menu, "Current job"))
+end)
+
+test("pending personal gear is accessible from idle inventory world and empty-pane menus", function(f)
+    f.recovery = {pending = true, count = 2}
+    local _, inventory = inventoryMenu(f)
+    needed(inventory, "Current job")
+    local _, world = worldMenu(f, {fixtureObject(f, f.crate)})
+    needed(world, "Current job")
+    for _, isLoot in ipairs({false, true}) do
+        local parent = Menu:new()
+        registrations.background[1](0, parent, isLoot)
+        local menu = needed(parent, "LootBox").child
+        needed(menu, "Current job")
+        distinctIcons(menu)
+        click(menu, "Current job")
+        assert(f.progressPlayer == 0)
+    end
+    assert(f.recoveries == nil and f.quick == nil)
+end)
+
+test("Current job follows context preferences without re-enabling hidden shortcut actions", function(f)
+    f.jobStatus.state = "paused"
+    f.preferences.inventoryShortcuts = false
+    f.preferences.worldShortcuts = false
+    local _, menu = inventoryMenu(f)
+    needed(menu, "Current job")
+    assert(not option(menu, "Keep this copy"))
+    f.preferences.contextMenus = false
+    local parent = inventoryMenu(f)
+    assert(not option(parent, "LootBox"))
 end)
 
 assert(#failures == 0, table.concat(failures, "\n"))

@@ -1,0 +1,4 @@
+UI_EN = {
+    UI_optionscreen_binding_LootBox = "LootBox",
+    UI_optionscreen_binding_LootBoxCurrentJob = "Current job",
+}
