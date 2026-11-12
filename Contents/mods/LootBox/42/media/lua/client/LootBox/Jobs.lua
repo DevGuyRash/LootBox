@@ -1,6 +1,7 @@
 local Native = require "LootBox/Native"
 local Categories = require "LootBox/Categories"
 local Routing = require "LootBox/Routing"
+local Carry = require "LootBox/Carry"
 local Jobs = {}
 Jobs.__index = Jobs
 
@@ -53,6 +54,10 @@ function Jobs:status()
     local result = {}
     for key, value in pairs(self.view) do result[key] = value end
     result.canResume = self.suspended ~= nil and not self.ending and not self.native:isBusy()
+        and (not self.recoveryRequired or self.suspended.execution.recoveryOnly == true)
+    result.canPause = self.execution ~= nil and not self.ending
+    local execution = self.execution or self.suspended and self.suspended.execution
+    result.reviewBins = not execution or execution.reviewBins ~= false
     return result
 end
 
@@ -76,15 +81,17 @@ function Jobs:choose(request, item, reservations)
     self.world.graph = previousGraph
     if not ok then return nil, "Destination discovery failed: " .. tostring(candidates) end
     if not candidates then return nil, err end
-    local carryBlocked = false
+    local carryBlocked, capacityBlocked = false, false
     for _, destination in ipairs(candidates) do
         local same = destination == item:getContainer()
         if same and destination:getType() == "floor" and request.destination.ref then
             local worldItem = item:getWorldItem()
             same = not worldItem or worldItem:getSquare() == request.destination.ref
         end
-        if not same and not destination:isInside(item)
-            and destination:isItemAllowed(item) and destination:hasRoomFor(self.player, item) then
+        local allowed = not same and not destination:isInside(item) and destination:isItemAllowed(item)
+        local room = allowed and destination:hasRoomFor(self.player, item)
+        if allowed and not room then capacityBlocked = true end
+        if room then
             local reserved = reservations and reservations[destination] or 0
             local capacity = destination:getEffectiveCapacity(self.player)
             local delta = self.world:carryDelta(item, destination)
@@ -102,11 +109,12 @@ function Jobs:choose(request, item, reservations)
                     return destination
                 end
                 carryBlocked = true
-            end
+            else capacityBlocked = true end
         end
     end
     return nil, carryBlocked and "Native hard carrying limit reached; deliver the current load first"
-        or "No matching destination with room for this item"
+        or "No matching destination with room for this item",
+        (carryBlocked or capacityBlocked) and "capacity" or nil
 end
 
 local function validate(request)
@@ -138,7 +146,7 @@ local function validate(request)
 end
 
 function Jobs:preview(request)
-    if self.execution or self.ending or self.native:isBusy() then return nil, "Finish or cancel the current job before previewing another" end
+    if self.execution or self.ending or self.native:isBusy() or (self.suspended and self.view.state == "paused") then return nil, "Finish or cancel the current job before previewing another" end
     local ok, err = validate(request)
     if not ok then return nil, err end
     local scan
@@ -150,6 +158,15 @@ function Jobs:preview(request)
         groundSquares = scan.groundSquares or {}, trash = {}, approved = {}, unknownSources = {} }
     local targets = {}
     for _, warning in ipairs(scan.warnings or {}) do table.insert(plan.warnings, warning) end
+    local preparesBags = false
+    if request.destination.kind == "inventory" then
+        local incoming = 0
+        for _, record in ipairs(scan.items or {}) do
+            if not self.world:owns(record.source) and self.graph:matchesFilter(request.filter, record.descriptor)
+                and not self.world:protected(record.item) then incoming = incoming + weight(record.item) end
+        end
+        preparesBags = Carry.new(self.player, self.world):next(self.world:gearRecords(plan.sources), incoming) ~= nil
+    end
     if request.destination.kind == "trash" then
         if isClient() and not getServerOptions():getBoolean("TrashDeleteAll") then
             return nil, "This server disables native trash deletion (TrashDeleteAll)"
@@ -201,12 +218,16 @@ function Jobs:preview(request)
             local reason, status
             if protected then reason, status = protection or "Protected item", "Protected"
             elseif request.destination.kind == "inventory" and self.world:owns(record.source) then reason, status = "Already in carried storage", "Already carried" end
-            local destination
+            local destination, admission
             if not reason and request.destination.kind ~= "trash" then
-                destination, reason = self:choose(request, item, reservations)
+                destination, reason, admission = self:choose(request, item, reservations)
+                if reason and admission == "capacity" and preparesBags then
+                    reason, status = nil, "Recheck after bag setup"
+                end
             end
             local row = { itemName = record.itemName, from = record.from,
-                to = request.destination.kind == "trash" and "Trash can (fill, then empty)" or (destination and self.world:name(destination) or ""), reason = reason,
+                to = request.destination.kind == "trash" and "Trash can (fill, then empty)"
+                    or (destination and self.world:name(destination) or (status == "Recheck after bag setup" and "Carried storage after bag setup" or "")), reason = reason,
                 status = status or (reason and "Left in place" or "Move"), tone = reason and "warning" or "success" }
             if reason then table.insert(plan.skipped, row)
             else
@@ -215,6 +236,7 @@ function Jobs:preview(request)
             end
         end
     end
+    if preparesBags then table.insert(plan.warnings, "Useful bags will be prepared first. Items waiting for that space are checked again during the job; native capacity can still leave an item in place.") end
     local unknown = 0
     for _, source in ipairs(plan.sources) do
         if not source:isExplored() then unknown = unknown + 1; plan.unknownSources[#plan.unknownSources + 1] = source end
@@ -244,26 +266,44 @@ function Jobs:preview(request)
     end
     for _, target in ipairs(targets) do target.approved = target.container and approved[target.container] or {} end
     self.reviewed = { token = plan, revision = self.revision, request = cloneRequest(request), records = records,
-        unknownSources = copyList(plan.unknownSources), groundSquares = copyList(plan.groundSquares),
+        sources = copyList(plan.sources), unknownSources = copyList(plan.unknownSources), groundSquares = copyList(plan.groundSquares),
         trash = copyList(plan.trash), bins = targets, survey = scan.survey, binProbe = #targets > 0 and #plan.trash == 0, approved = approved,
         skipped = copyList(plan.skipped), graph = Categories.new(self.graph:list()) }
     return plan
 end
 
-function Jobs:start(plan)
-    if self.execution or self.ending or self.native:isBusy() then return nil, "A LootBox job is already active" end
+function Jobs:start(plan, options)
+    if self.execution or self.ending or self.native:isBusy() or (self.suspended and self.view.state == "paused") then return nil, "A LootBox job is already active" end
     local reviewed = self.reviewed
     if not reviewed or reviewed.token ~= plan or reviewed.revision ~= self.revision then
         return nil, "Preview this job again before starting" end
     self.reviewed = nil
     self.plan, self.cancelled, self.ending, self.hauled, self.suspended = reviewed, false, nil, {}, nil
-    self.activeGraph = reviewed.graph
-    self.view = { state = "running", done = 0, total = #reviewed.records, skipped = #reviewed.skipped,
+    self.activeGraph, self.diagnostics = reviewed.graph, {count = 0, seen = {}}
+    self.view = { state = "running", done = 0, moved = 0, cleared = 0, deferred = 0, total = #reviewed.records, skipped = #reviewed.skipped,
         reasons = copyList(reviewed.skipped), carried = 0, unconfirmedSources = 0 }
     self.execution = self:createExecution(reviewed)
-    if reviewed.binProbe then self.execution.phase, self.execution.binProbeIndex = "binProbe", 1 end
+    self.execution.reviewBins = not (options and options.reviewBins == false)
+    self.carry = Carry.new(self.player, self.world)
+    self.execution.afterCarry, self.execution.phase = reviewed.binProbe and "binProbe" or "source", "carry"
+    if reviewed.binProbe then self.execution.binProbeIndex = 1 end
     if reviewed.survey then self.view.survey = reviewed.survey:status() end
+    self:diagnostic("start")
     return true
+end
+
+function Jobs:diagnostic(event, reason, work)
+    local log = self.diagnostics
+    if not log or log.count >= 128 then return end
+    local phase = self.execution and self.execution.phase or "none"
+    local message = reason and tostring(reason):gsub("[\r\n]", " "):sub(1, 300) or ""
+    local key = event .. "|" .. self.view.state .. "|" .. phase .. "|" .. message
+    if log.seen[key] then return end
+    log.seen[key], log.count = true, log.count + 1
+    local item = work and work.fullType or "none"
+    local id = work and work.itemId or "none"
+    print("[LootBox] event=" .. event .. " state=" .. self.view.state .. " phase=" .. phase
+        .. " item=" .. tostring(item) .. " id=" .. tostring(id) .. " reason=" .. message)
 end
 
 function Jobs:skip(record, reason)
@@ -273,6 +313,7 @@ function Jobs:skip(record, reason)
     table.insert(self.view.reasons, { itemName = record.itemName or "Container", status = status,
         reason = reason, tone = record.tone or "warning" })
     self.view.reason = reason
+    self:diagnostic("left-in-place", reason)
 end
 
 local function completeTransfer(self, work, source, destination)
@@ -282,7 +323,7 @@ local function completeTransfer(self, work, source, destination)
         floorDestinations = op.floorDestinations}, work.itemId, work.fullType)
 end
 
-function Jobs:finishOperation(work, ok, reason)
+function Jobs:finishOperation(work, ok, reason, code)
     self.operation, self.pending, self.view.waiting = nil, nil, nil
     if ok and work.op.kind == "approach" and work.op.travel then
         local trip, target = work.op.travel, work.op.location
@@ -290,7 +331,9 @@ function Jobs:finishOperation(work, ok, reason)
         if square then target = coordinates(square) end
         self.routing:observe(trip.from, target or trip.to, trip.distance, trip.elapsedMs)
     end
-    work.callback(ok, reason)
+    if ok and work.op.kind == "trash" then self:settleTrash(work) end
+    if not ok then self:diagnostic("native-failure", reason, work) end
+    work.callback(ok, reason, code)
 end
 
 function Jobs:retryWalk(work, point)
@@ -347,12 +390,18 @@ function Jobs:prepareOperation(work)
         if completed then op.resultItem = completed; return {}, nil, nil, true end
         local item = source and source:getItemWithID(work.itemId)
         if not item or tostring(item:getFullType()) ~= work.fullType then return nil, "The selected item changed source while the job was stopped" end
-        local protected, reason = self.world:protected(item)
-        if protected then return nil, "Protected: " .. tostring(reason or "Item is protected") end
-        if not self.activeGraph:matchesFilter(self.plan.request.filter, self.world:describe(item)) then return nil, "Item no longer matches the selection" end
+        op.item, op.source, op.destination = item, source, destination
+        if op.personalRecovery then
+            local allowed, reason = self.recovery:allows(op)
+            if not allowed then return nil, reason end
+        else
+            local protected, reason = self.world:protected(item)
+            if protected then return nil, "Protected: " .. tostring(reason or "Item is protected") end
+            if not self.activeGraph:matchesFilter(self.plan.request.filter, self.world:describe(item)) then return nil, "Item no longer matches the selection" end
+        end
         local delta = self.world:carryDelta(item, destination)
         local current, maximum = self.world:carrying()
-        if delta > 0 and current + delta > maximum + 0.0001 then return nil, "Native hard carrying limit reached; the item was left in place" end
+        if delta > 0 and current + delta > maximum + 0.0001 then return nil, "Native hard carrying limit reached; the item was left in place", nil, nil, "capacity" end
         op.item, op.source, op.destination = item, source, destination
         local steps = {}
         if work.sourcePoint then steps[#steps + 1] = {kind = "approach", location = work.sourcePoint}
@@ -416,8 +465,8 @@ function Jobs:continueOperation()
         return
     end
     if work.retry then
-        local steps, reason, again, completed = self:prepareOperation(work)
-        if not steps then self:finishOperation(work, false, reason); return end
+        local steps, reason, again, completed, code = self:prepareOperation(work)
+        if not steps then self:finishOperation(work, false, reason, code); return end
         if completed then self:finishOperation(work, true); return end
         work.steps, work.index, work.prepareAgain, work.retry = steps, 1, again, false
     end
@@ -445,20 +494,49 @@ function Jobs:continueOperation()
             local square = world and world:getSquare()
             if not square or pointKey(coordinates(square)) ~= pointKey(work.sourcePoint) then self:finishOperation(work, false, "Floor item changed from its original location"); return end
         end
-        local protected, reason = self.world:protected(item)
-        if protected then self:finishOperation(work, false, "Protected: " .. tostring(reason or "Item is protected")); return end
-        if not self.activeGraph:matchesFilter(self.plan.request.filter, self.world:describe(item)) then self:finishOperation(work, false, "Item no longer matches the selection"); return end
+        operation.item = item
+        if operation.personalRecovery then
+            local allowed, reason = self.recovery:allows(operation)
+            if not allowed then self:finishOperation(work, false, reason); return end
+        else
+            local protected, reason = self.world:protected(item)
+            if protected then self:finishOperation(work, false, "Protected: " .. tostring(reason or "Item is protected")); return end
+            if not self.activeGraph:matchesFilter(self.plan.request.filter, self.world:describe(item)) then self:finishOperation(work, false, "Item no longer matches the selection"); return end
+        end
         local delta = self.world:carryDelta(item, operation.destination)
         local current, maximum = self.world:carrying()
-        if delta > 0 and current + delta > maximum + 0.0001 then self:finishOperation(work, false, "Native hard carrying limit reached; the item was left in place"); return end
+        if delta > 0 and current + delta > maximum + 0.0001 then self:finishOperation(work, false, "Native hard carrying limit reached; the item was left in place", "capacity"); return end
         operation.item = item
+    end
+    if operation == work.op and operation.kind == "trash" then
+        local bin, problem = operation.container
+        if operation.trashTarget then bin, problem = self.world:resolveTrashTarget(operation.trashTarget) end
+        if not bin or (operation.trashTarget and not self.world:binReachable(operation.trashTarget)) then
+            self:finishOperation(work, false, problem or "The reviewed trash can is no longer reachable"); return
+        end
+        if isClient() and not getServerOptions():getBoolean("TrashDeleteAll") then
+            self:finishOperation(work, false, "This server disables native trash deletion (TrashDeleteAll)"); return
+        end
+        local safe, failure = self:binSafe({approved = operation.approved}, bin)
+        if not safe then self:finishOperation(work, false, failure); return end
+        operation.container = bin
+        work.deletions, work.deletionSource = {}, self:sourceKey(bin)
+        local contents = bin:getItems()
+        for index = 0, contents:size() - 1 do
+            local item = contents:get(index)
+            work.deletions[#work.deletions + 1] = {itemId = item:getID(), fullType = tostring(item:getFullType())}
+        end
+    end
+    if operation.personalRecovery then
+        local allowed, reason = self.recovery:allows(operation)
+        if not allowed then self:finishOperation(work, false, reason); return end
     end
     local accepted, reason, code = self.native:begin(operation)
     if not accepted then
         if code == "busy" then
             work.retry = true
             self.view.waiting = "Waiting for your current action to finish. This job will continue automatically."
-        else self:finishOperation(work, false, reason) end
+        else self:finishOperation(work, false, reason, code) end
         return
     end
     self.pending = {work = work, op = operation}
@@ -585,7 +663,9 @@ end
 
 function Jobs:empty(bin, approved, callback)
     local target
-    for _, candidate in ipairs(self.plan.bins or {}) do if candidate.container == bin then target = candidate; break end end
+    for _, candidate in ipairs(self.plan.bins or {}) do
+        if candidate.container == bin or candidate.key == self.world:key(bin) then target = candidate; break end
+    end
     self:approach(bin, function(ok, err, current)
         if not ok then callback(false, err); return end
         bin = current
@@ -602,12 +682,253 @@ function Jobs:empty(bin, approved, callback)
     end)
 end
 
+function Jobs:sourceKey(source, record)
+    if record and record.groundPoint then return "floor:" .. pointKey(record.groundPoint) end
+    return self.world:key(source) or source
+end
+
+function Jobs:registerWork(execution, record)
+    local source = self:sourceKey(record.source, record)
+    local id = tostring(record.itemId)
+    execution.work[source] = execution.work[source] or {}
+    execution.work[source][id] = execution.work[source][id] or {}
+    execution.work[source][id][record.fullType] = record
+    record.workSource = source
+    local deleted = execution.deleted[source]
+    if deleted and deleted[id] and deleted[id][record.fullType] then
+        record.settled = true
+        self.view.done, self.view.cleared = self.view.done + 1, self.view.cleared + 1
+    end
+end
+
+function Jobs:settleTrash(work)
+    local execution = self.execution or self.suspended and self.suspended.execution
+    if not execution or not work.deletions then return end
+    local source = work.deletionSource
+    execution.deleted[source] = execution.deleted[source] or {}
+    for _, deleted in ipairs(work.deletions) do
+        if not sourceItem(deleted, work.op.container) then
+            local id = tostring(deleted.itemId)
+            execution.deleted[source][id] = execution.deleted[source][id] or {}
+            execution.deleted[source][id][deleted.fullType] = true
+            local registered = execution.work[source] and execution.work[source][id]
+            local record = registered and registered[deleted.fullType]
+            if record and not record.settled then
+                record.settled = true
+                self.view.done, self.view.cleared = self.view.done + 1, self.view.cleared + 1
+            end
+        end
+    end
+end
+
+function Jobs:carryStep()
+    local execution, sources = self.execution, {}
+    if self.recovery and self.recovery:status().pending then execution.phase = execution.afterCarry or "source"; return end
+    for _, source in ipairs(self.plan.sources) do sources[#sources + 1] = source end
+    for _, task in ipairs(execution.tasks) do
+        if task.kind == "records" then
+            for _, record in ipairs(task.records) do sources[#sources + 1] = record.source end
+        elseif task.kind == "discover" then sources[#sources + 1] = task.container end
+    end
+    for _, record in ipairs(execution.records) do sources[#sources + 1] = record.source end
+    local records = self.world:gearRecords(sources)
+    local incoming = 0
+    for _, byId in pairs(execution.work) do for _, byType in pairs(byId) do for _, record in pairs(byType) do
+        if not record.settled and not self.world:owns(record.item:getContainer())
+            and not self.world:protected(record.item) then incoming = incoming + weight(record.item) end
+    end end end
+    local revision = execution.capacityRevision
+    local op = self.carry:next(records, incoming, revision)
+    if not op then
+        execution.phase = execution.afterCarry or "source"
+        self.view.reason = "Carrying bags are ready. Continuing the selected job."
+        return
+    end
+    self.view.reason = "Preparing carrying bags before collecting the next load."
+    local oldInventory = op.item:getInventory()
+    self:action(op, function(ok, reason, code)
+        local replacement = self.carry:complete(op, ok, code, revision)
+        if replacement then self.world:replaceGear(replacement.oldId, replacement.oldType, replacement.newItem) end
+        if ok then
+            local current = op.resultItem or op.item
+            local currentInventory = current:getInventory()
+            for _, byId in pairs(execution.work) do
+                for _, byType in pairs(byId) do
+                    for _, record in pairs(byType) do
+                        if record.item == op.item then
+                            record.item, record.itemId, record.fullType = current, current:getID(), tostring(current:getFullType())
+                            record.source, record.sourceAnchor, record.groundPoint = current:getContainer(), self.world:sourceAnchor(current:getContainer()), nil
+                        elseif record.source == oldInventory then
+                            local item = sourceItem(record, currentInventory)
+                            if item then record.item, record.source = item, currentInventory end
+                        end
+                        if self.world:owns(record.source) then record.sourceAnchor = self.world:sourceAnchor(record.source) end
+                    end
+                end
+            end
+            self:capacityChanged()
+        else self:diagnostic("gear-unavailable", reason) end
+        execution.phase = "carry"
+    end)
+end
+
+function Jobs:capacityChanged()
+    if self.execution then self.execution.capacityRevision = self.execution.capacityRevision + 1 end
+end
+
+function Jobs:onCapacityBlocked(record, reason)
+    local execution = self.execution
+    if execution.heavyRecord == record then
+        execution.heavyRecord = nil
+        self:skip(record, reason)
+        self:nextRecord()
+        self:beginRecovery("restore", "source")
+        return true
+    end
+    if self.recovery and not record.stagingAttempted and #execution.batch == 0
+        and self.plan.request.destination.kind == "trash" and not self.world:owns(record.item:getContainer()) then
+        local current, maximum = self.world:carrying()
+        if current + weight(record.item) > maximum + 0.0001 and weight(record.item) <= maximum then
+            record.stagingAttempted = true
+            local prepared, failure = self.recovery:prepare(record.item, self.world:safeStagingContainers())
+            if prepared then
+                execution.heavyRecord = record
+                self:beginRecovery("stage", "source")
+                return true
+            end
+            self:diagnostic("staging-unavailable", failure, record)
+            reason = reason .. "; " .. tostring(failure)
+        end
+    end
+    record.admissionFailures = (record.admissionFailures or 0) + 1
+    if record.admissionFailures >= 3 then self:skip(record, reason); return end
+    if not execution.deferred[record] then self.view.deferred = self.view.deferred + 1 end
+    execution.deferred[record] = {revision = execution.capacityRevision, reason = reason}
+    self.view.reason = "This item is waiting for a later load after carrying space is freed."
+    self:diagnostic("capacity-deferred", reason, record)
+end
+
+function Jobs:beginRecovery(mode, after)
+    self.execution.recovery = {mode = mode, after = after}
+    self.execution.phase = "recovery"
+end
+
+function Jobs:recoverPersonalGear()
+    if not self.recovery or not self.recovery:status().pending then return nil, "There is no personal gear waiting to be recovered" end
+    if self.execution or self.ending or self.native:isBusy() then return nil, "Pause or cancel the current job before recovering personal gear" end
+    local reason = self.native:takeoverReason()
+    if reason then return nil, reason end
+    local saved = self.suspended
+    while saved and saved.execution.recoveryOnly do saved = saved.execution.resumeSaved end
+    self.recoveryRequired = true
+    self.suspended, self.activeGraph = nil, self.graph
+    self.execution = {recoveryOnly = true, resumeSaved = saved, phase = "recovery", batch = {},
+        recovery = {mode = "restore"}, capacityRevision = 0}
+    self.plan = self.plan or {bins = {}}
+    self.view.state, self.view.reason = "running", "Returning to the personal gear staging container."
+    self.view.reasons, self.view.skipped = self.view.reasons or {}, self.view.skipped or 0
+    return true
+end
+
+function Jobs:recoveryStep()
+    local execution, work = self.execution, self.execution.recovery
+    if not work.arrived then
+        local status = self.recovery:status()
+        if not status.point then self:complete("failed", status.reason or "The personal gear receipt has no usable location"); return end
+        self:walkLocation(status.point, function(ok, reason)
+            execution.phase = "recovery"
+            if not ok then self:complete("failed", (reason or "Could not reach the staging container") .. "; personal gear remains reserved for recovery")
+            else
+                local endpoint, failure = self.recovery:endpoint()
+                if not endpoint then self:complete("failed", failure .. "; personal gear remains reserved for recovery"); return end
+                self:approach(endpoint, function(arrived, problem)
+                    execution.phase = "recovery"
+                    if arrived then work.arrived = true
+                    else self:complete("failed", (problem or "Could not approach the staging container") .. "; personal gear remains reserved for recovery") end
+                end)
+            end
+        end, nil, true)
+        return
+    end
+    local op, reason, done = self.recovery:next(work.mode)
+    if op then
+        self.view.reason = work.mode == "stage" and "Storing whole personal items for one heavy-item trip."
+            or "Recovering personal items and their original equipment slots."
+        self:action(op, function(ok, failure)
+            local settled, err = self.recovery:settle(op, ok, failure)
+            if not settled then self:complete("failed", (err or "Personal gear operation stopped") .. ". Choose Recover personal gear to continue.")
+            else self:capacityChanged(); execution.phase = "recovery" end
+        end)
+    elseif not done then self:complete("failed", (reason or "Personal gear recovery stopped") .. ". Personal gear remains reserved for recovery.")
+    elseif execution.recoveryOnly then
+        local saved = execution.resumeSaved
+        if saved then
+            if saved.operation and saved.operation.op.personalRecovery then saved.operation = nil end
+            saved.execution.recovery, saved.execution.heavyRecord = nil, nil
+            if saved.execution.phase == "recovery" then saved.execution.phase = "source" end
+        end
+        self.execution, self.operation, self.pending, self.activeGraph, self.suspended = nil, nil, nil, nil, saved
+        self.recoveryRequired = nil
+        self.view.state = saved and "paused" or "finished"
+        self.view.reason = saved and "Personal gear recovered. Choose Resume job to continue the paused job." or "Personal gear recovered to its original places."
+        self:diagnostic("recovered", self.view.reason)
+    else execution.recovery, execution.phase = nil, work.after or "source" end
+end
+
+function Jobs:heavyEmptyStep()
+    local execution = self.execution
+    execution.heavyBinIndex = execution.heavyBinIndex or 1
+    local target = self.plan.bins[execution.heavyBinIndex]
+    if not target then
+        execution.heavyBinIndex = nil
+        self:beginRecovery("restore", "source")
+        return
+    end
+    execution.heavyBinIndex = execution.heavyBinIndex + 1
+    if target.touched then
+        self:walkLocation(target.point, function(arrived, reason)
+            execution.phase = "heavyEmpty"
+            local bin = arrived and self.world:resolveTrashTarget(target)
+            if not bin then self:skip({itemName = "Trash can"}, reason or "The heavy-item bin is unavailable")
+            elseif not bin:getItems():isEmpty() then
+                self:empty(bin, target.approved, function(ok, failure)
+                    if not ok then self:skip({itemName = self.world:name(bin)}, failure) end
+                end)
+            end
+        end, nil, true)
+    end
+end
+
+function Jobs:retryDeferred()
+    local execution, records = self.execution, {}
+    for record, pending in pairs(execution.deferred) do
+        if record.settled then
+            execution.deferred[record] = nil
+            self.view.deferred = self.view.deferred - 1
+        elseif pending.revision < execution.capacityRevision then
+            records[#records + 1] = record
+            execution.deferred[record] = nil
+            self.view.deferred = self.view.deferred - 1
+        else
+            self:skip(record, pending.reason or "No further carrying space became available for this item")
+            execution.deferred[record] = nil
+            self.view.deferred = self.view.deferred - 1
+        end
+    end
+    if #records == 0 then return false end
+    table.sort(records, function(a, b) return tostring(a.itemId) < tostring(b.itemId) end)
+    execution.records, execution.recordIndex, execution.phase = records, 1, "source"
+    return true
+end
+
 function Jobs:createExecution(plan)
     local execution = { phase = "source", tasks = {}, taskIndex = 1, records = {}, recordIndex = 1,
-        batch = {}, seen = {}, seenSources = {}, seenGround = {}, failedRoutes = {}, plan = plan, finalBin = 1 }
+        batch = {}, seen = {}, seenSources = {}, seenGround = {}, failedRoutes = {}, plan = plan, finalBin = 1,
+        work = {}, deleted = {}, deferred = {}, capacityRevision = 0 }
     local groups, order = {}, {}
     for _, entry in ipairs(plan.records) do
         local record = self:captureRecord(entry)
+        self:registerWork(execution, record)
         execution.seen[self.world:itemId(record.item) or record.item] = true
         local key = record.groundSquare or record.source
         if not groups[key] then groups[key] = {}; order[#order + 1] = key end
@@ -643,7 +964,9 @@ function Jobs:sectionTasks(scan)
             if not (self.plan.request.destination.kind == "inventory" and self.world:owns(entry.source)) then
                 local key = entry.groundSquare or entry.source
                 if not groups[key] then groups[key] = {}; order[#order + 1] = key end
-                groups[key][#groups[key] + 1] = self:captureRecord(entry)
+                local record = self:captureRecord(entry)
+                self:registerWork(execution, record)
+                groups[key][#groups[key] + 1] = record
                 self.view.total = self.view.total + 1
             end
         end
@@ -664,7 +987,7 @@ function Jobs:sectionTasks(scan)
         end
     end
     for _, warning in ipairs(scan.warnings) do self:skip({itemName = "Building source"}, warning) end
-    execution.phase = "source"
+    execution.afterCarry, execution.phase = "source", "carry"
 end
 
 function Jobs:acceptSection(section, scan, missing, denied, reason)
@@ -685,7 +1008,8 @@ function Jobs:surveyStep()
     self.view.survey = survey:status()
     if section == false then return end
     if not section then
-        if #execution.batch > 0 then self:startDelivery("finalTrash") else execution.phase = "finalTrash" end
+        if #execution.batch > 0 then self:startDelivery("source")
+        elseif not self:retryDeferred() then execution.phase = "finalTrash" end
         return
     end
     self.view.reason = "Searching " .. section.roomName .. " on floor " .. tostring(section.z)
@@ -719,17 +1043,26 @@ function Jobs:addObserved(entries)
         if not execution.seen[id] and self.activeGraph:matchesFilter(execution.plan.request.filter, entry.descriptor) then
             execution.seen[id] = true
             if not (execution.plan.request.destination.kind == "inventory" and self.world:owns(entry.source)) then
-                result[#result + 1] = self:captureRecord(entry)
+                local record = self:captureRecord(entry)
+                self:registerWork(execution, record)
+                result[#result + 1] = record
                 self.view.total = self.view.total + 1
             end
         end
     end
-    execution.records, execution.recordIndex, execution.phase = result, 1, "source"
+    execution.records, execution.recordIndex, execution.phase = result, 1, "carry"
+    execution.afterCarry = "source"
 end
 
 function Jobs:nextRecord()
     self.execution.recordIndex = self.execution.recordIndex + 1
     self.execution.phase = "source"
+end
+
+function Jobs:finishHeavyAttempt(record, moved)
+    if self.execution.heavyRecord ~= record then return end
+    self.execution.heavyRecord = nil
+    if moved then self:startDelivery("heavyEmpty") else self:beginRecovery("restore", "source") end
 end
 
 function Jobs:startDelivery(after)
@@ -739,30 +1072,60 @@ end
 
 function Jobs:pickup(record)
     local execution, plan = self.execution, self.execution.plan
+    if record.settled then self:nextRecord(); self:finishHeavyAttempt(record, false); return end
     self.view.itemName = record.itemName
+    self.view.reason = "Collecting selected items into carried storage."
     self:recordSource(record, function(source, err)
         local ok
         if source then ok, err = self:matches(record, plan) end
-        if not source or not ok then self:skip(record, err); self:nextRecord(); return end
+        if not source or not ok then
+            self:skip(record, err)
+            self:nextRecord()
+            self:finishHeavyAttempt(record, false)
+            return
+        end
         if plan.request.destination.kind ~= "inventory" and self.world:owns(source) then
             execution.batch[#execution.batch + 1] = record
             self:nextRecord()
             return
         end
-        local destination, request
+        if plan.request.destination.kind == "trash" then
+            for _, target in ipairs(plan.bins) do
+                if target.key == self.world:key(source) and not target.blocked then
+                    if target.needsInspection then
+                        self:inspectBin(target, function() execution.phase = "source" end)
+                        return
+                    end
+                    if self:binSafe(target, source) then
+                        self:empty(source, target.approved, function(emptied, failure)
+                            if not emptied then self:skip(record, failure) end
+                            self:nextRecord()
+                        end)
+                        return
+                    end
+                end
+            end
+        end
+        local destination, request, code
         if plan.request.destination.kind == "inventory" then request = plan.request
         else request = { includeBags = plan.request.includeBags, destination = { kind = "inventory" } } end
-        destination, err = self:choose(request, record.item)
+        destination, err, code = self:choose(request, record.item)
         if not destination then
             if plan.request.destination.kind ~= "inventory" and #execution.batch > 0 then self:startDelivery("source")
-            else self:skip(record, err or "Cannot carry this item to its destination"); self:nextRecord() end
+            else
+                if code == "capacity" and plan.request.destination.kind ~= "inventory" then
+                    if self:onCapacityBlocked(record, err) then return end
+                else self:skip(record, err or "Cannot carry this item to its destination") end
+                self:nextRecord()
+                self:finishHeavyAttempt(record, false)
+            end
             return
         end
         local hauling = plan.request.destination.kind ~= "inventory"
         if hauling then self.hauled[self.world:itemId(record.item) or record.item] = record end
         record.carryContainer = hauling and destination or nil
         local operation = {kind = "transfer", item = record.item, source = source, destination = destination}
-        self:action(operation, function(moved, failure)
+        self:action(operation, function(moved, failure, failureCode)
             if moved then
                 record.item = operation.resultItem
                 if hauling then
@@ -770,17 +1133,25 @@ function Jobs:pickup(record)
                     record.hauled = true
                     execution.batch[#execution.batch + 1] = record
                     self.view.carried = self.view.carried + 1
-                else self.view.done = self.view.done + 1 end
+                else
+                    record.settled = true
+                    self.view.done, self.view.moved = self.view.done + 1, self.view.moved + 1
+                end
+            elseif failureCode == "capacity" and hauling then
+                if #execution.batch > 0 then self:startDelivery("source"); return end
+                if self:onCapacityBlocked(record, failure or "Native pickup refused") then return end
             else self:skip(record, failure or "Native pickup refused") end
             self:nextRecord()
+            self:finishHeavyAttempt(record, moved)
         end)
     end)
 end
 
 function Jobs:nextDelivery(record, ok, reason, destination)
     if ok then
-        self.view.done = self.view.done + 1
-        record.delivered = true
+        self.view.done, self.view.moved = self.view.done + 1, self.view.moved + 1
+        record.delivered, record.settled = true, true
+        if not self.world:owns(destination) then self:capacityChanged() end
         if record.hauled then self.view.carried = self.view.carried - 1 end
         if self.plan.request.destination.kind == "trash" then
             local target = record.trashTarget
@@ -897,9 +1268,24 @@ function Jobs:finishBinInspection()
     if now() < pending.deadline then return end
     self.execution.binInspection = nil
     if not self.world:markTrashInspected(pending.target) then pending.after(false, "The player moved away during inspection"); return end
+    self.reviewGeneration = (self.reviewGeneration or 0) + 1
     self.binReview = {target = pending.target, after = pending.after}
-    self.execution.phase, self.view.state = "binReview", "needs_review"
+    self.execution.phase, self.view.state, self.view.reviewId = "binReview", "needs_review", self.reviewGeneration
     self.view.reason = "Review the inspected bin contents before continuing. The current job and item selection are retained."
+    self:diagnostic("bin-review")
+    if not self.execution.reviewBins then
+        local review, reason = self:reviewBin()
+        local approved, failure
+        if review and review.canApprove then approved, failure = self:approveBin(review) end
+        if not approved then
+            local pendingReview = self.binReview
+            if pendingReview then
+                pendingReview.target.blocked = true
+                self.binReview, self.view.state = nil, "running"
+                pendingReview.after(false, failure or reason or "The bin contains protected items")
+            end
+        end
+    end
 end
 
 function Jobs:reviewBin()
@@ -928,7 +1314,7 @@ function Jobs:reviewBin()
     return review
 end
 
-function Jobs:approveBin(review)
+function Jobs:approveBin(review, options)
     local pending = self.binReview
     if not pending or not review or not pending.token or pending.token ~= review or self.ending then return nil, "Review this bin again before continuing" end
     local bin = self.world:resolveTrashTarget(pending.target)
@@ -937,6 +1323,7 @@ function Jobs:approveBin(review)
     local ok, err = self:binSafe(temporary, bin)
     if not ok then return nil, err end
     pending.target.approved, pending.target.needsInspection = pending.approved, nil
+    if options and options.reviewBins == false then self.execution.reviewBins = false end
     self.binReview, self.view.state = nil, "running"
     self.view.reason = "Continuing the current cleanup with the reviewed bin"
     pending.after(true)
@@ -964,7 +1351,7 @@ function Jobs:rankBins(record)
     local returnPoint = self.world:point()
     for index = execution.recordIndex, #execution.records do
         local entry = execution.records[index]
-        if not self.world:protected(entry.item) then
+        if not entry.settled and not self.world:protected(entry.item) then
             if #records == #execution.batch - delivery.index + 1 then
                 local square = self.world:square(entry.source)
                 if square then returnPoint = {x = square:getX(), y = square:getY(), z = square:getZ()} end
@@ -1094,6 +1481,7 @@ function Jobs:deliveryStep()
     if not record then
         execution.batch = {}
         execution.phase, execution.delivery = delivery.after, nil
+        if execution.phase == "source" then execution.afterCarry, execution.phase = "source", "carry" end
         return
     end
     self.view.itemName = record.itemName
@@ -1153,7 +1541,8 @@ function Jobs:sourceStep()
     execution.taskIndex = execution.taskIndex + 1
     if not task then
         if self.plan.survey and not self.plan.survey.complete then execution.phase = "survey"
-        elseif #execution.batch > 0 then self:startDelivery("finalTrash") else execution.phase = "finalTrash" end
+        elseif #execution.batch > 0 then self:startDelivery("source")
+        elseif not self:retryDeferred() then execution.phase = "finalTrash" end
     elseif task.kind == "records" then execution.records, execution.recordIndex = task.records, 1
     elseif task.kind == "discover" then self:discoverSource(task.container, task.anchor)
     elseif task.kind == "floor" then
@@ -1180,7 +1569,7 @@ end
 
 function Jobs:carriedCount()
     local count = 0
-    for _, record in pairs(self.hauled) do
+    for _, record in pairs(self.hauled or {}) do
         if not record.delivered then
             local item = record.carryContainer and sourceItem(record, record.carryContainer)
             if item and self.world:owns(record.carryContainer) then record.item = item; count = count + 1 end
@@ -1190,6 +1579,9 @@ function Jobs:carriedCount()
 end
 
 function Jobs:complete(state, reason)
+    if state == "failed" and self.execution and self.execution.recoveryOnly then
+        self.suspended = self.execution.resumeSaved
+    end
     self.view.carried = self:carriedCount()
     if not reason and (state == "finished" or state == "finished_with_skips") then
         reason = state == "finished" and "Finished the selected job."
@@ -1197,12 +1589,14 @@ function Jobs:complete(state, reason)
     end
     self.view.state, self.view.reason = state, reason or self.view.reason
     if self.view.carried > 0 then self.view.reason = (self.view.reason and self.view.reason .. "; " or "") .. self.view.carried .. " hauled items remain in carried storage" end
-    if state == "cancelled" and self.execution then
+    if self.operation and self.operation.completed and self.operation.op.kind == "trash" then self:settleTrash(self.operation) end
+    if (state == "cancelled" or state == "paused") and self.execution then
         self.suspended = {execution = self.execution, operation = self.operation, graph = self.activeGraph, binReview = self.binReview, stoppedAt = now()}
         if self.binReview then self.binReview.token, self.binReview.approved = nil, nil end
         for _, target in ipairs(self.plan.bins or {}) do target.approved, target.needsInspection = {}, true end
         self.view.reason = (self.view.reason or "Stopped") .. ". Choose Resume job to continue."
     end
+    self:diagnostic("complete", self.view.reason)
     self.execution, self.pending, self.operation, self.activeGraph, self.ending, self.binReview = nil, nil, nil, nil, nil, nil
     self.view.waiting = nil
 end
@@ -1216,14 +1610,17 @@ function Jobs:advance()
         if done == false and (code == "yielded" or code == "busy") then
             pending.work.retry, pending.work.sourcePrepared, pending.work.walk = true, nil, nil
             self.view.waiting = "Waiting for your current action to finish. This job will continue automatically."
-        elseif not done then self:finishOperation(pending.work, false, reason)
+        elseif not done then self:finishOperation(pending.work, false, reason, code)
         elseif pending.op == pending.work.op then self:finishOperation(pending.work, true)
         else pending.work.index = pending.work.index + 1 end
         return
     end
     if self.operation then self:continueOperation(); return end
     local execution = self.execution
-    if execution.phase == "source" then self:sourceStep()
+    if execution.phase == "recovery" then self:recoveryStep()
+    elseif execution.phase == "heavyEmpty" then self:heavyEmptyStep()
+    elseif execution.phase == "carry" then self:carryStep()
+    elseif execution.phase == "source" then self:sourceStep()
     elseif execution.phase == "binProbe" then self:probeBin()
     elseif execution.phase == "binInspection" then self:finishBinInspection()
     elseif execution.phase == "binReview" then return
@@ -1260,27 +1657,33 @@ end
 
 function Jobs:finishWhenSettled(state, reason)
     self.ending = self.ending or {state = state, reason = reason}
-    self.view.state = "cancelling"
+    self.view.state = state == "paused" and "pausing" or "cancelling"
+    self:diagnostic("stopping", reason)
     local ok, result, err = pcall(self.native.cancel, self.native, self.operation and self.operation.op)
     if not ok or result == false then self.ending.reason = (self.ending.reason or "") .. "; cancellation error: " .. tostring(ok and err or result) end
 end
 
 function Jobs:tick()
     if self.execution and not self.ending then
-        local reason = self.native:takeoverReason()
-        if reason then self:finishWhenSettled("cancelled", reason) end
+        local reason, code = self.native:takeoverReason()
+        if reason then self:finishWhenSettled(code == "combat" and "paused" or "cancelled", reason) end
     end
     if self.ending then
         if self.native:isBusy() then
             local ok, result, err = pcall(self.native.poll, self.native)
-            if not ok then self.view.reason = "Native cleanup error: " .. tostring(result); return end
+            if not ok then
+                self.view.reason = "Native cleanup error: " .. tostring(result)
+                self:diagnostic("cleanup-failure", self.view.reason, self.operation)
+                return
+            end
             if result == nil then return end
             if result == true and self.pending and self.pending.op == self.operation.op
-                and (self.operation.op.kind == "transfer" or self.operation.op.kind == "trash") then self.operation.completed = true end
+                and (self.operation.op.kind == "transfer" or self.operation.op.kind == "trash" or self.operation.op.kind == "gear") then self.operation.completed = true end
             if err and err ~= "Cancelled" then self.ending.reason = (self.ending.reason and self.ending.reason .. "; " or "") .. err end
         end
         self:complete(self.ending.state, self.ending.reason)
     elseif self.execution then
+        self:diagnostic("transition")
         if not self.native:isBusy() and self.native:isPlayerBusy() then
             if self.operation and not self.operation.completed then
                 self.operation.retry, self.operation.sourcePrepared, self.operation.walk = true, nil, nil
@@ -1297,6 +1700,7 @@ end
 function Jobs:resume()
     local saved = self.suspended
     if not saved or self.ending or self.native:isBusy() then return nil, "There is no stopped job ready to resume" end
+    if self.recoveryRequired and not saved.execution.recoveryOnly then return nil, "Recover personal gear before resuming the ordinary job" end
     if self.player:isDead() or self.player:isAsleep() then return nil, "The player cannot resume this job now" end
     local reason = self.native:takeoverReason()
     if reason then return nil, reason .. ". Stop that action before choosing Resume job." end
@@ -1333,9 +1737,22 @@ function Jobs:resume()
     return true
 end
 
+function Jobs:pause()
+    if self.ending then return true end
+    if not self.execution then return nil, "There is no running job to pause" end
+    self:finishWhenSettled("paused", "Paused by the player")
+    return true
+end
+
 function Jobs:cancel()
     if self.ending then return true end
-    if not self.execution and not self.native:isBusy() then return true end
+    if not self.execution and not self.native:isBusy() then
+        if self.suspended then
+            self.view.state, self.view.reason = "cancelled", "Cancelled. Choose Resume job to continue."
+            self:diagnostic("cancelled-checkpoint", self.view.reason)
+        end
+        return true
+    end
     self:finishWhenSettled("cancelled", "Cancelled")
     return true
 end

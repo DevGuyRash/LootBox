@@ -4,6 +4,7 @@ local Store = require "LootBox/Store"
 local World = require "LootBox/World"
 local Jobs = require "LootBox/Jobs"
 local Setups = require "LootBox/Setups"
+local Recovery = require "LootBox/Recovery"
 
 local App = {}
 local Instance = {}
@@ -87,7 +88,7 @@ local function saveDefinitions(nextDefinitions)
     if loadError then return nil, "Category storage needs repair: " .. loadError end
     for _, instance in pairs(sessions) do
         local state = instance:status().state
-        if state == "running" or state == "cancelling" or state == "needs_review" then return nil, "Finish or cancel the current job before editing categories" end
+        if state == "running" or state == "cancelling" or state == "pausing" or state == "needs_review" or state == "paused" then return nil, "Finish or cancel the current job before editing categories" end
     end
     local nextGraph, err = Categories.new(nextDefinitions)
     if not nextGraph then return nil, err end
@@ -220,8 +221,15 @@ function App.get(playerIndex)
     instance.world = World.new(player, state)
     instance.world.graph = graph
     instance.jobs = Jobs.new(player, instance.world, graph)
+    instance.recovery = Recovery.new(player, instance.world, path)
+    instance.world.recovery, instance.jobs.recovery = instance.recovery, instance.recovery
     sessions[playerIndex or 0] = instance
     return instance
+end
+
+function App.peek(playerIndex)
+    local instance = sessions[playerIndex or 0]
+    if instance and instance.player == getSpecificPlayer(playerIndex or 0) and instance.path == scope(instance.player) then return instance end
 end
 
 function Instance:persist()
@@ -426,19 +434,30 @@ function Instance:currentContainer()
 end
 function Instance:preview(request)
     if self.error or loadError then return nil, self.error or loadError end
+    local recovery = self.recovery:status()
+    if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
     self.jobs.graph = graph
     return self.jobs:preview(request)
 end
-function Instance:start(plan)
+function Instance:start(plan, options)
+    local recovery = self.recovery:status()
+    if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
     local ok, err = self:persist()
     if not ok then return nil, err end
-    return self.jobs:start(plan)
+    return self.jobs:start(plan, options)
 end
 function Instance:cancel() return self.jobs:cancel() end
+function Instance:pause() return self.jobs:pause() end
 function Instance:resume() return self.jobs:resume() end
-function Instance:status() return self.jobs:status() end
+function Instance:status()
+    local status = self.jobs:status()
+    status.recovery = self:recoveryStatus()
+    return status
+end
+function Instance:recoveryStatus() return self.recovery:status() end
+function Instance:recoverPersonalGear() return self.jobs:recoverPersonalGear() end
 function Instance:reviewBin() return self.jobs:reviewBin() end
-function Instance:approveBin(review) return self.jobs:approveBin(review) end
+function Instance:approveBin(review, options) return self.jobs:approveBin(review, options) end
 function Instance:rejectBin(review) return self.jobs:rejectBin(review) end
 
 function App.tick()
