@@ -8,6 +8,7 @@ local function derive(parent)
     return setmetatable(class, { __index = parent })
 end
 local current
+function instanceof(object, class) return type(object) == "table" and object.classes and object.classes[class] == true end
 local function geometry(widget, x, y, width, height)
     widget.x, widget.y, widget.width, widget.height = x or 0, y or 0, width or 0, height or 28
     function widget:setX(v) self.x = v end
@@ -246,9 +247,9 @@ local function setupWindow(f, chosen, loaded)
     }, { __index = UI.Window })
 end
 
-local function reviewWindow(f, plan, context)
+local function reviewWindow(f, plan, context, setup)
     local window = setmetatable(geometry({ controls = {}, children = {}, playerIndex = 0, width = 650, height = 520, plan = plan or f.binPlan,
-        context = context or { binReview = f.binPlan }, request = { scope = "inventory",
+        context = context or { binReview = f.binPlan }, request = setup or { scope = "inventory",
             filter = { all = true, ids = {}, types = {} }, destination = { kind = "trash" } },
         titleBarHeight = function() return 18 end,
         setVisible = function(self, visible) self.visible = visible end,
@@ -837,6 +838,25 @@ test("Settings changes only persist through its fixed Save control", function(f)
     assert(count == 9 and window.preferenceSelection == choices)
     assert(window.messagePanel.text:find("Preferences saved", 1, true) and not f.cancelled and f.starts == 0)
     App.setPreferences = previous
+end)
+
+test("container reviews name native main inventory as both a source and destination", function(f)
+    local player = { classes = { IsoPlayer = true } }
+    local main = { getContainingItem = function() return nil end, getVehiclePart = function() return nil end,
+        getParent = function() return player end, getType = function() return "none" end }
+    local bag = { getContainingItem = function() return {getName = function() return "Small Backpack" end} end }
+    local setup = {scope = "container", sourceContainer = bag, filter = {all = true, ids = {}, types = {}},
+        destination = {kind = "container", ref = main}}
+    local function description(window, expected)
+        for _, widget in ipairs(window.controls) do
+            if widget.text == expected then return true end
+        end
+        return false
+    end
+    local plan = {moves = {}, skipped = {}}
+    assert(description(reviewWindow(f, plan, {}, setup), "Move all unprotected items from Small Backpack to My main inventory."))
+    setup.sourceContainer, setup.destination = main, {kind = "floor"}
+    assert(description(reviewWindow(f, plan, {}, setup), "Move all unprotected items from My main inventory to the floor."))
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")
