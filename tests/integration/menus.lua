@@ -10,7 +10,14 @@ end
 
 local Menu = {}
 Menu.__index = Menu
-function Menu:new() return setmetatable({ options = {} }, self) end
+function Menu:new(root) return setmetatable({ options = {}, submenus = {}, root = root }, self) end
+function Menu:clear()
+    self.options = {}
+    if not self.root then self.menuCursor = 0 end
+    self.visible = false
+end
+function Menu:setVisible(visible) self.visible = visible end
+function Menu:bringToTop() self.raised = true end
 function Menu:addOption(name, target, action)
     local option = { name = name, target = target, onSelect = action }
     self.options[#self.options + 1] = option
@@ -18,7 +25,14 @@ function Menu:addOption(name, target, action)
 end
 function Menu:addSubMenu(option, child) option.child = child end
 function Menu:setOptionChecked(option, checked) option.checkMark = checked end
-ISContextMenu = { getNew = function() return Menu:new() end }
+ISContextMenu = { getNew = function(_, parent)
+    local root = parent.root or parent
+    root.menuCursor = (root.menuCursor or 0) + 1
+    local child = root.submenus[root.menuCursor]
+    if not child then child = Menu:new(root); root.submenus[root.menuCursor] = child end
+    child:clear()
+    return child
+end }
 ISToolTip = { new = function()
     return { initialise = function() end, setVisible = function() end,
         setName = function(self, name) self.name = name end }
@@ -26,11 +40,25 @@ end }
 package.loaded["ISUI/ISContextMenu"] = true
 package.loaded["ISUI/ISToolTip"] = true
 
-local registrations = { inventory = {}, world = {} }
+local registrations = { inventory = {}, world = {}, background = {}, refresh = {} }
+local eventDeclarations = 0
 Events = {
     OnFillInventoryObjectContextMenu = { Add = function(fn) registrations.inventory[#registrations.inventory + 1] = fn end },
     OnFillWorldObjectContextMenu = { Add = function(fn) registrations.world[#registrations.world + 1] = fn end },
+    OnRefreshInventoryWindowContainers = { Add = function(fn) registrations.refresh[#registrations.refresh + 1] = fn end },
 }
+LuaEventManager = { AddEvent = function(name)
+    assert(name == "OnFillInventoryContextMenuNoItems")
+    eventDeclarations = eventDeclarations + 1
+    if not Events[name] then Events[name] = { Add = function(fn) registrations.background[#registrations.background + 1] = fn end } end
+end }
+assert(Events.OnFillInventoryContextMenuNoItems == nil)
+function getPlayerInventory() return current.inventoryPage end
+function getPlayerLoot() return current.lootPage end
+function getPlayerContextMenu(playerIndex) current.contextPlayer = playerIndex; return current.contextMenu end
+function isGamePaused() return current.paused end
+function getCore() return { isTutorial = function() return current.tutorial end } end
+ISInventoryPaneContextMenu = {}
 function instanceof(object, class) return type(object) == "table" and object.classes and object.classes[class] == true end
 function getSpecificPlayer() return current.player end
 function getText(key) return key == "IGUI_ItemCat_Food" and "Food" or key end
@@ -69,7 +97,9 @@ Menus.install(interface)
 local function container(kind, owned)
     return { kind = kind, owned = owned,
         getType = function(self) return self.kind end,
-        getContainingItem = function() return nil end,
+        getContainingItem = function(self) return self.item end,
+        getParent = function(self) return self.parent end,
+        getCustomName = function(self) return self.customName end,
         getVehiclePart = function(self) return self.part end }
 end
 
@@ -77,17 +107,24 @@ local function item(source, kind)
     return { classes = { InventoryItem = true }, source = source,
         getContainer = function(self) return self.source end,
         getFullType = function() return kind or "Base.Apple" end,
-        getDisplayCategory = function() return "Food" end }
+        getDisplayCategory = function() return "Food" end,
+        getName = function(self) return self.name or kind or "Apple" end }
 end
 
 local function fixture()
     local f = { preferences = copy(defaults), definitions = {}, matches = {}, presets = {}, kept = {}, tested = 0 }
     current = f
+    ISInventoryPaneContextMenu.dontCreateMenu = false
     f.inventory, f.crate, f.floor = container("inventory", true), container("crate", false), container("floor", false)
     f.square = { getRoom = function() return f.room end, getBuilding = function() return f.building end }
     f.room, f.building = {}, {}
-    f.player = { getCurrentSquare = function() return f.square end, getSquare = function() return f.square end,
+    f.player = { classes = { IsoPlayer = true }, getInventory = function() return f.inventory end,
+        isDead = function() return f.dead end, getCurrentSquare = function() return f.square end, getSquare = function() return f.square end,
         getVehicle = function() return f.seatedVehicle end }
+    f.inventory.parent = f.player
+    f.inventoryPage = { player = 0, inventoryPane = { inventory = f.inventory }, backpacks = {} }
+    f.lootPage = { player = 0, inventoryPane = { inventory = f.crate }, backpacks = {} }
+    f.contextMenu = Menu:new()
     f.viewed = f.crate
     f.checklist = { ids = { "native:Food" }, types = { "Base.Bandage" }, all = false }
     f.app = {
@@ -157,6 +194,43 @@ local function vehicle(f)
     return { getPartCount = function() return 1 end, getPartByIndex = function(_, index) if index == 0 then return part end end }
 end
 
+local function bag(f, owned, name)
+    local contents = container("bag", owned)
+    local selected = item(owned and f.inventory or f.crate, "Base.Bag_Schoolbag")
+    selected.classes.InventoryContainer = true
+    selected.name = name or "School Bag"
+    selected.getInventory = function() return contents end
+    contents.item = selected
+    return selected, contents
+end
+
+local function sidebar(f, page, source, original)
+    local button = { inventory = source, parent = { parent = page } }
+    button.onRightMouseDown = original or function(clicked, x, y)
+        f.nativeCalls = (f.nativeCalls or 0) + 1
+        f.nativeCoordinates = { x, y }
+        f.contextMenu:clear()
+        f.contextMenu:addOption("Native rename", nil, function() f.nativeRenamed = true end)
+        f.contextMenu:addOption("Foreign action", nil, function() f.foreignClicked = true end)
+        f.contextMenu.forceVisible, f.contextMenu.visibleCheck = false, false
+        return "native-result"
+    end
+    page.backpacks[#page.backpacks + 1] = button
+    return button
+end
+
+local function contentsMenu(f, source)
+    local parent = Menu:new()
+    Menus.containerMenu(0, parent, source)
+    return parent, option(parent, "LootBox") and option(parent, "LootBox").child
+end
+
+local function count(menu, name)
+    local total = 0
+    for _, candidate in ipairs(menu.options) do if candidate.name == name then total = total + 1 end end
+    return total
+end
+
 local passed, failures = 0, {}
 local function test(name, run)
     local ok, err = pcall(run, fixture())
@@ -169,6 +243,7 @@ print("Menu integration uses explicit native context/tooltip/App doubles; it doe
 test("install is idempotent and preserves foreign menu actions", function(f)
     Menus.install(interface)
     assert(#registrations.inventory == 1 and #registrations.world == 1)
+    assert(eventDeclarations == 1 and #registrations.background == 1 and #registrations.refresh == 1)
     local parent, menu = inventoryMenu(f)
     assert(menu)
     click(parent, "Foreign action")
@@ -283,7 +358,7 @@ end)
 test("a floor click never borrows the unrelated open loot pane", function(f)
     f.viewed = f.crate
     local _, menu = worldMenu(f, { { getSquare = function() return f.square end, getContainerCount = function() return 0 end } })
-    assert(not option(menu, "Take all unprotected contents...") and not option(menu, "Label this storage..."))
+    assert(not option(menu, "Loot contents...") and not option(menu, "Label this container..."))
     click(menu, "Open LootBox")
     assert(f.opened.context.container == nil and f.opened.context.targetContainer == nil)
     assert(#f.opened.context.containers == 0)
@@ -292,11 +367,11 @@ end)
 test("a clicked fixture exposes its own take put and label actions", function(f)
     local locker = container("locker", false)
     local _, menu = worldMenu(f, { fixtureObject(f, locker) })
-    click(menu, "Take all unprotected contents...")
+    click(menu, "Loot contents...")
     assert(f.quick.request.sourceContainer == locker and f.quick.request.filter.all)
     click(menu, "Put carried items in Locker...")
     assert(f.quick.request.destination.ref == locker and f.quick.request.scope == "inventory")
-    click(menu, "Label this storage...")
+    click(menu, "Label this container...")
     assert(f.opened.context.container == locker and f.opened.context.labelKind == "container")
 end)
 
@@ -353,7 +428,7 @@ test("world shortcuts can be hidden without hiding the manager", function(f)
     f.preferences.worldShortcuts = false
     local _, menu = worldMenu(f, { fixtureObject(f, f.crate) })
     assert(not option(menu, "Loot supplies") and not option(menu, "Clean and delete"))
-    assert(not option(menu, "Take all unprotected contents..."))
+    assert(not option(menu, "Loot contents..."))
     click(menu, "Open LootBox")
     assert(f.opened.mode == "home")
 end)
@@ -435,6 +510,359 @@ test("vehicle guide starter keeps remembered-car semantics and invalid tasks ret
     assert(missing == nil and type(reason) == "string")
     missing, reason = Guides.prepare("loot-room", nil, {})
     assert(missing == nil and type(reason) == "string")
+end)
+
+test("container contents shortcuts capture B even when A stays selected", function(f)
+    local clicked = container("locker", false)
+    local _, menu = contentsMenu(f, clicked)
+    for _, route in ipairs({ { "Loot contents...", "inventory" },
+        { "Empty contents onto floor here...", "floor" }, { "Sort contents...", "labels" },
+        { "Clean contents...", "trash" } }) do
+        click(menu, route[1])
+        local request = f.quick.request
+        assert(request.scope == "container" and request.sourceContainer == clicked)
+        assert(request.sourceContainer ~= f.viewed and request.destination.kind == route[2])
+        assert(request.filter.all and #request.filter.ids == 0 and #request.filter.types == 0)
+        assert(request.includeBags and request.includeInventory == false)
+        assert(not request.approval and not request.approved and not request.binReview)
+        if route[2] == "floor" then assert(request.destination.ref == f.square) end
+    end
+    assert(f.viewed == f.crate)
+end)
+
+test("container composer and labels retain the exact clicked source", function(f)
+    local clicked = container("locker", false)
+    local _, menu = contentsMenu(f, clicked)
+    click(menu, "Choose items and categories...")
+    local context = f.opened.context
+    assert(f.opened.mode == "compose" and context.sourceContainer == clicked)
+    assert(context.request.scope == "container" and context.request.sourceContainer == clicked)
+    assert(context.request.includeBags and context.request.filter.all == false)
+    assert(#context.request.filter.ids == 0 and #context.request.filter.types == 0)
+    click(menu, "Label this container...")
+    assert(f.opened.mode == "labels" and f.opened.context.labelKind == "container")
+    assert(f.opened.context.container == clicked and f.opened.context.targetContainer == clicked)
+    click(menu, "Open LootBox")
+    assert(f.opened.mode == "home" and f.opened.context.sourceContainer == clicked)
+end)
+
+test("inbound carried transfers target the clicked container", function(f)
+    local clicked = container("locker", false)
+    local _, menu = contentsMenu(f, clicked)
+    click(menu, "Put carried items in Locker...")
+    assert(f.quick.request.scope == "inventory" and f.quick.request.sourceContainer == nil)
+    assert(f.quick.request.destination.kind == "container" and f.quick.request.destination.ref == clicked)
+    assert(f.quick.context.targetContainer == clicked and f.quick.request.includeBags)
+end)
+
+test("unpacking a carried bag explicitly targets main inventory", function(f)
+    local selected, contents = bag(f, true)
+    local _, menu = inventoryMenu(f, { selected })
+    local inside = needed(menu, "Contents of School Bag").child
+    click(inside, "Unpack contents to main inventory...")
+    local request = f.quick.request
+    assert(request.scope == "container" and request.sourceContainer == contents)
+    assert(request.destination.kind == "container" and request.destination.ref == f.inventory)
+    assert(request.sourceContainer ~= selected:getContainer() and request.includeBags)
+    assert(not option(inside, "Loot contents..."))
+    click(inside, "Choose items and categories...")
+    assert(f.opened.context.request.sourceContainer == contents)
+    assert(f.opened.context.request.destination.kind == "container" and f.opened.context.request.destination.ref == f.inventory)
+end)
+
+test("external bag contents loot separately from the bag item", function(f)
+    local selected, contents = bag(f, false, "Store bag")
+    local _, menu = inventoryMenu(f, { selected })
+    local inside = needed(menu, "Contents of Store bag").child
+    click(inside, "Loot contents...")
+    assert(f.quick.request.sourceContainer == contents and f.quick.request.destination.kind == "inventory")
+    assert(f.quick.context.item == nil)
+    click(menu, "Take all of this type")
+    assert(f.quick.request.sourceContainer == f.crate and f.quick.request.filter.types[1] == "Base.Bag_Schoolbag")
+    click(inside, "Label this container...")
+    assert(f.opened.context.container == contents)
+    click(menu, "Tag this copy...")
+    assert(f.opened.context.item == selected and f.opened.context.container == f.crate)
+    assert(f.opened.context.sourceContainer == f.crate and f.opened.context.labelKind == "item")
+end)
+
+test("visible destination choices retain distinct exact references", function(f)
+    local clicked = container("locker", false)
+    local cupboard, trunk = container("cupboard", false), container("TruckBed", false)
+    local part = { getId = function() return "TruckBed" end }
+    trunk.part = part
+    sidebar(f, f.inventoryPage, f.inventory)
+    sidebar(f, f.lootPage, clicked)
+    sidebar(f, f.lootPage, cupboard)
+    sidebar(f, f.lootPage, trunk)
+    sidebar(f, f.lootPage, cupboard)
+    local _, menu = contentsMenu(f, clicked)
+    local moves = needed(menu, "Move contents to").child
+    assert(not option(moves, "Locker..."))
+    assert(count(moves, "Cupboard...") == 1)
+    for _, route in ipairs({ { "My inventory...", f.inventory }, { "Cupboard...", cupboard }, { "TruckBed...", trunk } }) do
+        click(moves, route[1])
+        assert(f.quick.request.scope == "container" and f.quick.request.sourceContainer == clicked)
+        assert(f.quick.request.destination.kind == "container" and f.quick.request.destination.ref == route[2])
+        assert(f.quick.context.targetContainer == route[2])
+    end
+    click(moves, "My remembered vehicle...")
+    assert(f.quick.request.sourceContainer == clicked and f.quick.request.destination.kind == "vehicle")
+    assert(f.quick.request.destination.ref == nil)
+end)
+
+test("same-name destinations expose their native sidebar positions", function(f)
+    local first, second = container("crate", false), container("crate", false)
+    sidebar(f, f.lootPage, f.floor)
+    sidebar(f, f.lootPage, first)
+    sidebar(f, f.lootPage, second)
+    local _, menu = contentsMenu(f, f.inventory)
+    local moves = needed(menu, "Move contents to").child
+    assert(not option(moves, "Crate..."))
+    click(moves, "Crate (Loot icon 2)...")
+    assert(f.quick.request.destination.ref == first)
+    click(moves, "Crate (Loot icon 3)...")
+    assert(f.quick.request.destination.ref == second)
+    assert(needed(moves, "Crate (Loot icon 2)...").toolTip.description:find("top", 1, true))
+end)
+
+test("unpack avoids a redundant main-inventory move choice", function(f)
+    local _, contents = bag(f, true)
+    sidebar(f, f.inventoryPage, f.inventory)
+    sidebar(f, f.inventoryPage, contents)
+    sidebar(f, f.lootPage, f.crate)
+    local _, menu = contentsMenu(f, contents)
+    local moves = needed(menu, "Move contents to").child
+    assert(not option(moves, "My inventory...") and not option(moves, "School Bag..."))
+    assert(option(moves, "Crate..."))
+    click(menu, "Unpack contents to main inventory...")
+    assert(f.quick.request.destination.ref == f.inventory)
+end)
+
+test("main inventory omits self-looting and starts composer with sorting", function(f)
+    local _, menu = contentsMenu(f, f.inventory)
+    assert(not option(menu, "Loot contents...") and not option(menu, "Unpack contents to main inventory..."))
+    assert(not option(menu, "Put carried items in My inventory..."))
+    assert(option(menu, "Empty contents onto floor here...") and option(menu, "Clean contents..."))
+    click(menu, "Choose items and categories...")
+    assert(f.opened.context.request.sourceContainer == f.inventory)
+    assert(f.opened.context.request.destination.kind == "labels")
+end)
+
+test("floor contents offer pickup sorting cleanup but no floor-to-self or labels", function(f)
+    local unsafeNames = 0
+    f.floor.getCustomName = function() unsafeNames = unsafeNames + 1; error("Native custom names require a parent object") end
+    local _, menu = contentsMenu(f, f.floor)
+    assert(not option(menu, "Empty contents onto floor here...") and not option(menu, "Label this container..."))
+    assert(not option(menu, "Put carried items in Floor...") and unsafeNames == 0)
+    for _, route in ipairs({ { "Loot contents...", "inventory" }, { "Sort contents...", "labels" }, { "Clean contents...", "trash" } }) do
+        click(menu, route[1])
+        assert(f.quick.request.sourceContainer == f.floor and f.quick.request.destination.kind == route[2])
+    end
+end)
+
+test("native no-item pane events use their own displayed container without opposite-pane fallback", function(f)
+    local _, contents = bag(f, true)
+    f.inventoryPage.inventoryPane.inventory = contents
+    local inventoryParent, lootParent = Menu:new(), Menu:new()
+    registrations.background[1](0, inventoryParent, false)
+    registrations.background[1](0, lootParent, true)
+    click(needed(inventoryParent, "LootBox").child, "Empty contents onto floor here...")
+    assert(f.quick.request.sourceContainer == contents)
+    click(needed(lootParent, "LootBox").child, "Loot contents...")
+    assert(f.quick.request.sourceContainer == f.crate)
+    f.inventoryPage = nil
+    local missing = Menu:new()
+    registrations.background[1](0, missing, false)
+    assert(not option(missing, "LootBox"))
+    f.inventoryPage = { inventoryPane = { inventory = f.inventory } }
+    f.lootPage = nil
+    registrations.background[1](0, missing, true)
+    assert(not option(missing, "LootBox"))
+end)
+
+test("sidebar callback preserves native entries result and clicked B source", function(f)
+    local clicked = container("locker", false)
+    local button = sidebar(f, f.lootPage, clicked)
+    registrations.refresh[1](f.lootPage, "end")
+    assert(button.onRightMouseDown(button, 7, 9) == "native-result")
+    assert(f.nativeCalls == 1 and f.nativeCoordinates[1] == 7 and f.nativeCoordinates[2] == 9)
+    click(f.contextMenu, "Native rename"); click(f.contextMenu, "Foreign action")
+    assert(f.nativeRenamed and f.foreignClicked)
+    assert(f.contextMenu.visible and f.contextMenu.raised and f.contextMenu.forceVisible and f.contextMenu.visibleCheck)
+    local menu = needed(f.contextMenu, "LootBox").child
+    click(menu, "Loot contents...")
+    assert(f.quick.request.sourceContainer == clicked and f.viewed == f.crate)
+    assert(count(f.contextMenu, "LootBox") == 1)
+end)
+
+test("refresh waits until native buttons are complete and repeated refresh does not duplicate callbacks", function(f)
+    local button = sidebar(f, f.lootPage, f.crate)
+    local original = button.onRightMouseDown
+    for _, phase in ipairs({ "begin", "beforeFloor", "buttonsAdded" }) do registrations.refresh[1](f.lootPage, phase) end
+    assert(button.onRightMouseDown == original)
+    registrations.refresh[1](f.lootPage, "end")
+    registrations.refresh[1](f.lootPage, "end")
+    button.onRightMouseDown(button, 0, 0)
+    assert(f.nativeCalls == 1 and count(f.contextMenu, "LootBox") == 1)
+    local menu = needed(f.contextMenu, "LootBox").child
+    assert(count(menu, "Loot contents...") == 1 and count(menu, "Open LootBox") == 1)
+end)
+
+test("pooled sidebar buttons read current container and current owning page", function(f)
+    local button = sidebar(f, f.lootPage, f.crate)
+    registrations.refresh[1](f.lootPage, "end")
+    button.onRightMouseDown(button, 0, 0)
+    click(needed(f.contextMenu, "LootBox").child, "Loot contents...")
+    assert(f.quick.request.sourceContainer == f.crate)
+    local replacement = container("locker", false)
+    button.inventory = replacement
+    button.parent.parent = f.inventoryPage
+    f.inventoryPage.player = 1
+    button.onRightMouseDown(button, 0, 0)
+    click(needed(f.contextMenu, "LootBox").child, "Loot contents...")
+    assert(f.quick.request.sourceContainer == replacement and f.nativeCalls == 2)
+    assert(f.contextPlayer == 1 and f.quick.playerIndex == 1)
+end)
+
+test("pooled context submenus repopulate all contents actions on reopening", function(f)
+    local selected = bag(f, true)
+    local parent = Menu:new()
+    for _ = 1, 3 do
+        parent:clear()
+        Menus.inventoryMenu(0, parent, { selected })
+        local menu = needed(parent, "LootBox").child
+        local contents = needed(menu, "Contents of School Bag").child
+        assert(count(parent, "LootBox") == 1 and count(contents, "Sort contents...") == 1)
+        click(contents, "Clean contents...")
+        assert(f.quick.request.sourceContainer == selected:getInventory())
+    end
+end)
+
+test("cooperative wrapper chains append one contents group without removing foreign behavior", function(f)
+    local button = sidebar(f, f.lootPage, f.crate)
+    registrations.refresh[1](f.lootPage, "end")
+    local wrapped = button.onRightMouseDown
+    button.onRightMouseDown = function(clicked, x, y)
+        local result = wrapped(clicked, x, y)
+        f.foreignWrapper = (f.foreignWrapper or 0) + 1
+        return result
+    end
+    registrations.refresh[1](f.lootPage, "end")
+    assert(button.onRightMouseDown(button, 0, 0) == "native-result")
+    assert(f.nativeCalls == 1 and f.foreignWrapper == 1)
+    local menu = needed(f.contextMenu, "LootBox").child
+    assert(count(f.contextMenu, "LootBox") == 1 and count(menu, "Loot contents...") == 1)
+    assert(count(menu, "Open LootBox") == 1)
+end)
+
+test("portable-bag sidebar uses one native item-event menu instead of appending a second root", function(f)
+    local selected, contents = bag(f, true)
+    local button = sidebar(f, f.inventoryPage, contents, function()
+        f.contextMenu:clear()
+        f.contextMenu:addOption("Equip on back", nil, function() f.equipped = true end)
+        registrations.inventory[1](0, f.contextMenu, { selected })
+        return "bag-result"
+    end)
+    registrations.refresh[1](f.inventoryPage, "end")
+    assert(button.onRightMouseDown(button, 0, 0) == "bag-result")
+    local menu = needed(f.contextMenu, "LootBox").child
+    assert(count(f.contextMenu, "LootBox") == 1 and count(menu, "Contents of School Bag") == 1)
+    assert(not option(menu, "Clean contents..."))
+    click(f.contextMenu, "Equip on back"); assert(f.equipped)
+    click(needed(menu, "Contents of School Bag").child, "Sort contents...")
+    assert(f.quick.request.sourceContainer == contents and f.quick.request.destination.kind == "labels")
+end)
+
+test("portable-bag wrapper never resurrects a deliberately suppressed native menu", function(f)
+    local _, contents = bag(f, true)
+    local button = sidebar(f, f.inventoryPage, contents, function()
+        f.contextMenu:clear()
+        return "suppressed"
+    end)
+    registrations.refresh[1](f.inventoryPage, "end")
+    assert(button.onRightMouseDown(button, 0, 0) == "suppressed")
+    assert(#f.contextMenu.options == 0 and not f.contextMenu.visible)
+end)
+
+test("container shortcuts respect preferences without removing native entries", function(f)
+    local button = sidebar(f, f.lootPage, f.crate)
+    registrations.refresh[1](f.lootPage, "end")
+    f.preferences.inventoryShortcuts = false
+    button.onRightMouseDown(button, 0, 0)
+    local menu = needed(f.contextMenu, "LootBox").child
+    assert(not option(menu, "Loot contents...") and not option(menu, "Clean contents..."))
+    click(menu, "Settings"); assert(f.opened.mode == "settings")
+    f.preferences.contextMenus = false
+    button.onRightMouseDown(button, 0, 0)
+    assert(not option(f.contextMenu, "LootBox") and option(f.contextMenu, "Native rename"))
+    assert(not f.contextMenu.forceVisible and not f.contextMenu.visibleCheck)
+end)
+
+test("container entry points respect native paused tutorial dead and suppressed-menu states", function(f)
+    for _, key in ipairs({ "paused", "tutorial", "dead", "suppressed" }) do
+        f[key] = true
+        ISInventoryPaneContextMenu.dontCreateMenu = f.suppressed
+        local parent = Menu:new()
+        Menus.containerMenu(0, parent, f.crate)
+        Menus.inventoryMenu(0, parent, { f.apple })
+        Menus.worldMenu(0, parent, {}, false)
+        assert(#parent.options == 0)
+        f[key] = false
+        ISInventoryPaneContextMenu.dontCreateMenu = false
+    end
+end)
+
+test("world fixtures offer separate exact contents contexts for every compartment", function(f)
+    local first, second = container("crate", false), container("crate", false)
+    local object = { getSquare = function() return f.square end, getContainerCount = function() return 2 end,
+        getContainerByIndex = function(_, index) return index == 0 and first or second end,
+        getContainerIndex = function(_, selected) return selected == first and 0 or 1 end }
+    first.parent, second.parent = object, object
+    local _, menu = worldMenu(f, { object })
+    for index, source in ipairs({ first, second }) do
+        local contents = needed(menu, "Contents of Crate [compartment " .. tostring(index) .. "]").child
+        click(contents, "Sort contents...")
+        assert(f.quick.request.sourceContainer == source and f.quick.request.destination.kind == "labels")
+        click(contents, "Clean contents...")
+        assert(f.quick.request.sourceContainer == source and f.quick.request.destination.kind == "trash")
+        click(contents, "Put carried items in Crate [compartment " .. tostring(index) .. "]...")
+        assert(f.quick.request.destination.ref == source)
+    end
+end)
+
+test("separate same-name world sources identify their sidebar icon and preserve the exact source", function(f)
+    local first, second = container("crate", false), container("crate", false)
+    sidebar(f, f.lootPage, f.floor)
+    sidebar(f, f.lootPage, first)
+    sidebar(f, f.lootPage, second)
+    local _, menu = worldMenu(f, {fixtureObject(f, first), fixtureObject(f, second)})
+    for index, source in ipairs({first, second}) do
+        local contents = needed(menu, "Contents of Crate (Loot icon " .. tostring(index + 1) .. ")").child
+        click(contents, "Loot contents...")
+        assert(f.quick.request.sourceContainer == source)
+    end
+    local point = {getX = function() return 100 end, getY = function() return 200 end, getZ = function() return 1 end}
+    for index, source in ipairs({first, second}) do
+        local slot = index
+        source.parent = {getSquare = function() return point end, getObjectIndex = function() return slot end}
+    end
+    f.lootPage.backpacks = {}
+    _, menu = worldMenu(f, {fixtureObject(f, first), fixtureObject(f, second)})
+    for index, source in ipairs({first, second}) do
+        local contents = needed(menu, "Contents of Crate (100, 200, floor 1; object " .. tostring(index + 1) .. ")").child
+        click(contents, "Clean contents...")
+        assert(f.quick.request.sourceContainer == source and f.quick.request.destination.kind == "trash")
+    end
+end)
+
+test("container help provides a complete workflow with explicit nondeletion and cleanup guidance", function()
+    local guide
+    for _, candidate in ipairs(Guides.list) do if candidate.id == "container-contents" then guide = candidate end end
+    assert(guide and guide.prerequisites and #guide.steps >= 6 and guide.expected and #guide.troubleshooting > 0)
+    local text = table.concat(guide.steps, " ")
+    assert(text:find("never deletes", 1, true) and text:find("Review", 1, true))
+    assert(text:find("Sort contents", 1, true) and text:find("Choose items and categories", 1, true))
 end)
 
 assert(#failures == 0, table.concat(failures, "\n"))

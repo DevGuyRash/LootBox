@@ -6,7 +6,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 ## Install locally
 
-Extract the built `LootBox-0.4.1.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.5.0.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -14,7 +14,7 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.4.1.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
+The archive is `dist/LootBox-0.5.0.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
 
 ## Start with a workflow
 
@@ -28,7 +28,9 @@ Closing any LootBox window keeps its job running. Ordinary walking and queued pl
 
 Help is available from the main menu and in game. Its complete walkthroughs include prerequisites, numbered steps, expected results, troubleshooting, and a **Set up this workflow** button for runnable workflows. Categories and Settings also work before entering a world.
 
-Right-clicking an inventory item offers bulk actions for its exact type and relevant categories, Keep for that copy, item tags, and category creation. A world container offers transfers and storage labels. Floor context offers room, building, reach, and area workflows. Vehicle context offers memory, hauling, and compartment labels. Saved setups are available in the context menu when you have created them. The original game and other mods' menu entries remain available.
+Right-clicking an inventory item offers bulk actions for its exact type and relevant categories, Keep for that copy, item tags, and category creation. Right-click a container icon in either inventory pane, a bag item, or an empty pane to work on its contents. These shortcuts offer looting or unpacking, emptying onto the floor, sorting into labeled storage, cleanup, moving to another visible container or your remembered vehicle, storage labels, and the full item/category composer. The clicked container stays the source even if another container is selected. Bag-content actions live under **Contents of <bag name>**, separate from actions on the bag itself. A world container offers the same contents workflows and carried-item transfers. Floor context offers room, building, reach, and area workflows. Vehicle context offers memory, hauling, and compartment labels. Saved setups are available in the context menu when you have created them. The original game and other mods' menu entries remain available.
+
+**Empty contents onto floor here** moves eligible contents to your current floor location without deleting them. **Clean contents...** hauls eligible contents to a trash can and requires the existing deletion review. **Sort contents...** uses category labels on destination storage; label your storage first, then review any unmatched or full destinations. For a carried bag, **Unpack contents to main inventory...** targets main inventory rather than distributing items back into bags. Nested contents are included by default and can be disabled through **Adjust setup**. The source container itself is never part of its contents selection.
 
 Ordinary shortcuts use a compact review with **Adjust setup** to open the full composer. Settings controls the menu entry, individual shortcut groups, confirmation for ordinary quick moves, inline tips, and last-setup reuse. Cleanup always requires a fresh explicit deletion review, even if ordinary quick-move confirmation is disabled.
 
@@ -46,7 +48,7 @@ Storage rules mean "these categories belong here" and can contain multiple label
 
 ## Loot, sort, move, and clean
 
-Choose an item checklist, a source, and a destination in the action composer. Sources include carried inventory, a selected container, within reach, the current room, the current building, a visually selected area on one floor, or known containers with a chosen label. Including carried inventory and traversing bags are explicit options. Save and load a reusable checklist without changing the source or destination.
+Choose an item checklist, a source, and a destination in the action composer. Sources include carried inventory, a selected container, within reach, the current room, the current building, a visually selected area on one floor, or known containers with a chosen label. Including carried inventory and traversing bags are explicit options. Native transfers can refuse nested contents inside external fixtures; affected items remain in place and appear in the result. Save and load a reusable checklist without changing the source or destination.
 
 Destinations include carried storage, a selected container, a chosen floor location, the remembered vehicle, matching labeled storage, and known trash cans. Preview shows observed moves, exclusions, pending exploration, and deletion warnings. Start runs a finite job. The progress window separates moved items, retained or unconfirmed items, their reasons, and job controls. A bin review identifies the actual bin, floor, coordinates, observed contents weight, capacity and free space before asking for whole-bin deletion approval. Hauling fills available carried capacity before making delivery trips; it preserves unrelated carried items. A full destination leaves an item behind with a reason. Native floor dropping can use an adjacent permitted tile when the original tile is blocked or full; the job retains that original drop area if the player moves away during an interruption.
 
