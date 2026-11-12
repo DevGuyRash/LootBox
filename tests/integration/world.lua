@@ -989,6 +989,96 @@ case("Direct selected-container preview observes current safehouse permission", 
     assert(#scan.warnings > 0)
 end)
 
+case("Survey waypoints reject a loaded neighboring building while bin travel remains available", function(f)
+    local original = building()
+    local _, _, otherRoom = building()
+    local _, attach = otherRoom("neighbor", 0, 50, 50, 1, 1)
+    attach(f.far)
+    local point = {x = 50, y = 50, z = 0}
+    local targets, reason = f.world:walkTargets(point, {}, original)
+    equal(targets, nil)
+    assert(reason:find("original building", 1, true))
+    local outside, direct = f.world:walkTargets(point, {})
+    equal(outside[1], point)
+    equal(direct, true)
+end)
+
+case("Moving outside does not change the captured building source scope", function(f)
+    local _, _, room = building()
+    local _, attach = room("original", 0, 0, 0, 1, 1)
+    attach(f.origin)
+    local survey = assert(f.world:scan({scope = "building"})).survey
+    local section = assert(nextSection(survey))
+    local _, _, neighbor = building()
+    local _, attachOther = neighbor("other", 0, 50, 50, 1, 1)
+    attachOther(f.far)
+    f.player.location = f.far
+    local scan, missing = f.world:scanSection(section, {scope = "building"})
+    equal(f.names(scan), "Beans,Cake,Scrap,Soup")
+    equal(missing, 0)
+end)
+
+case("Gear discovery includes carried nested bags and only the reviewed source containers", function(f)
+    local bag = f.item(f.inventory, "PersonalBag", "Container")
+    bag.inventory = f.container("bag")
+    bag.inventory.bag = bag
+    f.item(bag.inventory, "InsidePersonalBag")
+    local found = f.world:gearRecords({f.junk, f.junk})
+    local names = f.names({items = found})
+    equal(names, "Beans,CarriedFood,InsidePersonalBag,PersonalBag,Scrap")
+    assert(not names:find("Apple", 1, true))
+end)
+
+case("Safe staging uses ordinary accessible world storage and excludes trash and nested bags", function(f)
+    f.junk.parent.trash = true
+    local bag = f.item(f.tools, "FoundBag", "Container")
+    bag.inventory = f.container("bag")
+    bag.inventory.bag = bag
+    f.world:_observe(bag.inventory)
+    local candidates = f.world:safeStagingContainers()
+    equal(#candidates, 3)
+    for _, candidate in ipairs(candidates) do
+        assert(candidate == f.tools or candidate == f.unlabeled or candidate == f.remote)
+        assert(f.world:canAccess(candidate))
+    end
+end)
+
+case("A recovery reservation protects its items and excludes its container from ordinary jobs", function(f)
+    local selected = f.junk.items[1]
+    f.world.recovery = {
+        isProtected = function(_, item) return item == selected end,
+        isReservedContainer = function(_, container) return container == f.junk end,
+    }
+    local protected, reason = f.world:protected(selected)
+    equal(protected, true)
+    equal(reason, "Personal gear reserved for recovery")
+    local scan = assert(f.world:scan({scope = "container", sourceContainer = f.junk}))
+    equal(#scan.items, 0)
+    local destinations = assert(f.world:destinations({destination = {kind = "container", ref = f.junk}}, f.tools.items[1]))
+    equal(#destinations, 0)
+end)
+
+case("Observed bag replacement migrates personal rules and forwards exact recovery identity", function(f)
+    local old = f.item(f.inventory, "OldBag", "Container")
+    local replacement = f.item(f.inventory, "NewBag", "Container")
+    local before, after = tostring(old.id), tostring(replacement.id)
+    f.state.keep[before] = true
+    f.state.itemLabels[before] = {"custom:1"}
+    f.state.containerLabels["bag:" .. before] = {"native:Food"}
+    local forwarded
+    f.world.recovery = {replaceIdentity = function(_, id, fullType, item) forwarded = {id, fullType, item} end}
+    f.world:replaceGear(before, old:getFullType(), replacement)
+    equal(f.state.keep[after], true)
+    equal(f.state.keep[before], nil)
+    equal(f.state.itemLabels[after][1], "custom:1")
+    equal(f.state.containerLabels["bag:" .. after][1], "native:Food")
+    equal(f.state.containerLabels["bag:" .. before], nil)
+    equal(forwarded[1], before)
+    equal(forwarded[2], old:getFullType())
+    equal(forwarded[3], replacement)
+    equal(f.world.dirty, true)
+end)
+
 getCell, instanceof, isClient = saved.getCell, saved.instanceof, saved.isClient
 ISInventoryPaneContextMenu, getTextOrNull = saved.ISInventoryPaneContextMenu, saved.getTextOrNull
 getVehicleById = saved.getVehicleById

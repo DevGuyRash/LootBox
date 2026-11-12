@@ -6,6 +6,8 @@ local modules = {
     "Vehicles/TimedActions/ISExitVehicle", "Vehicles/TimedActions/ISSwitchVehicleSeat",
     "Vehicles/TimedActions/ISUnlockVehicleDoor", "Vehicles/TimedActions/ISOpenVehicleDoor",
     "Vehicles/TimedActions/ISCloseVehicleDoor", "Vehicles/TimedActions/ISLockDoors",
+    "TimedActions/ISWearClothing", "TimedActions/ISClothingExtraAction",
+    "TimedActions/ISEquipWeaponAction", "TimedActions/ISUnequipAction",
 }
 for _, name in ipairs(modules) do package.preload[name] = function() return true end end
 
@@ -118,6 +120,71 @@ local function player()
     function value:getPrimaryHandItem() return self.primary end
     function value:getSecondaryHandItem() return self.secondary end
     return value
+end
+
+local prototypes = {}
+
+local function gearPlayer()
+    local actor = player()
+    actor.worn = {}
+    local group = {slots = {"base:Back", "custom:LowerBack"}, exclusive = {}, multi = {}}
+    function group:size() return #self.slots end
+    function group:getLocationByIndex(index) return {getId = function() return self.slots[index + 1] end} end
+    function group:isExclusive(left, right) return self.exclusive[left .. ":" .. right] == true end
+    function group:isMultiItem(slot) return self.multi[slot] == true end
+    function actor:getWornItems()
+        local worn = list(self.worn)
+        function worn:getBodyLocationGroup() return group end
+        function worn:contains(wanted)
+            for _, entry in ipairs(actor.worn) do if entry.item == wanted then return true end end
+            return false
+        end
+        return worn
+    end
+    function actor:getWornItem(slot)
+        for _, entry in ipairs(self.worn) do if entry.slot == slot then return entry.item end end
+    end
+    function actor:isEquipped(wanted)
+        return self.primary == wanted or self.secondary == wanted or self:getWornItems():contains(wanted)
+    end
+    function actor:getClothingItem_Back() return self:getWornItem("base:Back") end
+    actor.group = group
+    return actor
+end
+
+local function wear(actor, selected, slot)
+    for index = #actor.worn, 1, -1 do
+        if actor.worn[index].item == selected then table.remove(actor.worn, index) end
+    end
+    if actor.primary == selected then actor.primary = nil end
+    if actor.secondary == selected then actor.secondary = nil end
+    if not slot then return end
+    local entry = {item = selected, slot = slot}
+    function entry:getItem() return self.item end
+    function entry:getLocation() return self.slot end
+    actor.worn[#actor.worn + 1] = entry
+end
+
+local function gearBag(id, destination, slot, capacity, fullType)
+    local selected = item(id, destination)
+    selected.fullType, selected.slot, selected.capacity = fullType or "Base.Bag_Test", slot, capacity or 20
+    selected.inventory, selected.extras = container("bag"), {}
+    selected.inventory.bag = selected
+    function selected:IsInventoryContainer() return true end
+    function selected:getInventory() return self.inventory end
+    function selected:canBeEquipped() return self.slot end
+    function selected:getBodyLocation() return self.slot end
+    function selected:getClothingItemExtra() return list(self.extras) end
+    function selected:getModule() return "Base" end
+    function selected:getWeightReduction() return 80 end
+    function selected:getContentsWeight()
+        local total = 0
+        for _, child in ipairs(self.inventory.items) do total = total + (child.mass or 1) end
+        return total
+    end
+    function selected:isForceDropHeavyItem() return false end
+    function selected.inventory:getEffectiveCapacity() return selected.capacity end
+    return selected
 end
 
 local function action(character, kind, effect)
@@ -268,6 +335,34 @@ ISLockDoors = { new = function(_, character, vehicle, locked)
     return action(character, "unlockDoors", function() vehicle.driver.door.locked = locked end)
 end }
 
+ISWearClothing = {new = function(_, actor, selected)
+    return action(actor, "wear", function() wear(actor, selected, selected:canBeEquipped()) end)
+end}
+ISUnequipAction = {new = function(_, actor, selected)
+    return action(actor, "unequip", function() wear(actor, selected, nil) end)
+end}
+ISEquipWeaponAction = {new = function(_, actor, selected, _, primary, twoHands)
+    return action(actor, "equip", function()
+        wear(actor, selected, nil)
+        if primary or twoHands then actor.primary = selected end
+        if not primary or twoHands then actor.secondary = selected end
+    end)
+end}
+ISClothingExtraAction = {new = function(_, actor, selected, fullType)
+    return action(actor, "clothingExtra", function()
+        local prototype = prototypes[fullType]
+        local replacement = gearBag(selected:getID() + 10000, nil, prototype.slot, prototype.capacity, fullType)
+        local children = {}
+        for _, child in ipairs(selected.inventory.items) do children[#children + 1] = child end
+        for _, child in ipairs(children) do if not selected.loseContents then put(child, replacement.inventory) end end
+        put(selected, nil)
+        put(replacement, actor.inventory)
+        wear(actor, selected, nil)
+        wear(actor, replacement, replacement.slot)
+    end)
+end}
+ISInventoryPaneContextMenu = {getItemInstance = function(fullType) return prototypes[fullType] end}
+
 getTimestampMs = function() return clock end
 getCell = function()
     return {getGridSquare = function(_, x, y, z) return loadedSquares[x .. ":" .. y .. ":" .. z] end}
@@ -330,6 +425,7 @@ end
 local function case(name, run)
     clock, client, allowTrash, requests, transfers, corpseQueries, queues, rehydrate = 0, false, true, {}, 0, 0, {}, false
     loadedSquares, nearestRequests, nearestChoice, floorDropSquare = {}, {}, 1, nil
+    prototypes = {}
     local ok, err = pcall(run)
     if ok then passed = passed + 1; print("PASS " .. name)
     else failures[#failures + 1] = name .. ": " .. tostring(err); print("FAIL " .. failures[#failures]) end
@@ -1385,6 +1481,303 @@ case("Cancelling a yielded vehicle operation restores its retained outside or pa
         else equal(actor:getVehicle(), selected); equal(actor.seat, originalSeat) end
         equal(selected.driver.door.open, false)
     end
+end)
+
+local function finishGear(adapter, actor)
+    for _ = 1, 20 do
+        local queue = queues[actor]
+        if queue and queue.current then queue.current:complete() end
+        local done, reason, code = adapter:poll()
+        if done ~= nil then return done, reason, code end
+    end
+    error("Gear did not settle within twenty native actions")
+end
+
+case("A carried bag is worn only after the native clothing action completes", function()
+    local actor = gearPlayer()
+    local selected = gearBag(500, actor.inventory, "base:Back")
+    local adapter = Native.new(actor)
+    local op = {kind = "gear", item = selected, source = actor.inventory, mode = "wear", slot = "base:Back"}
+    assert(adapter:begin(op))
+    equal(actor:getWornItem("base:Back"), nil)
+    equal(queues[actor].current.kind, "wear")
+    equal(finishGear(adapter, actor), true)
+    equal(actor:getWornItem("base:Back"), selected)
+    equal(op.resultItem, selected)
+    equal(transfers, 0)
+end)
+
+case("A nested carried bag is retrieved once and then worn with its contents intact", function()
+    local actor = gearPlayer()
+    local outer = gearBag(501, actor.inventory, "custom:LowerBack")
+    local selected = gearBag(502, outer.inventory, "base:Back")
+    local child = item(503, selected.inventory)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "gear", item = selected, source = outer.inventory, mode = "wear", slot = "base:Back"}))
+    equal(queues[actor].current.kind, "transfer")
+    equal(finishGear(adapter, actor), true)
+    equal(transfers, 1)
+    equal(selected:getContainer(), actor.inventory)
+    equal(actor:getWornItem("base:Back"), selected)
+    equal(child:getContainer(), selected.inventory)
+end)
+
+case("A found bag in distant furniture uses native approach then retrieval and wear", function()
+    local actor, source = gearPlayer(), container("crate", square(8, 4))
+    source.parent = {getSquare = function() return source.location end}
+    local selected = gearBag(504, source, "base:Back")
+    local child = item(505, selected.inventory)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "gear", item = selected, source = source, mode = "wear", slot = "base:Back"}))
+    equal(queues[actor].current.kind, "path")
+    equal(finishGear(adapter, actor), true)
+    equal(transfers, 1)
+    equal(actor:getWornItem("base:Back"), selected)
+    equal(child:getContainer(), selected.inventory)
+end)
+
+case("Native gear preparation refuses a newly occupied or exclusive worn location", function()
+    for _, exclusive in ipairs({false, true}) do
+        local actor = gearPlayer()
+        local existing = gearBag(506, actor.inventory, exclusive and "custom:LowerBack" or "base:Back")
+        wear(actor, existing, existing.slot)
+        if exclusive then actor.group.exclusive["base:Back:custom:LowerBack"] = true end
+        local selected = gearBag(507, actor.inventory, "base:Back")
+        assertRejected(Native.new(actor), {kind = "gear", item = selected, source = actor.inventory, mode = "wear", slot = "base:Back"}, "occupied")
+        equal(actor:getWornItem(existing.slot), existing)
+        equal(#queues[actor].queue, 0)
+    end
+end)
+
+case("A declared native lower location variant produces an observed new bag with the same contents", function()
+    local actor = gearPlayer()
+    local selected = gearBag(508, actor.inventory, "base:Back")
+    selected.extras = {"Bag_Lower"}
+    prototypes["Base.Bag_Lower"] = gearBag(-1, nil, "custom:LowerBack", 20, "Base.Bag_Lower")
+    local child = item(509, selected.inventory)
+    local adapter = Native.new(actor)
+    local op = {kind = "gear", item = selected, source = actor.inventory, mode = "wear", slot = "custom:LowerBack", variant = "Base.Bag_Lower"}
+    assert(adapter:begin(op))
+    equal(queues[actor].current.kind, "clothingExtra")
+    equal(op.resultItem, nil)
+    equal(finishGear(adapter, actor), true)
+    local result = actor:getWornItem("custom:LowerBack")
+    assert(result and result:getID() ~= selected:getID())
+    equal(result:getFullType(), "Base.Bag_Lower")
+    equal(op.resultItem, result)
+    equal(child:getContainer(), result.inventory)
+    equal(actor.inventory:containsID(selected:getID()), false)
+end)
+
+case("A bag variant too small for existing contents is rejected before conversion", function()
+    local actor = gearPlayer()
+    local selected = gearBag(510, actor.inventory, "base:Back")
+    selected.extras = {"Bag_Tiny"}
+    prototypes["Base.Bag_Tiny"] = gearBag(-1, nil, "custom:LowerBack", 1, "Base.Bag_Tiny")
+    item(511, selected.inventory).mass = 2
+    assertRejected(Native.new(actor), {kind = "gear", item = selected, source = actor.inventory, mode = "wear", slot = "custom:LowerBack", variant = "Base.Bag_Tiny"}, "too small")
+    equal(selected.inventory:getItems():size(), 1)
+    equal(#queues[actor].queue, 0)
+end)
+
+case("A conversion that loses a contained identity cannot claim a successful replacement", function()
+    local actor = gearPlayer()
+    local selected = gearBag(512, actor.inventory, "base:Back")
+    selected.extras, selected.loseContents = {"Bag_Lower"}, true
+    prototypes["Base.Bag_Lower"] = gearBag(-1, nil, "custom:LowerBack", 20, "Base.Bag_Lower")
+    item(513, selected.inventory)
+    local adapter = Native.new(actor)
+    local op = {kind = "gear", item = selected, source = actor.inventory, mode = "wear", slot = "custom:LowerBack", variant = "Base.Bag_Lower"}
+    assert(adapter:begin(op))
+    queues[actor].current:complete()
+    equal(adapter:poll(), nil)
+    clock = 2001
+    local done, reason = adapter:poll()
+    equal(done, false)
+    includes(reason, "without the expected result")
+    equal(op.resultItem, nil)
+end)
+
+case("Pausing after bag retrieval resumes equipment without retrieving the bag twice", function()
+    local actor, source = gearPlayer(), container("crate", square(0, 0))
+    local selected = gearBag(514, source, "base:Back")
+    local adapter = Native.new(actor)
+    local op = {kind = "gear", item = selected, source = source, mode = "wear", slot = "base:Back"}
+    assert(adapter:begin(op))
+    queues[actor].current:complete()
+    equal(adapter:poll(), nil)
+    equal(queues[actor].current.kind, "wear")
+    assert(adapter:cancel(op))
+    equal(adapter:poll(), false)
+    equal(selected:getContainer(), actor.inventory)
+    assert(adapter:begin(op))
+    equal(finishGear(adapter, actor), true)
+    equal(transfers, 1)
+    equal(actor:getWornItem("base:Back"), selected)
+end)
+
+case("Gear pickup capacity failure stays typed after a completed approach", function()
+    local actor, source = gearPlayer(), container("crate", square(8, 4))
+    local selected = gearBag(515, source, "base:Back")
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "gear", item = selected, source = source, mode = "wear", slot = "base:Back"}))
+    actor.inventory.room = false
+    queues[actor].current:complete()
+    local done, reason, code = adapter:poll()
+    equal(done, false)
+    includes(reason, "hard carrying limit")
+    equal(code, "capacity")
+    equal(selected:getContainer(), source)
+    equal(transfers, 0)
+end)
+
+case("A hand bag can use free primary while preserving an occupied one-handed secondary", function()
+    local actor = gearPlayer()
+    actor.secondary = item(516, actor.inventory)
+    local selected, existing = gearBag(517, actor.inventory, "base:Back"), actor.secondary
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "gear", item = selected, source = actor.inventory, mode = "primary"}))
+    equal(finishGear(adapter, actor), true)
+    equal(actor.primary, selected)
+    equal(actor.secondary, existing)
+end)
+
+case("Gear restoration can restore one item to both original hand slots", function()
+    local actor = gearPlayer()
+    local selected = item(518, actor.inventory)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "gear", item = selected, source = actor.inventory, mode = "primary", twoHands = true}))
+    equal(finishGear(adapter, actor), true)
+    equal(actor.primary, selected)
+    equal(actor.secondary, selected)
+end)
+
+case("A foreign queued action yields bag preparation without cancelling the player's action", function()
+    local actor = gearPlayer()
+    local selected = gearBag(519, actor.inventory, "base:Back")
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "gear", item = selected, source = actor.inventory, mode = "wear", slot = "base:Back"}))
+    local foreign = action(actor, "eat")
+    ISTimedActionQueue.add(foreign)
+    local done, _, code = adapter:poll()
+    equal(done, false)
+    equal(code, "yielded")
+    equal(queues[actor].current, foreign)
+    equal(foreign.cancellations, 0)
+    equal(foreign.stops, nil)
+    equal(actor:getWornItem("base:Back"), nil)
+end)
+
+case("A sent trash command stays pending after cancellation until the delayed native result arrives", function()
+    client = true
+    local previousSafeHouse = SafeHouse
+    SafeHouse = {isSafehouseAllowLoot = function() return true end}
+    local actor, bin = player(), trash(square(0, 0))
+    local selected = item(520, bin)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "trash", container = bin, approved = {["520"] = true}}))
+    assert(adapter:cancel())
+    equal(adapter:poll(), nil)
+    equal(adapter:isBusy(), true)
+    actor.location = square(20, 20, 1)
+    clock = 1000
+    equal(adapter:poll(), nil)
+    put(selected, nil)
+    equal(adapter:poll(), true)
+    equal(adapter:isBusy(), false)
+    equal(#requests, 1)
+    SafeHouse = previousSafeHouse
+end)
+
+case("A sent trash command confirms only its dispatched identities when new contents remain", function()
+    local actor, bin = player(), trash(square(0, 0))
+    local selected = item(521, bin)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "trash", container = bin, approved = {["521"] = true}}))
+    local added = item(522, bin)
+    put(selected, nil)
+    equal(adapter:poll(), true)
+    equal(added:getContainer(), bin)
+    equal(#requests, 1)
+end)
+
+case("A cancelled unconfirmed trash operation times out without inventing an empty result", function()
+    local actor, bin = player(), trash(square(0, 0))
+    local selected = item(523, bin)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "trash", container = bin, approved = {["523"] = true}}))
+    assert(adapter:cancel())
+    equal(adapter:poll(), nil)
+    clock = 15001
+    local done, reason = adapter:poll()
+    equal(done, false)
+    includes(reason, "could not be confirmed")
+    equal(selected:getContainer(), bin)
+    equal(#requests, 1)
+end)
+
+case("A replaced trash destination cannot confirm the original sent deletion", function()
+    local actor, bin = player(), trash(square(0, 0))
+    local selected = item(524, bin)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "trash", container = bin, approved = {["524"] = true}}))
+    put(selected, nil)
+    bin.parent.index = -1
+    local done, reason = adapter:poll()
+    equal(done, false)
+    includes(reason, "changed")
+end)
+
+case("Combat takeover has a structured pause classification", function()
+    for _, flag in ipairs({"aimInput", "aiming", "attacking", "shoving"}) do
+        local actor = player()
+        actor[flag] = true
+        local _, category = Native.new(actor):takeoverReason()
+        equal(category, "combat")
+    end
+    local actor = player()
+    actor.dead = true
+    local _, category = Native.new(actor):takeoverReason()
+    equal(category, nil)
+end)
+
+case("A full destination exposes the typed capacity outcome used by deferred hauling", function()
+    local actor, destination = player(), container("crate", square(0, 0))
+    destination.room = false
+    local selected = item(525, actor.inventory)
+    local done, reason, code = Native.new(actor):begin({kind = "transfer", item = selected, source = actor.inventory, destination = destination})
+    equal(done, nil)
+    includes(reason, "full")
+    equal(code, "capacity")
+    equal(transfers, 0)
+    equal(selected:getContainer(), actor.inventory)
+end)
+
+case("Unequipping a personal bag leaves the whole bag and its contents together", function()
+    local actor = gearPlayer()
+    local selected = gearBag(526, actor.inventory, "base:Back")
+    local child = item(527, selected.inventory)
+    wear(actor, selected, selected.slot)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({kind = "gear", item = selected, source = actor.inventory, mode = "unequip"}))
+    equal(finishGear(adapter, actor), true)
+    equal(actor:isEquipped(selected), false)
+    equal(selected:getContainer(), actor.inventory)
+    equal(child:getContainer(), selected.inventory)
+end)
+
+case("A native multi-item worn location observes the newly worn bag without replacing the first", function()
+    local actor = gearPlayer()
+    actor.group.multi["base:Back"] = true
+    local existing, selected = gearBag(528, actor.inventory, "base:Back"), gearBag(529, actor.inventory, "base:Back")
+    wear(actor, existing, existing.slot)
+    local adapter = Native.new(actor)
+    local op = {kind = "gear", item = selected, source = actor.inventory, mode = "wear", slot = "base:Back"}
+    assert(adapter:begin(op))
+    equal(finishGear(adapter, actor), true)
+    equal(actor:getWornItems():contains(existing), true)
+    equal(actor:getWornItems():contains(selected), true)
+    equal(op.resultItem, selected)
 end)
 
 print(tostring(passed) .. " native adapter boundary-double cases passed")

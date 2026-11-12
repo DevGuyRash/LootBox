@@ -156,6 +156,11 @@ function World:owns(container)
     return container == inventory or call(container, "getOutermostContainer") == inventory
 end
 
+function World:canAccess(container)
+    return self:valid(container) and (self:owns(container) or permitted(self.player, self:square(container)))
+        and call(container, "isLockedToCharacter", self.player) ~= true
+end
+
 function World:carryFactor(container)
     local inventory, seen = call(self.player, "getInventory"), {}
     while container and container ~= inventory and not seen[container] do
@@ -190,6 +195,56 @@ function World:carrying()
     local inventory = self.player:getInventory()
     local maximum = call(self.player, "isUnlimitedCarry") == true and math.huge or inventory:getEffectiveCapacity(self.player)
     return inventory:getCapacityWeight(), maximum
+end
+
+function World:gearRecords(sources)
+    local result, seen = {}, {}
+    local function add(container)
+        if not self:valid(container) or (self.recovery and self.recovery:isReservedContainer(container)) then return end
+        if not self:owns(container) and not permitted(self.player, self:square(container)) then return end
+        for _, record in ipairs(self:records(container, true)) do
+            local id = self:itemId(record.item)
+            if id and not seen[id] then seen[id] = true; result[#result + 1] = record end
+        end
+    end
+    add(call(self.player, "getInventory"))
+    for _, container in ipairs(sources or {}) do add(container) end
+    return result
+end
+
+function World:replaceGear(oldId, oldType, item)
+    local id = self:itemId(item)
+    oldId = tostring(oldId)
+    if not id or id == oldId then return end
+    for _, field in ipairs({"keep", "itemLabels"}) do
+        local values = self.state[field]
+        if values[oldId] ~= nil then values[id], values[oldId] = values[oldId], nil; self.dirty = true end
+    end
+    local labels = self.state.containerLabels
+    if labels["bag:" .. oldId] then
+        labels["bag:" .. id], labels["bag:" .. oldId] = labels["bag:" .. oldId], nil
+        self.dirty = true
+    end
+    if self.recovery then self.recovery:replaceIdentity(oldId, oldType, item) end
+end
+
+function World:safeStagingContainers()
+    self:discover()
+    local result = {}
+    for key, container in pairs(self.endpoints) do
+        local anchor = self:sourceAnchor(container)
+        if self:valid(container) and self:key(container) == key and anchor and anchor.kind == "world"
+            and not self:isTrash(container) and permitted(self.player, self:square(container))
+            and call(container, "isLockedToCharacter", self.player) ~= true then
+            result[#result + 1] = container
+        end
+    end
+    table.sort(result, function(a, b)
+        local first, second = distance(self.player, self:square(a)), distance(self.player, self:square(b))
+        if first ~= second then return first < second end
+        return (self:key(a) or "") < (self:key(b) or "")
+    end)
+    return result
 end
 
 function World:square(container)
@@ -322,6 +377,7 @@ end
 
 function World:protected(item)
     if not item then return true, "Item is missing" end
+    if self.recovery and self.recovery:isProtected(item) then return true, "Personal gear reserved for recovery" end
     local id = self:itemId(item)
     if id and self.state.keep[id] then return true, "Keep" end
     if call(item, "isFavorite") then return true, "Favorite" end
@@ -532,6 +588,7 @@ function World:_scan(request, squares)
     local seen, itemSeen = {}, {}
     local function source(container)
         if not container or seen[container] or not self:valid(container) or not self:sourceMatches(container, request) then return end
+        if self.recovery and self.recovery:isReservedContainer(container) then return end
         if not self:owns(container) and not permitted(self.player, self:square(container)) then
             result.warnings[#result.warnings + 1] = "Safehouse permissions do not allow this source: " .. self:name(container)
             return
@@ -710,6 +767,8 @@ function World:walkTargets(point, visited, building)
     local direct = cell:getGridSquare(point.x, point.y, point.z)
     if direct then
         if not permitted(self.player, direct) then return nil, "Permission does not allow this destination" end
+        local owner = call(call(call(direct, "getRoom"), "getRoomDef"), "getBuilding")
+        if building and owner ~= building then return nil, "The survey waypoint is outside the original building" end
         return {point}, true
     end
     local z = point.z
@@ -1045,6 +1104,7 @@ function World:destinations(request, item)
     local result, seen = {}, {}
     local function add(container)
         if not container or seen[container] or not self:valid(container) then return end
+        if self.recovery and self.recovery:isReservedContainer(container) then return end
         if item and ((container == call(item, "getContainer") and call(container, "getType") ~= "floor")
             or call(container, "isInside", item)) then return end
         seen[container] = true

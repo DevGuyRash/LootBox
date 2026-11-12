@@ -7,15 +7,15 @@ local App = require "LootBox/App"
 local Categories = require "LootBox/Categories"
 local Guides = require "LootBox/Guides"
 local W = require "LootBox/Widgets"
-local UI = { windows = {}, progressWindows = {}, quickWindows = {}, areaPickers = {}, notices = {} }
+local UI = { windows = {}, progressWindows = {}, quickWindows = {}, areaPickers = {}, notices = {}, reviewVisits = {} }
 local Window = ISCollapsableWindow:derive("LootBoxWindow")
 local Progress = ISCollapsableWindow:derive("LootBoxProgress")
 local QuickReview = ISCollapsableWindow:derive("LootBoxQuickReview")
 local AreaPicker = ISPanel:derive("LootBoxAreaPicker")
 local H, GAP, C = W.H, W.GAP, W.colors
 local button, entry, combo, check, list, wrapped = W.button, W.entry, W.combo, W.check, W.list, W.text
-local states = { idle = "Ready for a job", running = "Working", cancelling = "Stopping and restoring access",
-    needs_review = "Review bin before continuing",
+local states = { idle = "Ready for a job", running = "Working", cancelling = "Stopping and restoring access", pausing = "Pausing and restoring access",
+    needs_review = "Review bin before continuing", paused = "Paused - ready to resume",
     cancelled = "Stopped - ready to resume", failed = "Stopped after an error", complete = "Finished",
     finished = "Finished", finished_with_skips = "Finished with notes" }
 local sourceNames = { inventory = "my carried items", reach = "within reach", room = "the current room",
@@ -281,7 +281,7 @@ function Window:createChildren()
         x = x + page[3] + 6
     end
     self.jobTab = button(self, self.width - 135 - GAP, navY, 135, "Current job", self,
-        function(s) UI.showProgress(s.playerIndex) end, "Show progress or cancel the active job.")
+        function(s) UI.showProgress(s.playerIndex) end, "Show progress, pause, resume, or cancel the active job. Also available from LootBox right-click menus and the Current job key.")
     self.jobTab:setEnable(self:app() ~= nil)
     self.contentY = navY + H + GAP
     self:show(self.mode)
@@ -805,6 +805,15 @@ function Window:buildPreview()
         self.request.destination.kind == "trash" and "danger" or "accent")
     self.runButton:setEnable(#moves > 0 or (plan.pending or 0) > 0)
     if #moves == 0 and (plan.pending or 0) == 0 then self.runButton:setTooltip("Nothing eligible is planned. Read the exclusion reasons or adjust your setup.") end
+    local skipReviews
+    if self.request.destination.kind == "trash" then
+        skipReviews = button(body, body.width - 520, y, 260, "Start and skip bin reviews", self, function(s)
+            local ok, err = s:app():start(s.plan, {reviewBins = false})
+            if not ok then s:messageText(err); return end
+            W.unfocus(s.body); s:setVisible(false); UI.showProgress(s.playerIndex)
+        end, "Approve this cleanup and automatically accept eligible inspected bins for this job. Native access, protected items, changed contents, and server deletion rules are still checked.", "danger")
+        skipReviews:setEnable(#moves > 0 or (plan.pending or 0) > 0)
+    end
     self.messagePanel = wrapped(body, 0, y + H + 5, body.width, 2 * H - 5, "")
     body.layout = function()
         place(summary, 0, nil, body.width)
@@ -813,6 +822,7 @@ function Window:buildPreview()
         local footer = body.height - 3 * H
         place(adjust, 0, footer)
         place(self.runButton, body.width - 250, footer)
+        place(skipReviews, body.width - 520, footer)
         place(self.messagePanel, 0, footer + H + 5, body.width)
     end
     body.layout()
@@ -1369,7 +1379,7 @@ function QuickReview:new(playerIndex, context, request, plan, notice)
     o.title = context.binReview and "LootBox - review bin contents"
         or (request.destination.kind == "trash" and "LootBox - review deletion" or "LootBox - quick action")
     o.resizable, o.backgroundColor, o.borderColor = true, W.color("base"), W.color("border")
-    local minimumHeight = math.max(440, o:titleBarHeight() + (context.binReview and 10 or 9) * H + 3 * GAP + bottomInset(o))
+    local minimumHeight = math.max(440, o:titleBarHeight() + (request.destination.kind == "trash" and 11 or 9) * H + 3 * GAP + bottomInset(o))
     o.minimumWidth, o.minimumHeight = math.min(540, width), math.min(minimumHeight, availableHeight)
     o:setHeight(math.max(height, o.minimumHeight))
     o:setY((getCore():getScreenHeight() - o.height) / 2)
@@ -1383,6 +1393,8 @@ function QuickReview:createChildren()
     local y, width = self:titleBarHeight() + GAP, self.width - 2 * GAP
     local moves, skipped, pending = #(self.plan.moves or {}), #(self.plan.skipped or {}), self.plan.pending or 0
     local binReview = self.context.binReview
+    local trash = self.request.destination.kind == "trash"
+    local footerRows = trash and 5 or 4
     local heading = W.heading(self, GAP, y, binReview and ("Use " .. tostring(self.plan.bin.name) .. " for cleanup?")
         or (tostring(moves) .. (self.plan.building and " observed moves" or " planned moves")))
     if binReview then heading.r, heading.g, heading.b = C.item.r, C.item.g, C.item.b end
@@ -1401,7 +1413,7 @@ function QuickReview:createChildren()
     end
     local descriptionHeight = binReview and 3 * H or 2 * H
     local descriptionPanel = wrapped(self, GAP, y + 2 * H, width, descriptionHeight, description)
-    local listY, footerY = y + 2 * H + descriptionHeight + GAP, self.height - 4 * H - bottomInset(self)
+    local listY, footerY = y + 2 * H + descriptionHeight + GAP, self.height - footerRows * H - bottomInset(self)
     self.rows = list(self, GAP, listY, width, footerY - listY - GAP, self)
     reviewRows(self.rows, self.plan)
     if moves == 0 and pending == 0 and skipped == 0 then
@@ -1409,7 +1421,6 @@ function QuickReview:createChildren()
             binReview and "This is a client observation. Multiplayer cannot certify an empty bin or make shared-bin deletion atomic."
                 or "Adjust the item selection or source. Unopened multiplayer sources may remain unconfirmed.")
     end
-    local trash = self.request.destination.kind == "trash"
     local backButton = button(self, GAP, footerY, 100, binReview and "Back" or "Cancel", self, function(s) s:close() end,
         binReview and "Close this window and leave the current job paused for review." or "Close this review without starting a job.")
     local adjustButton = button(self, GAP + 110, footerY, binReview and 145 or 115, binReview and "Try another bin" or "Adjust setup", self, function(s)
@@ -1439,13 +1450,27 @@ function QuickReview:createChildren()
     end, binReview and "Approve native whole-bin deletion of these observed existing contents and the selected items delivered by this job."
         or (trash and "Approve whole-bin deletion of the reviewed items, including the listed existing contents." or "Start this reviewed native job."), trash and "danger" or "accent")
     self.runButton:setEnable(binReview and self.plan.canApprove == true or (not binReview and (moves > 0 or pending > 0)))
-    self.messagePanel = wrapped(self, GAP, footerY + H + 5, width, 3 * H - 5,
+    if trash then
+        self.skipReviewsButton = button(self, GAP, footerY + H + 5, width,
+            binReview and "Approve and skip further bin reviews" or "Start and skip bin reviews", self, function(s)
+                local app, problem = App.get(s.playerIndex)
+                if not app then W.setText(s.messagePanel, problem); return end
+                local ok, err
+                if s.context.binReview then ok, err = app:approveBin(s.context.binReview, {reviewBins = false})
+                else ok, err = app:start(s.plan, {reviewBins = false}) end
+                if not ok then W.setText(s.messagePanel, err); return end
+                local note = s.notice
+                s:close(); UI.showProgress(s.playerIndex, note)
+            end, "Skip further bin approval windows for this job. Every bin is still inspected, and protected items, changed contents, native access and server deletion rules can still block it.", "danger")
+        self.skipReviewsButton:setEnable(binReview and self.plan.canApprove == true or (not binReview and (moves > 0 or pending > 0)))
+    end
+    self.messagePanel = wrapped(self, GAP, footerY + (trash and 2 or 1) * H + 5, width, 3 * H - 5,
         self.notice or (binReview and "Approve permits whole-bin deletion of the observed contents above and items this job delivers. The job keeps its selection and search progress. Protected or changed contents block approval. Back leaves the job waiting."
             or (trash and "Deletion is permanent. The native trash command empties the entire bin; protected or new unapproved contents block deletion."
             or "Capacity, access and item ownership are rechecked while the job runs.")))
     self.layout = function()
         local w = self.width - 2 * GAP
-        local footer = self.height - 4 * H - bottomInset(self)
+        local footer = self.height - footerRows * H - bottomInset(self)
         place(heading, GAP, nil, w)
         place(summary, GAP, nil, w)
         place(descriptionPanel, GAP, nil, w)
@@ -1453,7 +1478,8 @@ function QuickReview:createChildren()
         place(backButton, GAP, footer)
         place(adjustButton, GAP + 110, footer)
         place(self.runButton, self.width - GAP - 240, footer)
-        place(self.messagePanel, GAP, footer + H + 5, w)
+        place(self.skipReviewsButton, GAP, footer + H + 5, w)
+        place(self.messagePanel, GAP, footer + (trash and 2 or 1) * H + 5, w)
     end
     self.layout()
 end
@@ -1494,6 +1520,10 @@ function Progress:createChildren()
     self.reasonCount, self.surveyReasonRows = 0, {}
     self.cancelButton = button(self, GAP, 0, 100, "Cancel job", self, function(s) App.get(s.playerIndex):cancel() end,
         "Stop owned work. Resume continues the remaining job after native cleanup settles. Sent trash commands cannot be recalled.", "danger")
+    self.pauseButton = button(self, GAP, 0, 100, "Pause job", self, function(s)
+        local ok, err = App.get(s.playerIndex):pause()
+        if not ok then s.notice = err else s.notice = nil end
+    end, "Pause safely after any in-flight native action settles. Deal with a threat, then choose Resume job.", "accent")
     self.resumeButton = button(self, GAP, 0, 100, "Resume job", self, function(s)
         local ok, err = App.get(s.playerIndex):resume()
         if not ok then s.notice = err else s.notice = nil end
@@ -1502,9 +1532,15 @@ function Progress:createChildren()
         function(s) UI.showBinReview(s.playerIndex) end, "Check the inspected bin, approve whole-bin deletion, or try another destination.", "accent")
     self.openManagerButton = button(self, GAP, 0, 100, "Open manager", self, function(s) UI.open(s.playerIndex) end,
         "Open the full manager without cancelling this job.")
-    self.footer = wrapped(self, GAP, 0, self.width - 2 * GAP, H, "Closing LootBox windows keeps the job running.")
+    self.recoverButton = button(self, GAP, 0, 100, "Recover gear", self, function(s)
+        local ok, err = App.get(s.playerIndex):recoverPersonalGear()
+        if not ok then s.notice = err else s.notice = nil end
+    end, "Return personal items temporarily stored for a heavy haul. Recovery checks the original containers and equipment slots.", "success")
+    self.footer = wrapped(self, GAP, 0, self.width - 2 * GAP, H, "Closing hides this panel. Running jobs continue.")
     self.resumeButton:setVisible(false)
+    self.pauseButton:setVisible(false)
     self.reviewBinButton:setVisible(false)
+    self.recoverButton:setVisible(false)
     self:layoutControls()
 end
 
@@ -1516,8 +1552,10 @@ function Progress:layoutControls()
     place(self.reasonPanel, GAP, nil, width)
     place(self.reasonsList, GAP, self.listY, width, footer - self.listY - GAP)
     local buttons = { self.cancelButton }
+    if self.showPause then buttons[#buttons + 1] = self.pauseButton end
     if self.showResume then buttons[#buttons + 1] = self.resumeButton end
     if self.showBinReview then buttons[#buttons + 1] = self.reviewBinButton end
+    if self.showRecovery then buttons[#buttons + 1] = self.recoverButton end
     buttons[#buttons + 1] = self.openManagerButton
     local buttonWidth = math.floor((width - (#buttons - 1) * GAP) / #buttons)
     for index, widget in ipairs(buttons) do place(widget, GAP + (index - 1) * (buttonWidth + GAP), footer, buttonWidth) end
@@ -1532,20 +1570,30 @@ end
 function Progress:update()
     ISCollapsableWindow.update(self)
     if not getSpecificPlayer(self.playerIndex) then self:close(); return end
-    local status = App.get(self.playerIndex):status()
+    local app = App.get(self.playerIndex)
+    local status = app:status()
     self.statusLabel:setName(status.waiting and "Waiting for your action" or states[status.state] or "Working")
     local color = status.state == "failed" and C.danger
-        or ((status.state == "cancelled" or status.state == "needs_review" or status.waiting) and C.warning)
+        or ((status.state == "pausing" or status.state == "paused" or status.state == "cancelled" or status.state == "needs_review" or status.waiting) and C.warning)
         or (status.state == "running" and C.accent or C.success)
     self.statusLabel.r, self.statusLabel.g, self.statusLabel.b = color.r, color.g, color.b
-    self.countLabel:setName(tostring(status.done or 0) .. " moved of " .. tostring(status.total or 0)
-        .. "   " .. tostring(status.skipped or 0) .. " notes to review")
+    local counts = tostring(status.done or 0) .. ((status.cleared or 0) > 0 and " processed of " or " moved of ") .. tostring(status.total or 0)
+    if (status.cleared or 0) > 0 then
+        counts = counts .. "   " .. tostring(status.moved or 0) .. " moved, " .. tostring(status.cleared) .. " cleared in place"
+    end
+    self.countLabel:setName(counts .. "   " .. tostring(status.skipped or 0) .. " notes to review")
     local survey = status.survey
     W.setText(self.surveyPanel, survey and ("Rooms processed " .. tostring(survey.roomsDone) .. " of " .. tostring(survey.roomsTotal)
         .. ". Sections searched " .. tostring(survey.sectionsSearched) .. ", unsearched " .. tostring(survey.sectionsUnsearched) .. ".") or "")
     local text = status.waiting or status.reason or ""
     if status.routing then text = text .. (text ~= "" and "\n" or "") .. "Destination choice: " .. status.routing end
     if self.notice then text = text .. (text ~= "" and "\n" or "") .. self.notice end
+    local recovery = app:recoveryStatus()
+    if recovery.pending then
+        text = text .. (text ~= "" and "\n" or "") .. "Personal gear recovery: " .. tostring(recovery.count or 0) .. " items"
+        if recovery.location then text = text .. " at " .. recovery.location end
+        if recovery.reason then text = text .. ". " .. recovery.reason end
+    end
     W.setText(self.reasonPanel, text)
     local reasons = status.reasons or {}
     if self.reasonSource ~= status.reasons then
@@ -1566,12 +1614,17 @@ function Progress:update()
             row.item.segments[3].text = reason
         else self.surveyReasonRows[id] = detailRow(self.reasonsList, name, "Unsearched", reason, "danger") end
     end
-    self.showResume, self.showBinReview = status.canResume == true, status.state == "needs_review"
+    self.showResume, self.showPause = status.canResume == true, status.canPause == true
+    self.showBinReview, self.showRecovery = status.state == "needs_review", recovery.pending == true
+    self.pauseButton:setVisible(self.showPause)
+    self.pauseButton:setEnable(self.showPause)
     self.resumeButton:setVisible(self.showResume)
     self.resumeButton:setEnable(self.showResume)
     self.reviewBinButton:setVisible(self.showBinReview)
     self.reviewBinButton:setEnable(self.showBinReview)
-    self.cancelButton:setEnable(status.state == "running" or status.state == "cancelling" or status.state == "needs_review")
+    self.recoverButton:setVisible(self.showRecovery)
+    self.recoverButton:setEnable(self.showRecovery and not status.canPause and status.state ~= "cancelling" and status.state ~= "pausing")
+    self.cancelButton:setEnable(status.state == "running" or status.state == "cancelling" or status.state == "needs_review" or status.state == "paused")
     self:layoutControls()
 end
 
@@ -1603,13 +1656,20 @@ function UI.showBinReview(playerIndex)
     playerIndex = playerIndex or 0
     local app, err = App.get(playerIndex)
     if not app then return nil, err end
+    local status = app:status()
+    UI.reviewVisits[playerIndex] = {app = app, id = status.reviewId}
+    local current = UI.quickWindows[playerIndex]
+    if current and current.context.binReview and current.context.reviewApp == app and current.context.reviewId == status.reviewId then
+        current:setVisible(true); current:bringToTop()
+        return current
+    end
     local plan
     plan, err = app:reviewBin()
     if not plan then UI.showProgress(playerIndex, err); return nil, err end
     if UI.windows[playerIndex] then W.unfocus(UI.windows[playerIndex].body) end
     if UI.quickWindows[playerIndex] then UI.quickWindows[playerIndex]:close() end
     local request = {scope = "inventory", filter = {all = true, ids = {}, types = {}}, destination = {kind = "trash"}}
-    local review = QuickReview:new(playerIndex, {binReview = plan}, request, plan)
+    local review = QuickReview:new(playerIndex, {binReview = plan, reviewId = status.reviewId, reviewApp = app}, request, plan)
     review:initialise(); review:addToUIManager()
     UI.quickWindows[playerIndex] = review
     return review
@@ -1675,12 +1735,45 @@ function UI.closeAll()
     end
     for _, picker in pairs(UI.areaPickers) do picker:finish(nil, false) end
     for _, window in ipairs(windows) do window:close() end
+    UI.reviewVisits = {}
+end
+
+function UI.tick()
+    if getCore():isDoingTextEntry() then return end
+    for playerIndex = 0, getNumActivePlayers() - 1 do
+        local app = App.peek(playerIndex)
+        if app then
+            local status, visit = app:status(), UI.reviewVisits[playerIndex]
+            if status.state == "needs_review" and status.reviewId ~= nil
+                and (not visit or visit.app ~= app or visit.id ~= status.reviewId) then
+                UI.showBinReview(playerIndex)
+            end
+        end
+    end
+end
+
+function UI.onKeyStartPressed(key)
+    if getCore():isDoingTextEntry() or not getCore():isKey("LootBoxCurrentJob", key) then return end
+    if not getSpecificPlayer(0) then return end
+    local app = App.get(0)
+    if app and (app:status().state ~= "idle" or app:recoveryStatus().pending) then UI.showProgress(0) end
 end
 
 function UI.install()
     if UI.installed then return end
     UI.installed = true
     require("LootBox/Menus").install(UI)
+    require "keyBinding"
+    local hasBinding = false
+    for _, binding in ipairs(keyBinding) do
+        if binding.value == "LootBoxCurrentJob" then hasBinding = true; break end
+    end
+    if not hasBinding then
+        keyBinding[#keyBinding + 1] = {value = "[LootBox]"}
+        keyBinding[#keyBinding + 1] = {value = "LootBoxCurrentJob", key = Keyboard.KEY_F7}
+    end
+    Events.OnTick.Add(UI.tick)
+    Events.OnKeyStartPressed.Add(UI.onKeyStartPressed)
     if Events.OnDisconnect then Events.OnDisconnect.Add(UI.closeAll) end
     if Events.OnMainMenuEnter then Events.OnMainMenuEnter.Add(UI.closeAll) end
     local options = PZAPI.ModOptions:getOptions("LootBox") or PZAPI.ModOptions:create("LootBox", "LootBox")

@@ -8,12 +8,18 @@ require "Vehicles/TimedActions/ISUnlockVehicleDoor"
 require "Vehicles/TimedActions/ISOpenVehicleDoor"
 require "Vehicles/TimedActions/ISCloseVehicleDoor"
 require "Vehicles/TimedActions/ISLockDoors"
+require "TimedActions/ISWearClothing"
+require "TimedActions/ISClothingExtraAction"
+require "TimedActions/ISEquipWeaponAction"
+require "TimedActions/ISUnequipAction"
+
+local Carry = require "LootBox/Carry"
 
 local Native = {}
 Native.__index = Native
 
 local WALK_IDLE_TIMEOUT, WALK_MAX_TIMEOUT = 60000, 600000
-local timeouts = { approach = WALK_IDLE_TIMEOUT, transfer = 120000, trash = 15000, vehicle = 180000 }
+local timeouts = { approach = WALK_IDLE_TIMEOUT, transfer = 120000, trash = 15000, vehicle = 180000, gear = 180000 }
 
 local function now()
     return getTimestampMs()
@@ -176,6 +182,21 @@ end
 
 local function sameItem(item, state)
     return item and item:getID() == state.itemId and tostring(item:getFullType()) == state.fullType
+end
+
+local function trashObserved(state)
+    local object, container, square = state.trashObject, state.trashContainer, state.trashSquare
+    if not object or not square then return false, "The sent trash operation has no stable destination" end
+    if getCell():getGridSquare(square:getX(), square:getY(), square:getZ()) ~= square then return nil end
+    if object:getObjectIndex() < 0 or object:getSquare() ~= square or object:getContainer() ~= container
+        or container:getParent() ~= object or state.op.container ~= container then
+        return false, "The trash can changed before the sent deletion could be confirmed"
+    end
+    for _, original in ipairs(state.trashItems) do
+        local present = container:getItemWithID(original.itemId)
+        if sameItem(present, original) then return nil end
+    end
+    return true
 end
 
 local function worldItem(square, state)
@@ -377,9 +398,9 @@ local function approach(self, state)
         function() return arrived(self.player, op.square) end, "done")
 end
 
-local function approachAccess(self, state)
-    local container = state.op.container
-    if containerReachable(self.player, container) then state.phase = "done"; return true end
+local function approachAccess(self, state, container, arrivedPhase)
+    container = container or state.op.container
+    if containerReachable(self.player, container) then state.phase = arrivedPhase or "done"; return true end
     local anchor = containerAnchor(self.player, container)
     local part = anchor and anchor.container:getVehiclePart()
     if not part then return nil, "The container is no longer reachable" end
@@ -540,6 +561,130 @@ local function vehicleStep(self, state)
     return true
 end
 
+local function gearResult(self, state)
+    local op, player = state.op, self.player
+    if op.mode == "wear" and not state.slot then
+        local target = op.variant and Carry.prototype(op.variant) or op.item
+        state.slot = Carry.slot(player, op.slot or Carry.wornSlot(target))
+        if not state.slot then return false end
+    end
+    local item = op.resultItem or player:getInventory():getItemWithID(state.itemId)
+    if op.variant then
+        if not op.gearIdentity.conversionDispatched then return false end
+        if player:getInventory():containsID(state.itemId) then return false end
+        item = nil
+        local worn = player:getWornItems()
+        for index = 0, worn:size() - 1 do
+            local entry, current = worn:get(index), worn:get(index):getItem()
+            if entry:getLocation() == state.slot and tostring(current:getFullType()) == op.variant
+                and not state.previousIds[tostring(current:getID())] then item = current; break end
+        end
+        if not item then return false end
+        local contents = item:getInventory()
+        if contents:getItems():size() ~= #state.contents then return false end
+        for _, original in ipairs(state.contents) do
+            local present = contents:getItemWithID(original.id)
+            if not present or tostring(present:getFullType()) ~= original.fullType then return false end
+        end
+    elseif not sameItem(item, state) then return false end
+    local complete = op.mode == "unequip" and not player:isEquipped(item)
+        or op.mode == "wear" and Carry.wornAt(player, state.slot, item) == item
+        or op.mode == "primary" and player:getPrimaryHandItem() == item and (not op.twoHands or player:getSecondaryHandItem() == item)
+        or op.mode == "secondary" and player:getSecondaryHandItem() == item and (not op.twoHands or player:getPrimaryHandItem() == item)
+    if complete then op.resultItem = item end
+    return complete
+end
+
+local function gearStep(self, state)
+    local op, player = state.op, self.player
+    if gearResult(self, state) then state.phase = "done"; return true end
+    local main = player:getInventory()
+    local item = main:getItemWithID(state.itemId)
+    if not sameItem(item, state) then item = op.source and op.source:getItemWithID(state.itemId) end
+    if not sameItem(item, state) then return nil, "The selected gear is no longer in its source" end
+    if op.mode == "wear" then
+        local target = op.variant and Carry.prototype(op.variant) or item
+        if not target then return nil, "The native gear variant is unavailable" end
+        local declared = Carry.wornSlot(target)
+        if not declared or tostring(declared) ~= tostring(op.slot or declared) then return nil, "The native worn location changed" end
+        local available, slot = Carry.slotAvailable(player, declared, item)
+        if not available then return nil, "The worn location is occupied or conflicts with existing gear" end
+        state.slot = slot
+        if ItemTag and ItemTag.REPLACE_PRIMARY and target:hasTag(ItemTag.REPLACE_PRIMARY) then
+            return nil, "This gear would replace your primary hand item"
+        end
+        if op.variant then
+            if not item:IsInventoryContainer() or not target:IsInventoryContainer()
+                or not Carry.permittedVariant(item, op.variant) then return nil, "This is not a declared native bag variant" end
+            if item:getContentsWeight() > target:getInventory():getEffectiveCapacity(player) then
+                return nil, "The native bag variant is too small for its existing contents"
+            end
+        end
+    elseif op.mode == "primary" or op.mode == "secondary" then
+        if not Carry.handAvailable(player, op.mode, item) then return nil, "Your hand equipment changed; existing gear was retained" end
+        if op.twoHands and (not Carry.handAvailable(player, "primary", item) or not Carry.handAvailable(player, "secondary", item)) then
+            return nil, "Both hands must remain free to restore this item"
+        end
+    elseif op.mode ~= "unequip" then return nil, "Choose a native gear action" end
+    if item:getContainer() ~= main then
+        if op.mode == "unequip" then return nil, "The gear to remove is no longer carried directly" end
+        local source = item:getContainer()
+        if not source or not source:isRemoveItemAllowed(item) or source:isLockedToCharacter(player)
+            or not main:isItemAllowed(item) or main:isInside(item) then return nil, "The native container rules refuse this gear" end
+        if not containerReachable(player, source) then
+            local anchor = containerAnchor(player, source)
+            if not anchor or not anchor.square or player:getVehicle() then return nil, "The gear source is unreachable" end
+            local part = anchor.container:getVehiclePart()
+            if part then
+                if state.phase == "access" then return approachAccess(self, state, source, "prepare") end
+                if not part:getArea() then return nil, "The gear source has no native vehicle access area" end
+                state.gearPathArrived = false
+                local action = ISPathFindAction:pathToVehicleArea(player, part:getVehicle(), part:getArea())
+                action:setOnComplete(function() state.gearPathArrived = true end)
+                return submitPath(self, state, action, function() return state.gearPathArrived end, "access")
+            end
+            local point = anchor.square
+            local action
+            if anchor.object and not anchor.floorBag then
+                action = ISPathFindAction:pathAdjacentToMultiTileObject(player, anchor.object, true)
+            else action = ISPathFindAction:pathToLocationF(player, point:getX() + 0.5, point:getY() + 0.5, point:getZ()) end
+            return submitPath(self, state,
+                action,
+                function() return containerReachable(player, source) end, "prepare")
+        end
+        local anchor = containerAnchor(player, source)
+        if isClient() and anchor and not anchor.carried and (not SafeHouse
+            or not SafeHouse.isSafehouseAllowLoot or not SafeHouse.isSafehouseAllowLoot(anchor.square, player)) then
+            return nil, "Safehouse permissions do not allow taking this gear"
+        end
+        if not main:hasRoomFor(player, item) then return nil, "The native hard carrying limit prevents taking this bag", "capacity" end
+        return submit(self, state, ISInventoryTransferUtil.newInventoryTransferAction(player, item, source, main),
+            function()
+                local present = main:getItemWithID(state.itemId)
+                return sameItem(present, state) and present:getContainer() == main
+            end, "prepare")
+    end
+    if op.mode == "unequip" then
+        if item:isForceDropHeavyItem() then return nil, "Put down the held heavy item manually before staging it" end
+        return submit(self, state, ISUnequipAction:new(player, item, 50), function() return gearResult(self, state) end, "done")
+    elseif op.mode == "wear" then
+        if op.variant then
+            local contents = item:getInventory():getItems()
+            state.contents = {}
+            for index = 0, contents:size() - 1 do
+                local child = contents:get(index)
+                state.contents[#state.contents + 1] = {id = child:getID(), fullType = tostring(child:getFullType())}
+            end
+            local accepted, reason = submit(self, state, ISClothingExtraAction:new(player, item, op.variant), function() return gearResult(self, state) end, "done")
+            if accepted then op.gearIdentity.conversionDispatched = true end
+            return accepted, reason
+        end
+        return submit(self, state, ISWearClothing:new(player, item), function() return gearResult(self, state) end, "done")
+    end
+    return submit(self, state, ISEquipWeaponAction:new(player, item, 50, op.mode == "primary", op.twoHands == true),
+        function() return gearResult(self, state) end, "done")
+end
+
 function Native.new(player)
     return setmetatable({ player = player }, Native)
 end
@@ -587,10 +732,10 @@ function Native:takeoverReason()
     if playerFlag(player, "isDead") then return "The player died" end
     if playerFlag(player, "isAsleep") then return "Sleeping stopped the job" end
     if playerFlag(player, "pressedAim") or playerFlag(player, "isAiming") then
-        return "Aiming stopped the job"
+        return "Aiming paused the job", "combat"
     end
     if playerFlag(player, "isAttacking") or playerFlag(player, "isPerformingShoveAnimation") then
-        return "Attacking or shoving stopped the job"
+        return "Attacking or shoving paused the job", "combat"
     end
     if playerFlag(player, "pressedMovement", false)
         and (playerFlag(player, "isRunning") or playerFlag(player, "isSprinting")) then
@@ -607,7 +752,7 @@ function Native:begin(op)
     end
     local state = { op = op, owned = {}, deadline = now() + timeouts[op.kind], phase = "prepare" }
     self.active = state
-    local ok, result, reason = pcall(function()
+    local ok, result, reason, code = pcall(function()
         if op.kind == "approach" then
             op.travel = nil
             local accepted, err = approach(self, state)
@@ -652,7 +797,7 @@ function Native:begin(op)
                 if not world or not nearSquare(self.player, world:getSquare()) then return nil, "The floor item is out of reach" end
             elseif not containerReachable(self.player, op.source) then return nil, "The source is out of reach" end
             if not containerReachable(self.player, op.destination) and op.destination:getType() ~= "floor" then return nil, "The destination is out of reach" end
-            if op.destination:getType() ~= "floor" and not op.destination:hasRoomFor(self.player, op.item) then return nil, "The destination is full" end
+            if op.destination:getType() ~= "floor" and not op.destination:hasRoomFor(self.player, op.item) then return nil, "The destination is full", "capacity" end
             if op.destination:isOccupiedVehicleSeat() then return nil, "The destination vehicle seat is occupied" end
             if not op.source:isRemoveItemAllowed(op.item) or not op.destination:isItemAllowed(op.item) or op.destination:isInside(op.item) then
                 return nil, "The native container rules refuse this item"
@@ -660,6 +805,23 @@ function Native:begin(op)
             local action = ISInventoryTransferUtil.newInventoryTransferAction(self.player, op.item, op.source, op.destination)
             if op.destinationPoint then freezeFloorDestinations(op, action) end
             return submit(self, state, action, function() return transferred(self, state) end, "done")
+        elseif op.kind == "gear" then
+            if not op.item then return nil, "Choose an item to equip or remove" end
+            state.itemId, state.fullType = op.item:getID(), tostring(op.item:getFullType())
+            if not op.gearIdentity then
+                op.gearIdentity = {previousIds = {}, contents = {}}
+                local items = self.player:getInventory():getItems()
+                for index = 0, items:size() - 1 do op.gearIdentity.previousIds[tostring(items:get(index):getID())] = true end
+                if op.variant and op.item:IsInventoryContainer() then
+                    local contents = op.item:getInventory():getItems()
+                    for index = 0, contents:size() - 1 do
+                        local child = contents:get(index)
+                        op.gearIdentity.contents[#op.gearIdentity.contents + 1] = {id = child:getID(), fullType = tostring(child:getFullType())}
+                    end
+                end
+            end
+            state.previousIds, state.contents = op.gearIdentity.previousIds, op.gearIdentity.contents
+            return gearStep(self, state)
         elseif op.kind == "trash" then
             local object, err = trashObject(self, state)
             if not object then return nil, err end
@@ -670,6 +832,12 @@ function Native:begin(op)
                 end
             end
             if items:isEmpty() then state.phase = "done"; return true end
+            state.trashObject, state.trashContainer, state.trashSquare = object, op.container, object:getSquare()
+            state.trashItems = {}
+            for index = 0, items:size() - 1 do
+                local item = items:get(index)
+                state.trashItems[#state.trashItems + 1] = {itemId = item:getID(), fullType = tostring(item:getFullType())}
+            end
             sendClientCommand(self.player, "object", "emptyTrash", {
                 x = object:getX(), y = object:getY(), z = object:getZ(), index = object:getObjectIndex()
             })
@@ -696,7 +864,7 @@ function Native:begin(op)
     if not ok or not result then
         stopOwned(self, state)
         self.active = nil
-        return nil, ok and reason or tostring(result)
+        return nil, ok and reason or tostring(result), ok and code or nil
     end
     return true
 end
@@ -719,11 +887,17 @@ function Native:cancel(op)
 end
 
 local function poll(self, state)
-    if self.player:isDead() then return finish(self, state, false, "The player died") end
     if state.op.kind == "trash" and state.phase == "trashPending" then
-        local object = trashObject(self, state)
-        if object and state.op.container:isEmpty() then return finish(self, state, true) end
+        local observed, reason = trashObserved(state)
+        if observed then return finish(self, state, true) end
+        if observed == false then return finish(self, state, false, reason) end
+        if now() > state.deadline then
+            return finish(self, state, false, (state.failure and state.failure .. "; " or "")
+                .. "The sent trash deletion could not be confirmed before timeout")
+        end
+        return nil
     end
+    if self.player:isDead() then return finish(self, state, false, "The player died") end
     if now() > state.deadline then
         state.failure = state.failure or "The native operation timed out"
         stopOwned(self, state)
@@ -782,6 +956,12 @@ local function poll(self, state)
             return nil
         end
         if state.phase == "done" then return finish(self, state, not state.failure, state.failure) end
+        return nil
+    end
+    if state.op.kind == "gear" then
+        local accepted, err, code = gearStep(self, state)
+        if not accepted then return finish(self, state, false, err, code) end
+        if state.phase == "done" then return finish(self, state, true) end
         return nil
     end
     return finish(self, state, false, "The native operation has no completion state")
