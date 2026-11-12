@@ -6,7 +6,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 ## Install locally
 
-Extract the built `LootBox-0.6.0.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.6.1.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -14,7 +14,7 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.6.0.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
+The archive is `dist/LootBox-0.6.1.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
 
 ## Start with a workflow
 
@@ -62,7 +62,7 @@ Choose an item checklist, a source, and a destination in the action composer. So
 
 Destinations include carried storage, a selected container, a chosen floor location, the remembered vehicle, matching labeled storage, and known trash cans. Preview shows observed moves, exclusions, pending exploration, and deletion warnings. Start runs a finite job. The progress window separates moved items, retained or unconfirmed items, their reasons, and job controls. A bin review identifies the actual bin, floor, coordinates, observed contents weight, capacity and free space before asking for whole-bin deletion approval. Hauling fills available carried capacity before making delivery trips; it preserves unrelated carried items. A full destination leaves an item behind with a reason. Native floor dropping can use an adjacent permitted tile when the original tile is blocked or full; the job retains that original drop area if the player moves away during an interruption.
 
-Automatic pickup respects the character's normal weighted carrying limit, rather than filling main inventory to its higher admission limit. With bag traversal enabled, carried storage with the best actual weight reduction is preferred. Only an equipped outer bag's reduction affects nested contents; unequipped bags still count at full carried weight. Preview shares one character-mass reservation across all bags, and runtime checks each pickup again. Items that cannot fit within these limits stay in place with a reason. Unloading and weight-reducing rearrangement remain available when the character is already overloaded.
+Automatic pickup uses the main inventory's live native hard capacity and current capacity weight. The HUD's normal encumbrance threshold does not block hauling; over-encumbrance is allowed. Eligible carried bags are tried before main inventory, independently of whether source-bag searching is enabled. Bags with better actual weight reduction are preferred. Only an equipped outer bag's reduction affects nested contents; unequipped bags still count at full carried weight. Preview shares a body-mass reservation across the bags, and each native pickup rechecks item rules, capacity and server acceptance. Unloading and weight-reducing rearrangement remain available while overloaded.
 
 Vehicle hauling prefers native trunk storage, then available seat and other storage. The client uses legitimate driver access to unlock storage when possible and restores the player's original seat or outside state. Occupied seats, moving vehicles, inaccessible keys/doors, blocked exits, and unusual modded vehicle access can prevent the operation. A failed restoration is reported with the remaining player location.
 

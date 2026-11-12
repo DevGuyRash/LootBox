@@ -90,3 +90,27 @@ The user reported scrolling text clipping and asked for clearer workflows, visua
 "ALSO another thing I wanted is to add th ability to "take X amount" so you can right click a stack and "Take X amount" or similar. Doesn't have to be inside of the lootbox menu. Just added as a conditional one when right clicking an item. then you can type an amount and it only takes that much. Same with when putting into containers. Not sure how to pull that one off! Maybe select X amount is better for both directions?"
 
 "then it just selects them and the user can do whatever they want next"
+
+## Hauling and job-control follow-up
+
+"Also, another thing is that I want it to fill carrying bags the user has on first (or equip them if in inventory or if found). It should equip the main bag, if there is a mod allowing for lower back too then a duffle bag there, bags inside of primary and secondary too! Also consider what should happen if there's things in those bags as well. It should basically try to fill all bags first before the main one. That way each trip is as impactful as it can be"
+
+"also, I love that it reviews the bin but there should be a button to just start job and skip bin review too. and ideally a faster way to get back to the current job as well!"
+
+"and for some of the items it's saying changed source after preview, those were things already in the trash basically."
+
+"if something truly is too heavy, I would think we really want the place cleaned out right? Maybe it starts putting the user's things into a bin just to remove the heavy things (putting entire bags/containers instead of their contents so that we don't have to refill them) until it's light enough, then after the next delete it goes back and re-equips the things where they go and puts items back into correct spots"
+
+"also I do have enough capacity to have taken the salt lick. It just never went back after deleting the current batches"
+
+"and why do I have to manually click "Review bin"? Seems a bit counterintuitive"
+
+"we can leave it, but shouldn't it just pop up upon arrival?"
+
+"also maybe a pause option incase we need to deal with a zombie and resume?"
+
+"yeah it's not filling all the containers available to it to the max before going over (though this isn't always the best strategy so keep that in mind; but it may be faster!)"
+
+"also check latest run. It kind of bugged out and stopped"
+
+"It's because I'm at the limit of 14/14 but really the limit is 50. It shouldn't matter that we're at the normal limit. Over-encumberance is fine. Check the ACTUAL upper hard carry limit when computing, (might change server to server but I think 50 is default). Using code to check is ideal"
