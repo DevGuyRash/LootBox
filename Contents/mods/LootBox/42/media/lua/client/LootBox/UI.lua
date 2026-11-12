@@ -208,8 +208,10 @@ local function reviewRows(widget, plan)
         detailRow(widget, tostring(pending) .. " sources", "To inspect", "Contents will be checked after approach. Empty multiplayer replies can remain unconfirmed.", "accent")
     end
     for _, row in ipairs(plan.moves or {}) do
-        detailRow(widget, row.itemName, plan.bin and "Will be deleted" or "Planned", tostring(row.from or "Source") .. " -> " .. tostring(row.to or "Destination"),
-            plan.bin and "danger" or "success")
+        local bagSetup = row.status == "Recheck after bag setup"
+        detailRow(widget, row.itemName, plan.bin and "Will be deleted" or (bagSetup and "After bag setup" or "Planned"),
+            tostring(row.from or "Source") .. " -> " .. tostring(row.to or "Destination"),
+            plan.bin and "danger" or (bagSetup and "warning" or "success"))
     end
     for _, row in ipairs(plan.skipped or {}) do
         detailRow(widget, row.itemName, row.status or "Stays here", row.reason or "No destination", row.tone or "warning")
