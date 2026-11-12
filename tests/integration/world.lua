@@ -1319,6 +1319,58 @@ case("Unavailable native matching rules or failed maps cannot broaden the select
     equal(targets, nil); assert(err:find("could not read", 1, true))
 end)
 
+case("Smart Take Matching finds native alias matches in every nested carried bag", function(f)
+    local maps = matchingFixture(f)
+    local outer, storage = weightedBag(f, f.inventory, "Outer", 80)
+    local inner, nested = weightedBag(f, storage, "Inner", 90)
+    local seed = f.item(nested, "Variant")
+    maps[storage], maps[nested] = {}, {["Fixture.Alias"] = {seed}}
+    maps[f.junk]["Fixture.Alias"] = {f.junk.items[1]}
+    local records = assert(f.world:smartLootRecords("matching", f.junk))
+    equal(#records, 1); equal(records[1].item, f.junk.items[1])
+    equal(records[1].source, f.junk)
+    f.loot.inventoryPane.inventory = f.tools
+    records = assert(f.world:smartLootRecords("matching", f.junk))
+    equal(#records, 1); equal(records[1].source, f.junk)
+end)
+
+case("Smart Take All leaves protected and unwanted source items and never opens source bags", function(f)
+    matchingFixture(f)
+    f.state.keep[tostring(f.junk.items[1].id)] = true
+    f.junk.items[2].isUnwanted = function(_, player) return player == f.player end
+    local _, nested = weightedBag(f, f.junk, "Source bag", 80)
+    f.item(nested, "Hidden")
+    local records = assert(f.world:smartLootRecords("all", f.junk))
+    equal(#records, 0)
+end)
+
+case("Smart matching fails closed for missing native maps and rejects carried or recovery sources", function(f)
+    matchingFixture(f)
+    ISInventoryWindowControlHandler_TransferSameType = nil
+    local records, err = f.world:smartLootRecords("matching", f.junk)
+    equal(records, nil); assert(err:find("unavailable", 1, true))
+    records = f.world:smartLootRecords("all", f.inventory); equal(records, nil)
+    f.world.recovery = {isReservedContainer = function(_, container) return container == f.junk end}
+    records, err = f.world:smartLootRecords("all", f.junk)
+    equal(records, nil); assert(err:find("Recover", 1, true))
+end)
+
+case("Smart Load groups native alias matches across bags then orders remaining storage by reduction", function(f)
+    local maps = matchingFixture(f)
+    local weak, weakStorage = weightedBag(f, f.inventory, "Matching weak", 50)
+    local strong, strongStorage = weightedBag(f, f.inventory, "Empty strong", 90)
+    local second, secondStorage = weightedBag(f, f.inventory, "Matching strong", 80)
+    weak.equipped, strong.equipped, second.equipped = true, true, true
+    local seed1, seed2 = f.item(weakStorage, "Variant"), f.item(secondStorage, "Variant")
+    local selected = f.junk.items[1]
+    maps[f.junk]["Fixture.Alias"] = {selected}
+    maps[weakStorage], maps[strongStorage], maps[secondStorage] = {["Fixture.Alias"] = {seed1}}, {}, {["Fixture.Alias"] = {seed2}}
+    local destinations = assert(f.world:destinations({destination = {kind = "inventory"}}, selected))
+    equal(#destinations, 4)
+    equal(destinations[1], secondStorage); equal(destinations[2], weakStorage)
+    equal(destinations[3], strongStorage); equal(destinations[4], f.inventory)
+end)
+
 ISInventoryWindowControlHandler_TransferSameType = matchingGlobals.rules
 getPlayerLoot, ISInventoryPage, SafeHouse = matchingGlobals.loot, matchingGlobals.inventoryPage, matchingGlobals.safeHouse
 getCell, instanceof, isClient = saved.getCell, saved.instanceof, saved.isClient
