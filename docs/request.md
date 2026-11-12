@@ -80,3 +80,7 @@ The user reported scrolling text clipping and asked for clearer workflows, visua
 "also would love the ability to right click a container itself in the inventory/loot thing and choose to empty container, loot container, clean container, etc just at a per container level too! if not already existing"
 
 "also the other stuff like organizing and all that too! Just general lootbox capabilities"
+
+## Context-menu icons
+
+"can we please add icons for all places for lootbox? not just some? I mean in context menus. Ideally they fit the option/action too! I like the ones you've made so far! They fit zomboid perfectly. Though I don't think we should have duplicates"
