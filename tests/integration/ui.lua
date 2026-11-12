@@ -127,7 +127,7 @@ function Widgets.list(parent, x, y, width, height, target, callback, selection)
         self:setScrollHeight(self.scrollHeight + row.height)
         return row
     end
-    function widget:clear() self.items, self.selected, self.scroll = {}, 0, 0 end
+    function widget:clear() self.items, self.selected, self.scroll, self.scrollHeight = {}, 0, 0, 0 end
     return widget
 end
 package.loaded["LootBox/Widgets"] = Widgets
