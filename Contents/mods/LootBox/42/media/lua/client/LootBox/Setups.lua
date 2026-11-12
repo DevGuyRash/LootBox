@@ -2,12 +2,13 @@ local Setups = {}
 
 Setups.defaults = { contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
     vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true,
-    confirmQuickMoves = true, rememberLastSetup = true, showTips = true }
+    confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
+    matchingTransferButtons = true, showQuickProgress = false, rememberLastSetup = true, showTips = true }
 
 local scopes = { inventory = true, container = true, reach = true, room = true,
     building = true, area = true, labeled = true }
 local destinations = { inventory = true, floor = true, container = true,
-    vehicle = true, labels = true, trash = true }
+    vehicle = true, labels = true, trash = true, matching = true }
 local MAX_ID, MAX_PRESETS = 2147483647, 32
 
 local function integer(value)
@@ -45,7 +46,9 @@ function Setups.preferences(value)
             return nil, "Unknown or invalid interface preference: " .. tostring(key)
         end
     end
-    for key, default in pairs(Setups.defaults) do result[key] = value[key] == nil and default or value[key] end
+    for key, default in pairs(Setups.defaults) do
+        if value[key] == nil then result[key] = default else result[key] = value[key] end
+    end
     return result
 end
 
@@ -70,9 +73,15 @@ function Setups.request(value)
     local labels
     labels, err = strings(destination.labels == nil and {} or destination.labels, true)
     if not labels then return nil, err end
+    if destination.kind == "matching" then scope, includeInventory, includeBags = "inventory", false, true end
     local result = { scope = scope, includeInventory = includeInventory, includeBags = includeBags,
         filter = { ids = ids, types = types, all = all }, sourceLabels = sourceLabels,
         destination = { kind = destination.kind, labels = labels } }
+    if destination.kind == "matching" then
+        local mode = destination.mode == nil and "nearby" or destination.mode
+        if mode ~= "displayed" and mode ~= "nearby" then return nil, "Choose displayed or nearby matching containers" end
+        result.destination.mode = mode
+    end
     if value.area ~= nil then
         if type(value.area) ~= "table" then return nil, "Choose a valid area" end
         result.area = {}

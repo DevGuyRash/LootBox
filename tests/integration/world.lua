@@ -1079,6 +1079,248 @@ case("Observed bag replacement migrates personal rules and forwards exact recove
     equal(f.world.dirty, true)
 end)
 
+local matchingGlobals = {rules = ISInventoryWindowControlHandler_TransferSameType,
+    loot = getPlayerLoot, inventoryPage = ISInventoryPage, safeHouse = SafeHouse}
+local function matchingFixture(f)
+    local maps, calls = {
+        [f.inventory] = {["Fixture.CarriedFood"] = {f.inventory.items[1]}},
+        [f.junk] = {["Fixture.Beans"] = {f.junk.items[1]}, ["Fixture.Scrap"] = {f.junk.items[2]}},
+        [f.tools] = {["Fixture.Soup"] = {f.tools.items[1]}},
+        [f.unlabeled] = {["Fixture.Cake"] = {f.unlabeled.items[1]}},
+    }, {}
+    ISInventoryWindowControlHandler_TransferSameType = {getItemsTable = function(_, container)
+        calls[container] = (calls[container] or 0) + 1
+        assert(maps[container], "Native matching boundary needs an explicit fixture map")
+        return maps[container]
+    end}
+    f.loot = {inventoryPane = {inventory = f.junk}, backpacks = {{inventory = f.junk}, {inventory = f.tools}}}
+    getPlayerLoot = function() return f.loot end
+    return maps, calls
+end
+
+case("All-carried matching discovers main and nested bag contents without requiring visible bag controls", function(f)
+    local maps, calls = matchingFixture(f)
+    local main = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {main}
+    local outer = f.item(f.inventory, "OuterBag", "Container")
+    outer.inventory = f.container("bag"); outer.inventory.bag = outer
+    local first = f.item(outer.inventory, "Beans")
+    local inner = f.item(outer.inventory, "InnerBag", "Container")
+    inner.inventory = f.container("bag"); inner.inventory.bag = inner
+    local second = f.item(inner.inventory, "Beans")
+    maps[outer.inventory] = {["Fixture.Beans"] = {first}}
+    maps[inner.inventory] = {["Fixture.Beans"] = {second}}
+    local records, targets = assert(f.world:matchingRecords("displayed"))
+    equal(#records, 3)
+    equal(f.names({items = records}), "Beans,Beans,Beans")
+    equal(#targets, 1)
+    equal(calls[f.inventory], 1)
+    equal(calls[outer.inventory], 1)
+    equal(calls[inner.inventory], 1)
+    equal(calls[f.junk], 1)
+    equal(#f.loot.backpacks, 2)
+end)
+
+case("Nearby matching retains native target order while removing duplicate and carried targets", function(f)
+    local maps = matchingFixture(f)
+    local beans = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {beans}
+    maps[f.tools]["Fixture.Beans"] = {f.tools.items[1]}
+    f.loot.backpacks = {{inventory = f.tools}, {inventory = f.junk}, {inventory = f.tools}, {inventory = f.inventory}}
+    local _, targets = f.world:matchingRecords("nearby")
+    equal(#targets, 2)
+    equal(targets[1].ref, f.tools)
+    equal(targets[2].ref, f.junk)
+end)
+
+case("A displayed target remains pinned after another native loot pane is selected", function(f)
+    local maps = matchingFixture(f)
+    local beans = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {beans}
+    local _, targets = f.world:matchingRecords("displayed")
+    f.loot.inventoryPane.inventory = f.tools
+    local destinations = assert(f.world:destinations({destination = {kind = "matching", targets = targets}}, beans))
+    equal(#destinations, 1)
+    equal(destinations[1], f.junk)
+end)
+
+case("Matching uses native clothing alias equivalence and deduplicates repeated alias hits", function(f)
+    local maps = matchingFixture(f)
+    local variant = f.item(f.inventory, "HolsterLeft")
+    maps[f.inventory]["Native.HolsterAlias"] = {variant, variant}
+    maps[f.inventory]["Native.SecondAlias"] = {variant}
+    maps[f.junk] = {["Native.HolsterAlias"] = {f.junk.items[1]}, ["Native.SecondAlias"] = {f.junk.items[1]}}
+    local records, targets = f.world:matchingRecords("displayed")
+    equal(#records, 1)
+    equal(records[1].item, variant)
+    equal(targets[1].types[variant:getFullType()], true)
+    equal(targets[1].types["Native.HolsterAlias"], nil)
+end)
+
+case("All-carried matching retains Keep favorite worn attached and whole-bag protection", function(f)
+    local maps = matchingFixture(f)
+    local normal = f.item(f.inventory, "Beans")
+    local kept = f.item(f.inventory, "Beans"); f.state.keep[tostring(kept.id)] = true
+    local favorite = f.item(f.inventory, "Beans"); function favorite:isFavorite() return true end
+    local worn = f.item(f.inventory, "Beans"); function f.player:isEquipped(item) return item == worn end
+    local attached = f.item(f.inventory, "Beans"); function attached:getAttachedSlot() return 0 end
+    local bag = f.item(f.inventory, "Bag", "Container")
+    bag.inventory = f.container("bag"); bag.inventory.bag = bag
+    local child = f.item(bag.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {normal, kept, favorite, worn, attached, bag}
+    maps[bag.inventory] = {["Fixture.Beans"] = {child}}
+    local records = f.world:matchingRecords("displayed")
+    equal(#records, 2)
+    local actual = {[records[1].item] = true, [records[2].item] = true}
+    assert(actual[normal] and actual[child])
+end)
+
+case("Matching reads each native source and target map once for a large source list", function(f)
+    local maps, calls = matchingFixture(f)
+    maps[f.inventory]["Fixture.Beans"] = {}
+    for _ = 1, 100 do
+        maps[f.inventory]["Fixture.Beans"][#maps[f.inventory]["Fixture.Beans"] + 1] = f.item(f.inventory, "Beans")
+    end
+    f.loot.backpacks = {{inventory = f.junk}, {inventory = f.junk}}
+    local records = f.world:matchingRecords("nearby")
+    equal(#records, 100)
+    equal(calls[f.inventory], 1)
+    equal(calls[f.junk], 1)
+end)
+
+case("Recovery-reserved targets do not enter matching routes", function(f)
+    local maps = matchingFixture(f)
+    local beans = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {beans}
+    f.world.recovery = {isProtected = function() return false end,
+        isReservedContainer = function(_, container) return container == f.junk end}
+    local records, targets = f.world:matchingRecords("nearby")
+    equal(#records, 0)
+    equal(#targets, 1)
+    equal(targets[1].ref, f.tools)
+end)
+
+case("Live permission excludes matching targets without blocking owned source discovery", function(f)
+    local maps = matchingFixture(f)
+    local beans = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {beans}
+    maps[f.remote] = {["Fixture.Beans"] = {f.remote.items[1]}}
+    f.loot.backpacks = {{inventory = f.junk}, {inventory = f.remote}}
+    isClient = function() return true end
+    SafeHouse = {isSafehouseAllowLoot = function(square) assert(square); return square == f.far end}
+    local records, targets = f.world:matchingRecords("nearby")
+    equal(#records, 1)
+    equal(#targets, 1)
+    equal(targets[1].ref, f.remote)
+end)
+
+case("A recreated native matching target rebinds through its original world anchor", function(f)
+    local maps = matchingFixture(f)
+    local beans = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {beans}
+    local _, targets = f.world:matchingRecords("displayed")
+    local reloaded = f.square(0, 0)
+    local replacement = f.crate(reloaded, "junk")
+    f.player.location = reloaded
+    local destinations = f.world:destinations({destination = {kind = "matching", targets = targets}}, beans)
+    equal(#destinations, 1)
+    equal(destinations[1], replacement)
+end)
+
+case("A replacement object on the same loaded square cannot inherit a matching route", function(f)
+    local maps = matchingFixture(f)
+    local beans = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {beans}
+    local _, targets = f.world:matchingRecords("displayed")
+    table.remove(f.origin.objects, 1)
+    local replacement = f.crate(f.origin, "junk")
+    table.remove(f.origin.objects, #f.origin.objects)
+    table.insert(f.origin.objects, 1, replacement.parent)
+    local destinations = f.world:destinations({destination = {kind = "matching", targets = targets}}, beans)
+    equal(#destinations, 0)
+end)
+
+case("Synthetic floor matching uses a loaded permission square and keeps its original drop point", function(f)
+    local maps = matchingFixture(f)
+    local beans = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {beans}
+    local floor = f.container("floor")
+    maps[floor] = {["Fixture.Beans"] = {f.item(floor, "Beans")}}
+    f.loot.inventoryPane.inventory = floor
+    ISInventoryPage = {GetFloorContainer = function() return floor end}
+    local denied = false
+    isClient = function() return true end
+    SafeHouse = {isSafehouseAllowLoot = function(square)
+        assert(square, "A native synthetic floor has no source-grid parent")
+        return not denied or square ~= f.origin
+    end}
+    equal(floor:getSourceGrid(), nil)
+    assert(f.world:canAccess(floor))
+    local _, targets = f.world:matchingRecords("displayed")
+    local request = {destination = {kind = "matching", targets = targets}}
+    f.player.location = f.far
+    local point = f.world:matchingPoint(request, floor)
+    equal(point.x, 0); equal(point.y, 0); equal(point.z, 0)
+    equal(f.world:destinations(request, beans)[1], floor)
+    denied = true
+    equal(#f.world:destinations(request, beans), 0)
+end)
+
+case("An unloaded matching floor retains a current native handle so the job can return to its point", function(f)
+    local maps = matchingFixture(f)
+    local beans = f.item(f.inventory, "Beans")
+    maps[f.inventory]["Fixture.Beans"] = {beans}
+    local floor = f.container("floor")
+    maps[floor] = {["Fixture.Beans"] = {f.item(floor, "Beans")}}
+    f.loot.inventoryPane.inventory = floor
+    ISInventoryPage = {GetFloorContainer = function() return floor end}
+    local _, targets = f.world:matchingRecords("displayed")
+    f.squares["0:0:0"], f.player.location = nil, f.far
+    local request = {destination = {kind = "matching", targets = targets}}
+    equal(f.world:destinations(request, beans)[1], floor)
+    equal(f.world:matchingPoint(request, floor).x, 0)
+end)
+
+case("Matching record ordering delegates to the native sorter without mutating its input", function(f)
+    matchingFixture(f)
+    local heavy, light = f.item(f.inventory, "Heavy"), f.item(f.inventory, "Light")
+    local records = {{item = heavy}, {item = light}}
+    local calls = 0
+    f.loot.inventoryPane.sortItemsByTypeAndWeight = function(_, items)
+        calls = calls + 1
+        assert(items[1] == heavy and items[2] == light)
+        items[1], items[2] = light, heavy
+    end
+    local ordered = f.world:matchingOrder(records)
+    equal(calls, 1)
+    equal(ordered[1], records[2]); equal(ordered[2], records[1])
+    equal(records[1].item, heavy)
+end)
+
+case("A missing native sorter preserves order while a failing sorter cannot silently fall back", function(f)
+    matchingFixture(f)
+    local records = {{item = f.item(f.inventory, "Beans")}}
+    equal(f.world:matchingOrder(records), records)
+    f.loot.inventoryPane.sortItemsByTypeAndWeight = function() error("Native sorting failed") end
+    local ordered, err = f.world:matchingOrder(records)
+    equal(ordered, nil)
+    assert(err:find("matching-transfer order", 1, true))
+end)
+
+case("Unavailable native matching rules or failed maps cannot broaden the selected transfer", function(f)
+    matchingFixture(f)
+    local records = f.world:records(f.inventory, true)
+    ISInventoryWindowControlHandler_TransferSameType = nil
+    local targets, err = f.world:matchingTargets("displayed", records)
+    equal(targets, nil); assert(err:find("unavailable", 1, true))
+    matchingFixture(f)
+    ISInventoryWindowControlHandler_TransferSameType.getItemsTable = function() error("Native source map failed") end
+    targets, err = f.world:matchingTargets("displayed", records)
+    equal(targets, nil); assert(err:find("could not read", 1, true))
+end)
+
+ISInventoryWindowControlHandler_TransferSameType = matchingGlobals.rules
+getPlayerLoot, ISInventoryPage, SafeHouse = matchingGlobals.loot, matchingGlobals.inventoryPage, matchingGlobals.safeHouse
 getCell, instanceof, isClient = saved.getCell, saved.instanceof, saved.isClient
 ISInventoryPaneContextMenu, getTextOrNull = saved.ISInventoryPaneContextMenu, saved.getTextOrNull
 getVehicleById = saved.getVehicleById

@@ -114,3 +114,19 @@ The user reported scrolling text clipping and asked for clearer workflows, visua
 "also check latest run. It kind of bugged out and stopped"
 
 "It's because I'm at the limit of 14/14 but really the limit is 50. It shouldn't matter that we're at the normal limit. Over-encumberance is fine. Check the ACTUAL upper hard carry limit when computing, (might change server to server but I think 50 is default). Using code to check is ideal"
+
+## Optional quick actions, Smart Load and matching toolbar
+
+"I think it's a bit clunky too for several quick actions having to preview and then approve jobs. Maybe whenever we see this, there's a checkbox that you can tick to not see the preview again? Like if I want to get all items from a container to my bag via conext menu I want it to just work, not see a preview and then hit approve and all."
+
+"Also, would love a mode when transferring to "My inventory" where it's Smart Load or similar. I love right nowt hat you can choose individuals, but smart load just loads all of your containers first and THEN your main inventory. You can make it even smarter however you see fit and apply this logic wherever it makes sense to too!"
+
+"I think the first part of what I said is related to the bin reviews too so something to consider generally"
+
+"For quick cleanup shouldn't we just disable them? It's a context menu quick option"
+
+"maybe we should just make all of them optional"
+
+"also naturally add another icon next to the "Transfer items of matching types to nearby containers" and "Transfer items of matching types to the displayed container". Make the icons similar to those ones and make them next to their respective ones. Inspect how they work since they can appear situationally as ours should. The idea is that the second button next to each transfers from ALL of our containers to displayed (matching items) or ALL of our containers to all nearby containers (matching items). Like:"
+
+`<theirs> <ours> <theirs> <ours>`
