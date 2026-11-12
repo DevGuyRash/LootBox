@@ -1090,4 +1090,14 @@ test("install registers a native rebindable F7 action without duplicating existi
     assert(#keyBinding == 3 and keyBinding[3].key == 211)
 end)
 
+test("capacity-dependent bag setup uses its own warning status in the job review", function(f)
+    local plan = {moves = {{itemName = "Plank", from = "Crate", to = "Carried storage after bag setup", status = "Recheck after bag setup"}},
+        skipped = {}, warnings = {}}
+    local window = reviewWindow(f, plan, {}, request("inventory"))
+    local row = window.rows.items[1].item.segments
+    assert(row[1].text == "Plank" and row[1].tone == "item")
+    assert(row[2].text == "After bag setup" and row[2].tone == "warning")
+    assert(row[3].text:find("Carried storage after bag setup", 1, true) and row[3].tone == "text")
+end)
+
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")
