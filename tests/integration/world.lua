@@ -696,15 +696,27 @@ local function near(actual, expected)
     assert(math.abs(actual - expected) < 0.000001, "Expected " .. tostring(expected) .. ", got " .. tostring(actual))
 end
 
-case("Character carrying reports native weighted mass and the normal HUD limit", function(f)
-    function f.player:getInventoryWeight() return 12.5 end
-    function f.player:getMaxWeight() return 15 end
+case("Character carrying uses native weighted mass and the live hard capacity instead of comfort", function(f)
+    function f.player:getInventoryWeight() error("HUD weight is not native admission") end
+    function f.player:getMaxWeight() error("Comfort is not native admission") end
     function f.inventory:getCapacityWeight() return 12.5 end
-    function f.inventory:getMaxWeight() return 15 end
+    function f.inventory:getMaxWeight() error("Comfort is not native admission") end
     f.inventory.capacity = 50
     local mass, maximum = f.world:carrying()
     equal(mass, 12.5)
-    equal(maximum, 15)
+    equal(maximum, 50)
+    f.inventory.capacity = 75
+    local changedMass, changedMaximum = f.world:carrying()
+    equal(changedMass, 12.5)
+    equal(changedMaximum, 75)
+end)
+
+case("Native unlimited carry has no finite budget even when its reported weight is zero", function(f)
+    function f.player:isUnlimitedCarry() return true end
+    function f.inventory:getCapacityWeight() return 0 end
+    local mass, maximum = f.world:carrying()
+    equal(mass, 0)
+    equal(maximum, math.huge)
 end)
 
 case("Main inventory and an unequipped outer bag add the full incoming weight", function(f)
@@ -756,7 +768,7 @@ case("Carried rearrangement subtracts the source contribution before adding the 
     assert(f.world:carryDelta(fromBag, f.remote) <= 0, "Unloading carried contents cannot increase character mass")
 end)
 
-case("Carried storage prefers actual weight reduction and keeps bag traversal optional", function(f)
+case("Carried bags remain destinations when source-bag searching is disabled and main inventory is last", function(f)
     local weak, weakStorage = weightedBag(f, f.inventory, "Equipped shoulder bag", 50)
     local strong, strongStorage = weightedBag(f, f.inventory, "Equipped backpack", 80)
     local _, unusedStorage = weightedBag(f, f.inventory, "Unequipped bag", 90)
@@ -765,11 +777,29 @@ case("Carried storage prefers actual weight reduction and keeps bag traversal op
     local destinations = assert(f.world:destinations({includeBags = true, destination = {kind = "inventory"}}, selected))
     equal(destinations[1], strongStorage)
     equal(destinations[2], weakStorage)
-    equal(destinations[3], f.inventory)
-    equal(destinations[4], unusedStorage)
-    local main = assert(f.world:destinations({includeBags = false, destination = {kind = "inventory"}}, selected))
-    equal(#main, 1)
-    equal(main[1], f.inventory)
+    equal(destinations[3], unusedStorage)
+    equal(destinations[4], f.inventory)
+    local noSourceBags = assert(f.world:destinations({includeBags = false, destination = {kind = "inventory"}}, selected))
+    equal(#noSourceBags, 4)
+    equal(noSourceBags[1], strongStorage)
+    equal(noSourceBags[2], weakStorage)
+    equal(noSourceBags[3], unusedStorage)
+    equal(noSourceBags[4], f.inventory)
+end)
+
+case("Zero-reduction and nested carried bags precede main inventory on equal carry cost", function(f)
+    local outer, outerStorage = weightedBag(f, f.inventory, "Zero-reduction backpack", 0)
+    outer.equipped = true
+    local _, innerStorage = weightedBag(f, outerStorage, "Nested bag", 90)
+    local _, spareStorage = weightedBag(f, f.inventory, "Spare bag", 90)
+    local selected = weightedItem(f, f.remote, 1)
+    local destinations = assert(f.world:destinations({includeBags = false, destination = {kind = "inventory"}}, selected))
+    equal(#destinations, 4)
+    local bags = {[outerStorage] = true, [innerStorage] = true, [spareStorage] = true}
+    for index = 1, 3 do assert(bags[destinations[index]], "Every carried bag must precede main inventory") end
+    equal(destinations[4], f.inventory)
+    local repeated = assert(f.world:destinations({includeBags = false, destination = {kind = "inventory"}}, selected))
+    for index = 1, 4 do equal(repeated[index], destinations[index]) end
 end)
 
 case("A live replacement bin cannot inherit inspection or an active target identity", function(f)

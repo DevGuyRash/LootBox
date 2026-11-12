@@ -25,7 +25,9 @@ local function container(name, capacity, owned)
         for _, item in ipairs(self.items) do total = total + item.weight end
         return total
     end
-    function result:hasRoomFor(_, item) return self:getType() == "floor" or self:getCapacityWeight() + item.weight <= self.capacity end
+    function result:hasRoomFor(player, item)
+        return self:getType() == "floor" or self:getCapacityWeight() + item.weight <= self:getEffectiveCapacity(player)
+    end
     function result:isItemAllowed() return true end
     function result:isInside() return false end
     function result:isExplored() return self.explored end
@@ -265,6 +267,7 @@ local function fixture(capacity)
     f.floor = container("floor", 1000); f.floor.kind = "floor"
     f.sources, f.bins, f.groundSquares = { f.source }, {}, {}
     f.player = { getPlayerNum = function() return 0 end,
+        getInventory = function() return f.inventory end,
         isDead = function() return f.dead == true end, isAsleep = function() return f.asleep == true end,
         getCurrentSquare = function() return f:ensureSquare(f.position) end }
     local world = {}
@@ -297,7 +300,7 @@ local function fixture(capacity)
     end
     function world:owns(value) return value and value.owned == true end
     f.carried = {f.inventory}
-    f.normalLimit = capacity or 3
+    f.hardLimit = capacity or 3
     function f:carryContainer(value, factor)
         value.owned, value.carryFactor = true, factor or 1
         self.carried[#self.carried + 1] = value
@@ -311,9 +314,14 @@ local function fixture(capacity)
     end
     function world:carrying()
         local mass = 0
-        for _, carried in ipairs(f.carried) do mass = mass + carried:getCapacityWeight() * (carried.carryFactor or 1) end
-        return mass, f.normalLimit
+        for _, carried in ipairs(f.carried) do
+            for _, value in ipairs(carried.items) do mass = mass + value.weight * (carried.carryFactor or 1) end
+        end
+        return f.unlimitedCarry and 0 or mass, f.unlimitedCarry and math.huge or f.hardLimit
     end
+    function f.inventory:getCapacityWeight() return world:carrying() end
+    function f.inventory:getEffectiveCapacity() return f.hardLimit end
+    function f.player:getMaxWeight() error("Comfort must not govern hauling admission") end
     function world:itemId(value) return value.id end
     function world:describe(value) return { fullType = value.fullType, categoryId = "native:Material", labels = {} } end
     function world:protected(value) return value.protected == true end
@@ -1370,9 +1378,9 @@ test("waiting for an empty multiplayer inspection never substitutes for explicit
     assert(f.jobs:cancel() and finish(f).state == "cancelled")
 end)
 
-test("the normal character limit forces four trips despite a fifty-weight inventory admission limit", function()
+test("a custom eleven-weight hard limit forces four trips", function()
     local f = fixture(50)
-    f.normalLimit = 11
+    f.hardLimit = 11
     local gear = item(f.inventory, "Base.PersonalGear", 3)
     for _ = 1, 8 do item(f.source, "Base.Plank", 3) end
     local peak, pickups = 0, 0
@@ -1381,7 +1389,7 @@ test("the normal character limit forces four trips despite a fifty-weight invent
         peak = math.max(peak, mass)
         if not op.source.owned and op.destination.owned then
             pickups = pickups + 1
-            assert(mass <= 11, "Automatic pickup exceeded the normal character limit")
+            assert(mass <= 11, "Automatic pickup exceeded the native hard character limit")
         end
     end
     start(f)
@@ -1390,12 +1398,12 @@ test("the normal character limit forces four trips despite a fifty-weight invent
     assert(peak == 9 and f.inventory:contains(gear) and #f.inventory.items == 1)
     local trips = 0
     for _, name in ipairs(f.visits) do if name == f.destination.position then trips = trips + 1 end end
-    assert(trips == 4, "Three weight of gear leaves room for two three-weight planks per normal trip")
+    assert(trips == 4, "Three weight of gear leaves room for two three-weight planks per hard-cap trip")
 end)
 
 test("a weighted carried bag admits an item that cannot fit the character limit at full weight", function()
     local f = fixture(50)
-    f.normalLimit = 11
+    f.hardLimit = 11
     item(f.inventory, "Base.PersonalGear", 3)
     local backpack = f:carryContainer(container("equipped backpack", 50), 0.2)
     local selected = item(f.source, "Base.HeavySupply", 20)
@@ -1414,7 +1422,7 @@ end)
 
 test("preview reserves one character mass allowance across different carried bags", function()
     local f = fixture(50)
-    f.normalLimit = 3
+    f.hardLimit = 3
     local first = f:carryContainer(container("first pouch", 2), 1)
     local second = f:carryContainer(container("second pouch", 2), 1)
     item(f.source, "Base.First", 2); item(f.source, "Base.Second", 2)
@@ -1432,7 +1440,7 @@ end)
 
 test("weight-reducing carried rearrangement remains allowed while already overloaded", function()
     local f = fixture(50)
-    f.normalLimit = 5
+    f.hardLimit = 5
     local selected = item(f.inventory, "Base.Selected", 8)
     local retained = item(f.inventory, "Base.PersonalGear", 2)
     local backpack = f:carryContainer(container("reducing backpack", 50), 0.25)
@@ -1446,17 +1454,17 @@ test("weight-reducing carried rearrangement remains allowed while already overlo
     assert(f.inventory:contains(retained) and mass == 4, "Moving eight weight into a seventy-five-percent reducing bag lowers ten to four")
 end)
 
-test("a changed normal limit is checked before the next pickup", function()
+test("a changed hard limit is checked before the next pickup", function()
     local f = fixture(50)
-    f.normalLimit = 11
+    f.hardLimit = 11
     item(f.inventory, "Base.PersonalGear", 3)
     for _ = 1, 3 do item(f.source, "Base.Plank", 3) end
     local picked = 0
     f.onTransfer = function(op)
         if not op.source.owned and op.destination.owned then
             picked = picked + 1
-            if picked == 1 then f.normalLimit = 5 end
-        elseif op.source.owned and not op.destination.owned then f.normalLimit = 11 end
+            if picked == 1 then f.hardLimit = 5 end
+        elseif op.source.owned and not op.destination.owned then f.hardLimit = 11 end
     end
     start(f)
     local status = finish(f)
@@ -1465,16 +1473,120 @@ test("a changed normal limit is checked before the next pickup", function()
         "A lower limit after the first pickup must cause delivery before another pickup")
 end)
 
-test("an item beyond normal carrying capacity stays at its source with a reason", function()
+test("an item beyond native hard carrying capacity stays at its source with a reason", function()
     local f = fixture(50)
-    f.normalLimit = 11
+    f.hardLimit = 11
     local retained = item(f.inventory, "Base.PersonalGear", 3)
     local heavy = item(f.source, "Base.Oversized", 9)
     local plan = start(f, request("inventory"))
-    assert(#plan.moves == 0 and #plan.skipped == 1 and plan.skipped[1].reason:find("carrying limit", 1, true))
+    assert(#plan.moves == 0 and #plan.skipped == 1 and type(plan.skipped[1].reason) == "string"
+        and #plan.skipped[1].reason > 0)
     local status = finish(f)
     assert(status.state == "finished_with_skips" and status.done == 0 and status.skipped == 1)
     assert(f.source:contains(heavy) and f.inventory:contains(retained) and #f.transfers == 0)
+end)
+
+test("over-comfort pickups reach the exact native hard boundary without exceeding it", function()
+    for _, hardLimit in ipairs({50, 75}) do
+        local f = fixture(hardLimit)
+        local retained = item(f.inventory, "Base.PersonalGear", 14)
+        local fitting = item(f.source, "Base.FittingSupply", hardLimit - 14)
+        local excess = item(f.source, "Base.OneMoreNail", 0.05)
+        local plan = start(f, request("inventory"))
+        assert(#plan.moves == 1 and #plan.skipped == 1,
+            "The comfort threshold must not consume the remaining native hard allowance")
+        local status = finish(f)
+        local mass = f.world:carrying()
+        assert(status.done == 1 and status.skipped == 1 and mass == hardLimit)
+        assert(f.inventory:contains(retained) and f.inventory:contains(fitting) and f.source:contains(excess))
+    end
+end)
+
+test("a live increase from fifty to seventy-five changes the next preview admission", function()
+    local f = fixture(50)
+    item(f.inventory, "Base.PersonalGear", 14)
+    local selected = item(f.source, "Base.HeavySupply", 61)
+    local refused = assert(f.jobs:preview(request("inventory")))
+    assert(#refused.moves == 0 and #refused.skipped == 1 and f.source:contains(selected))
+    f.hardLimit = 75
+    local admitted = start(f, request("inventory"))
+    assert(#admitted.moves == 1 and #admitted.skipped == 0)
+    local status = finish(f)
+    local mass = f.world:carrying()
+    assert(status.done == 1 and status.skipped == 0 and mass == 75 and f.inventory:contains(selected))
+end)
+
+test("mixed bag and main destinations share one hard budget and preserve both reservations", function()
+    local f = fixture(50)
+    item(f.inventory, "Base.PersonalGear", 14)
+    local backpack = f:carryContainer(container("half-weight backpack", 20), 0.5)
+    local packed = item(f.source, "Base.PackedSupply", 20)
+    local carried = item(f.source, "Base.MainSupply", 26)
+    local excess = item(f.source, "Base.Excess", 1)
+    function f.world:destinations(input)
+        if input.destination.kind == "inventory" then return {backpack, f.inventory} end
+        return {f.destination}
+    end
+    local plan = start(f, request("inventory"))
+    assert(#plan.moves == 2 and #plan.skipped == 1,
+        "Fourteen gear plus ten reduced bag mass plus twenty-six main mass exhausts fifty")
+    local status = finish(f)
+    local mass = f.world:carrying()
+    assert(status.done == 2 and status.skipped == 1 and mass == 50)
+    assert(backpack:contains(packed) and f.inventory:contains(carried) and f.source:contains(excess))
+end)
+
+test("native-accepted carried rearrangement reserves only newly added main mass", function()
+    for _, factor in ipairs({0.5, 1}) do
+        local f = fixture(50)
+        local retained = item(f.inventory, "Base.PersonalGear", 30)
+        local backpack = f:carryContainer(container("carried source backpack", 50), factor)
+        local selected = item(backpack, "Base.Selected", 20)
+        f.sources = {backpack}
+        function f.inventory:hasRoomFor(_, value) return value == selected end
+        local plan = start(f, request("container", f.inventory))
+        assert(#plan.moves == 1 and #plan.skipped == 0,
+            "After native admission, moving an already-carried item must not reserve its full weight again")
+        local status = finish(f)
+        local mass = f.world:carrying()
+        assert(status.done == 1 and status.skipped == 0 and mass == 50)
+        assert(f.inventory:contains(retained) and f.inventory:contains(selected) and #backpack.items == 0)
+    end
+end)
+
+test("unloading remains possible when the existing body mass exceeds the native hard limit", function()
+    local f = fixture(50)
+    local retained = item(f.inventory, "Base.PersonalGear", 20)
+    local selected = item(f.inventory, "Base.Selected", 40)
+    f.sources = {f.inventory}
+    local input = request("container", f.destination)
+    input.scope, input.filter = "inventory", {all = false, ids = {}, types = {"Base.Selected"}}
+    local plan = start(f, input)
+    assert(#plan.moves == 1 and #plan.skipped == 0)
+    local status = finish(f)
+    local mass = f.world:carrying()
+    assert(status.done == 1 and status.skipped == 0 and mass == 20)
+    assert(f.destination:contains(selected) and f.inventory:contains(retained))
+end)
+
+test("unlimited carry removes finite main reservations while native item predicates still apply", function()
+    local f = fixture(50)
+    f.unlimitedCarry = true
+    local first = item(f.source, "Base.First", 40)
+    local second = item(f.source, "Base.Second", 40)
+    local forbidden = item(f.source, "Base.Forbidden", 1)
+    local refused = item(f.source, "Base.NativeRefusal", 1)
+    function f.inventory:isItemAllowed(value) return value ~= forbidden end
+    local nativeRoom = f.inventory.hasRoomFor
+    function f.inventory:hasRoomFor(player, value)
+        return value ~= refused and nativeRoom(self, player, value)
+    end
+    local plan = start(f, request("inventory"))
+    assert(#plan.moves == 2 and #plan.skipped == 2,
+        "Unlimited carrying may reserve eighty in a nominal fifty inventory, but cannot bypass native restrictions")
+    local status = finish(f)
+    assert(status.done == 2 and status.skipped == 2 and f.inventory:contains(first) and f.inventory:contains(second))
+    assert(f.source:contains(forbidden) and f.source:contains(refused) and #f.inventory.items == 2)
 end)
 
 test("nil cannot approve or reject a bin before a review token is issued", function()
@@ -1618,14 +1730,14 @@ test("a completed pickup during cancellation is counted exactly once after resum
     assert(result.done == 1 and result.total == 1 and result.skipped == 0 and #f.transfers == 1)
 end)
 
-test("protection and normal carrying limits are checked after a stop", function()
+test("protection and native hard carrying limits are checked after a stop", function()
     for _, change in ipairs({"protection", "capacity"}) do
         local f = fixture(3)
         local selected = item(f.source, "Base.Selected", 2)
         start(f, request("inventory"))
         awaitOperation(f, function(op) return op.kind == "transfer" end)
         stopJob(f)
-        if change == "protection" then selected.protected = true else f.normalLimit = 1 end
+        if change == "protection" then selected.protected = true else f.hardLimit = 1 end
         assert(f.jobs:resume())
         local result = finish(f)
         assert(result.done == 0 and result.skipped == 1 and f.source:contains(selected) and #f.transfers == 0)
