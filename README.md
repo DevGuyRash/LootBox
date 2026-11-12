@@ -6,7 +6,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 ## Install locally
 
-Extract the built `LootBox-0.5.1.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.6.0.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -14,7 +14,7 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.5.1.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
+The archive is `dist/LootBox-0.6.0.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
 
 ## Start with a workflow
 
@@ -35,6 +35,14 @@ Right-clicking an inventory item offers bulk actions for its exact type and rele
 Every LootBox context entry has a native game icon, including submenu headings, category actions, saved setups, and destination choices. Different actions have distinct symbols. Repeated targets of the same action keep a consistent symbol, while bag-content groups show the bag itself.
 
 Ordinary shortcuts use a compact review with **Adjust setup** to open the full composer. Settings controls the menu entry, individual shortcut groups, confirmation for ordinary quick moves, inline tips, and last-setup reuse. Cleanup always requires a fresh explicit deletion review, even if ordinary quick-move confirmation is disabled.
+
+## Select an exact stack amount
+
+Right-click a stack with at least two items and choose **Select amount...** directly in the normal item context menu. Enter a whole number and confirm. This highlights that many items in the pane you clicked. It starts no transfer or LootBox job. The existing **Inventory and container shortcuts** preference controls the option.
+
+For a partial amount, the stack expands and only the chosen item rows are selected. Drag those highlighted rows, or right-click a highlighted row and use the game's ordinary Take, Put in Container, Drop, or other action. Right-clicking an unselected stack header changes the selection normally. Choosing the whole stack selects its collapsed header. Cancel or Escape leaves the current selection alone. The same workflow applies to carried inventory, bags, loot containers, and visible floor stacks.
+
+Counts and source identity are checked again before selection. A stale stack or changed pane is refused rather than silently selecting different loot or reducing the amount. Larger partial selections use real expanded native rows in that pane. This is a mouse workflow; controller selection is not qualified. LootBox shortcuts named All of this type retain their bulk meaning, so use normal game actions for the highlighted amount.
 
 ## Save a complete setup
 
