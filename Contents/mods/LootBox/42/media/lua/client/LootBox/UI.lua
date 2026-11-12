@@ -1177,7 +1177,7 @@ end
 
 local preferenceRows = {
     { key = "contextMenus", title = "Show LootBox in right-click menus", description = "Turn off the LootBox menu entry entirely. The full manager remains available in Options." },
-    { key = "inventoryShortcuts", title = "Inventory and container shortcuts", description = "Show item actions and container contents actions for looting, emptying onto the floor, sorting, moving, cleanup, and labels. Use a container icon, a bag, or an empty pane." },
+    { key = "inventoryShortcuts", title = "Inventory and container shortcuts", description = "Show item actions, Select amount for stacks, and container contents actions for looting, emptying onto the floor, sorting, moving, cleanup, and labels. Use a container icon, a bag, or an empty pane." },
     { key = "worldShortcuts", title = "World storage, room and area shortcuts", description = "Show container transfers, storage labels, looting, area selection and cleanup in the world." },
     { key = "vehicleShortcuts", title = "Vehicle shortcuts", description = "Show vehicle memory, hauling and storage actions in the relevant context." },
     { key = "categoryShortcuts", title = "Category shortcuts", description = "Offer actions for categories relevant to the item you clicked." },

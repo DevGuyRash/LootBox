@@ -116,6 +116,25 @@ Guides.list = {
         task = "sort-carried",
     },
     {
+        id = "select-amount", title = "Select an exact amount from a stack",
+        summary = "Highlight a chosen number of items, then use the game's normal inventory actions.",
+        prerequisites = "Use the mouse and open an inventory, bag, floor, or loot pane containing at least two items in one stack. Enable Inventory and container shortcuts in Settings.",
+        steps = {
+            "Right-click the stack or one of its expanded item rows and choose Select amount. This option is directly in the item's context menu.",
+            "Enter a whole number from 1 to the shown stack count. Confirm with OK or Enter. Cancel or Escape leaves your selection unchanged.",
+            "A partial amount expands the stack and highlights only that many real items. Large partial amounts expand far enough to include your chosen items. Selecting the whole stack keeps its header selected.",
+            "Drag the highlighted items, or right-click a highlighted item row and choose the normal Take, Put in Container, Drop, or other game action. The same selection works in both inventory and loot panes.",
+            "Check the result in the source and destination. Select amount only changes the highlight; it does not start a LootBox job or move anything by itself.",
+        },
+        expected = "The requested number is highlighted in the pane you clicked. Native actions can use that selection afterward.",
+        troubleshooting = {
+            "No option: the clicked native stack must contain at least two real items and remain visible in a mouse-controlled inventory or loot pane.",
+            "Use a highlighted child row after a partial selection. Right-clicking an unselected stack header normally replaces the selection with that whole stack.",
+            "If the stack or pane changes while the prompt is open, close it and right-click the stack again. Counts are checked again before selecting; amounts are never silently reduced.",
+            "LootBox shortcuts named All of this type still use their stated bulk scope. Use the game's normal actions when you want only the highlighted items.",
+        },
+    },
+    {
         id = "container-contents", title = "Loot, empty, sort, or clean one container",
         summary = "Act on the contents of the exact bag, crate, corpse, or vehicle compartment you click.",
         prerequisites = "Enable Inventory and container shortcuts in Settings. Open an accessible container in the inventory or loot window. For sorting, label destination storage first. Cleanup needs an accessible native trash can and multiplayer TrashDeleteAll permission.",

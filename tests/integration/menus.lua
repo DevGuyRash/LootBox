@@ -88,6 +88,16 @@ local App = {
     end,
 }
 package.loaded["LootBox/App"] = App
+local selectionInstalls = 0
+package.loaded["LootBox/Selection"] = {
+    install = function() selectionInstalls = selectionInstalls + 1 end,
+    capture = function(playerIndex, items)
+        current.selectionCapture = {playerIndex = playerIndex, items = items}
+        return current.selectionTarget
+    end,
+    open = function(target) current.selectionOpened = target end,
+    attach = function(pane) current.selectionAttached = pane end,
+}
 local Menus = require "LootBox/Menus"
 local Guides = require "LootBox/Guides"
 local interface = {
@@ -1031,6 +1041,42 @@ test("pooled menu options switch between bag and native storage images without s
             assert(storage.iconTexture == choice[2] and storage.itemForTexture == nil)
         end
     end
+end)
+
+test("an eligible amount action is top-level and opens the exact captured native stack", function(f)
+    f.selectionTarget = {pane = f.inventoryPage.inventoryPane, marker = "exact clicked stack"}
+    local items = {{items = {f.apple}}}
+    local parent, menu = inventoryMenu(f, items)
+    local amount = needed(parent, "Select amount...")
+    assert(not option(menu, "Select amount..."))
+    assert(amount.iconTexture and amount.iconTexture ~= needed(parent, "LootBox").iconTexture)
+    assert(f.selectionCapture.playerIndex == 0 and f.selectionCapture.items == items)
+    click(parent, "Select amount...")
+    assert(f.selectionOpened == f.selectionTarget and f.quick == nil and f.opened == nil)
+end)
+
+test("amount actions stay hidden for unresolved stacks and disabled shortcut preferences", function(f)
+    local parent = inventoryMenu(f)
+    assert(not option(parent, "Select amount..."))
+    f.selectionTarget = {pane = f.inventoryPage.inventoryPane}
+    f.preferences.inventoryShortcuts = false
+    parent = inventoryMenu(f)
+    assert(not option(parent, "Select amount..."))
+    f.preferences.inventoryShortcuts = true
+    f.preferences.contextMenus = false
+    parent = inventoryMenu(f)
+    assert(not option(parent, "Select amount..."))
+end)
+
+test("selection adapter installation and pane attachment follow native menu lifecycle", function(f)
+    Menus.install(interface)
+    assert(selectionInstalls == 1)
+    registrations.refresh[1](f.lootPage, "begin")
+    assert(f.selectionAttached == nil)
+    registrations.refresh[1](f.lootPage, "end")
+    assert(f.selectionAttached == f.lootPage.inventoryPane)
+    registrations.refresh[1](f.inventoryPage, "end")
+    assert(f.selectionAttached == f.inventoryPage.inventoryPane)
 end)
 
 assert(#failures == 0, table.concat(failures, "\n"))
