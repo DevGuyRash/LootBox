@@ -6,7 +6,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 ## Install locally
 
-Extract the built `LootBox-0.5.0.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.5.1.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -14,7 +14,7 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.5.0.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
+The archive is `dist/LootBox-0.5.1.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop publication and a final product name are separate release steps.
 
 ## Start with a workflow
 
@@ -31,6 +31,8 @@ Help is available from the main menu and in game. Its complete walkthroughs incl
 Right-clicking an inventory item offers bulk actions for its exact type and relevant categories, Keep for that copy, item tags, and category creation. Right-click a container icon in either inventory pane, a bag item, or an empty pane to work on its contents. These shortcuts offer looting or unpacking, emptying onto the floor, sorting into labeled storage, cleanup, moving to another visible container or your remembered vehicle, storage labels, and the full item/category composer. The clicked container stays the source even if another container is selected. Bag-content actions live under **Contents of <bag name>**, separate from actions on the bag itself. A world container offers the same contents workflows and carried-item transfers. Floor context offers room, building, reach, and area workflows. Vehicle context offers memory, hauling, and compartment labels. Saved setups are available in the context menu when you have created them. The original game and other mods' menu entries remain available.
 
 **Empty contents onto floor here** moves eligible contents to your current floor location without deleting them. **Clean contents...** hauls eligible contents to a trash can and requires the existing deletion review. **Sort contents...** uses category labels on destination storage; label your storage first, then review any unmatched or full destinations. For a carried bag, **Unpack contents to main inventory...** targets main inventory rather than distributing items back into bags. Nested contents are included by default and can be disabled through **Adjust setup**. The source container itself is never part of its contents selection.
+
+Every LootBox context entry has a native game icon, including submenu headings, category actions, saved setups, and destination choices. Different actions have distinct symbols. Repeated targets of the same action keep a consistent symbol, while bag-content groups show the bag itself.
 
 Ordinary shortcuts use a compact review with **Adjust setup** to open the full composer. Settings controls the menu entry, individual shortcut groups, confirmation for ordinary quick moves, inline tips, and last-setup reuse. Cleanup always requires a fresh explicit deletion review, even if ordinary quick-move confirmation is disabled.
 

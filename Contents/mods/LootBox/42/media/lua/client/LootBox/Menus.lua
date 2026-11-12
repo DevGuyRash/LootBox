@@ -7,6 +7,39 @@ local Guides = require "LootBox/Guides"
 local Menus = {}
 local interface
 local containerCallbacks = setmetatable({}, { __mode = "k" })
+local iconPaths = {
+    root = "media/ui/LootableMaps/map_lightbulb.png",
+    manager = "media/ui/LootableMaps/map_door.png",
+    help = "media/ui/LootableMaps/map_book.png",
+    settings = "media/ui/LootableMaps/map_gears.png",
+    saved = "media/ui/LootableMaps/map_vhs.png",
+    runSetup = "media/ui/LootableMaps/map_arroweast.png",
+    loot = "media/ui/LootableMaps/map_arrowsoutheast.png",
+    unpack = "media/ui/inventoryPanes/TakeSameTypeOneContainer.png",
+    drop = "media/ui/LootableMaps/map_arrowsouth.png",
+    sort = "media/ui/Entity/BTN_Swap_Icon_48x48.png",
+    move = "media/ui/LootableMaps/map_arrowsouthwest.png",
+    store = "media/ui/inventoryPanes/TransferSameTypeOneContainer.png",
+    vehicle = "media/ui/LootableMaps/map_steeringwheel.png",
+    clean = "media/ui/LootableMaps/map_garbage.png",
+    choose = "media/ui/craftingMenus/Icon_List.png",
+    label = "Item_Pencil",
+    vehicleLabels = "Item_Clipboard",
+    categories = "media/ui/craftingMenus/Icon_Grid.png",
+    customCategories = "media/ui/LootableMaps/map_star.png",
+    createCategory = "media/ui/Entity/BTN_Plus_Icon_48x48.png",
+    keep = "media/ui/LootableMaps/map_lock.png",
+    tag = "media/ui/Entity/icon_link_io.png",
+    find = "media/ui/Search_Icon_Off.png",
+    reach = "media/ui/LootableMaps/map_eye.png",
+    room = "media/ui/LootableMaps/map_house.png",
+    building = "media/ui/LootableMaps/map_skyscraper.png",
+    area = "media/ui/LootableMaps/map_target.png",
+    delete = "media/ui/LootableMaps/map_exclamation.png",
+    sortCarried = "media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",
+    rememberVehicle = "media/ui/LootableMaps/map_key.png",
+    contents = "media/ui/Container_Crate.png",
+}
 
 local function call(object, method, ...)
     if not object then return nil end
@@ -34,17 +67,27 @@ local function tooltip(option, title, description)
     option.toolTip = tip
 end
 
-local function add(menu, title, action, description, unavailable, icon)
+local function add(menu, iconRole, title, action, description, unavailable)
+    local iconPath = assert(iconPaths[iconRole], "Unknown LootBox context icon: " .. tostring(iconRole))
     local option = menu:addOption(title, nil, action)
     if not option then return nil end
     option.notAvailable = unavailable ~= nil
     if unavailable or description then tooltip(option, title, unavailable or description) end
-    if icon and getTexture then option.iconTexture = getTexture("media/ui/LootableMaps/" .. icon .. ".png") end
+    option.iconTexture = getTexture(iconPath)
     return option
 end
 
-local function submenu(menu, title, icon)
-    local option = add(menu, title, nil, nil, nil, icon)
+local function submenu(menu, iconRole, title, container)
+    local option = add(menu, iconRole, title)
+    if iconRole == "contents" and container then
+        local item = call(container, "getContainingItem")
+        if item then
+            option.iconTexture, option.itemForTexture = nil, item
+        else
+            local texture = ContainerButtonIcons and ContainerButtonIcons[call(container, "getType")]
+            if texture then option.iconTexture = texture end
+        end
+    end
     local child = ISContextMenu:getNew(menu)
     menu:addSubMenu(option, child)
     child.lootBoxSources, child.lootBoxCommon = {}, false
@@ -55,7 +98,7 @@ local function rootMenu(parent)
     for _, option in ipairs(parent.options or {}) do
         if option.name == "LootBox" and option.lootBoxMenu then return option.lootBoxMenu end
     end
-    local option = add(parent, "LootBox", nil, nil, nil, "map_lightbulb")
+    local option = add(parent, "root", "LootBox")
     local menu = ISContextMenu:getNew(parent)
     parent:addSubMenu(option, menu)
     option.lootBoxMenu = menu
@@ -160,21 +203,21 @@ local function common(menu, playerIndex, context, app, preferences)
     menu.lootBoxCommon = true
     local setups, problem = app:getSetups()
     if preferences.savedShortcuts and setups and #setups.presets > 0 then
-        local saved = submenu(menu, "Saved setups", "map_vhs")
+        local saved = submenu(menu, "saved", "Saved setups")
         for _, preset in ipairs(setups.presets) do
             local id, name = preset.id, preset.name
-            add(saved, name, function()
+            add(saved, "runSetup", name, function()
                 local setup, err = app:loadSetup(id, context)
                 if not setup then open(playerIndex, context, "compose", err); return end
                 quick(playerIndex, context, setup, setup.scope == "area" and not setup.area)
             end, "Run " .. name .. " with freshly bound targets. Cleanup always requires a new review.")
         end
     end
-    add(menu, "Open LootBox", function() open(playerIndex, context, "home", problem) end,
-        "Open common workflows, saved setups, the detailed composer, and current progress.", nil, "map_lightbulb")
-    add(menu, "Workflow help", function() open(playerIndex, context, "help") end,
-        "Read complete walkthroughs for looting, labels and sorting, nested bags, vehicles, cleanup, and reusable setups.", nil, "map_exclamation")
-    add(menu, "Settings", function() open(playerIndex, context, "settings") end,
+    add(menu, "manager", "Open LootBox", function() open(playerIndex, context, "home", problem) end,
+        "Open common workflows, saved setups, the detailed composer, and current progress.")
+    add(menu, "help", "Workflow help", function() open(playerIndex, context, "help") end,
+        "Read complete walkthroughs for looting, labels and sorting, nested bags, vehicles, cleanup, and reusable setups.")
+    add(menu, "settings", "Settings", function() open(playerIndex, context, "settings") end,
         "Choose which context shortcuts appear, quick-move confirmation, tips, and remembered setups.")
 end
 
@@ -264,30 +307,30 @@ local function containerActions(menu, playerIndex, context, app)
         quick(playerIndex, target, action)
     end
     if source ~= inventory then
-        add(menu, carried and "Unpack contents to main inventory..." or "Loot contents...", function()
+        add(menu, carried and "unpack" or "loot", carried and "Unpack contents to main inventory..." or "Loot contents...", function()
             move(carried and "container" or "inventory", carried and inventory or nil)
         end, carried and ("Move eligible contents of " .. name .. " into your main inventory. The bag itself stays where it is.")
-            or ("Take eligible contents of " .. name .. " into your carried storage. Other open containers are excluded."), nil, "map_arrowsoutheast")
+            or ("Take eligible contents of " .. name .. " into your carried storage. Other open containers are excluded."))
     end
     if call(source, "getType") ~= "floor" then
-        add(menu, "Empty contents onto floor here...", function() move("floor") end,
+        add(menu, "drop", "Empty contents onto floor here...", function() move("floor") end,
             "Place eligible contents of " .. name .. " on the floor at your current position. Nothing is deleted and the container stays in place.")
     end
-    add(menu, "Sort contents...", function() move("labels") end,
+    add(menu, "sort", "Sort contents...", function() move("labels") end,
         "Move eligible contents of " .. name .. " to storage with matching category labels. Unmatched or protected items stay with a reason.")
-    local moveMenu = submenu(menu, "Move contents to", "map_arrowsouthwest")
+    local moveMenu = submenu(menu, "move", "Move contents to")
     for _, entry in ipairs(visibleContainers(playerIndex, source)) do
         local destination = entry.container
         if not (carried and source ~= inventory and destination == inventory) then
-            add(moveMenu, entry.name .. "...", function() move("container", destination) end,
+            add(moveMenu, "store", entry.name .. "...", function() move("container", destination) end,
                 "Move eligible contents of " .. name .. " into " .. entry.name .. ". Icon positions count from the top of the named sidebar. Review access and capacity before starting.")
         end
     end
-    add(moveMenu, "My remembered vehicle...", function() move("vehicle") end,
-        "Haul eligible contents of " .. name .. " to your remembered car, using trunk storage before available seats.", nil, "map_steeringwheel")
-    add(menu, "Clean contents...", function() move("trash") end,
-        "Haul eligible contents of " .. name .. " to real trash cans for deletion. The source container stays in place. Existing bin contents require fresh approval.", nil, "map_exclamation")
-    add(menu, "Choose items and categories...", function()
+    add(moveMenu, "vehicle", "My remembered vehicle...", function() move("vehicle") end,
+        "Haul eligible contents of " .. name .. " to your remembered car, using trunk storage before available seats.")
+    add(menu, "clean", "Clean contents...", function() move("trash") end,
+        "Haul eligible contents of " .. name .. " to real trash cans for deletion. The source container stays in place. Existing bin contents require fresh approval.")
+    add(menu, "choose", "Choose items and categories...", function()
         local action, target = setup(source == inventory and "labels" or (carried and "container" or "inventory"),
             carried and source ~= inventory and inventory or nil)
         action.filter = { ids = {}, types = {}, all = false }
@@ -296,11 +339,11 @@ local function containerActions(menu, playerIndex, context, app)
     end, "Open Actions with " .. name .. " as the source. Narrow the selection, change the destination, or choose whether to search inside bags.")
     if storage(source) then
         if source ~= inventory then
-            add(menu, "Put carried items in " .. name .. "...", function()
+            add(menu, "store", "Put carried items in " .. name .. "...", function()
                 quick(playerIndex, context, request("inventory", "container", allItems(), context))
             end, "Move eligible carried items into this exact container. Review the selection, protection, and capacity before starting.")
         end
-        add(menu, "Label this container...", function()
+        add(menu, "label", "Label this container...", function()
             local target = routeContext(context)
             target.labelKind = "container"
             open(playerIndex, target, "labels")
@@ -311,19 +354,19 @@ end
 local function typeActions(menu, playerIndex, context, app, filter, suffix)
     local exactType = #filter.types > 0
     if not context.carried then
-        add(menu, "Take all " .. suffix, function() quick(playerIndex, context, request("container", "inventory", filter, context)) end,
-            "Take eligible matches from the clicked source into carried storage. Review includes nested contents when enabled.", nil, "map_arrowsoutheast")
+        add(menu, "loot", "Take all " .. suffix, function() quick(playerIndex, context, request("container", "inventory", filter, context)) end,
+            "Take eligible matches from the clicked source into carried storage. Review includes nested contents when enabled.")
     end
     local target = context.targetContainer or context.container
     if storage(target) then
-        add(menu, (exactType and "Put all of this type in " or "Put carried " .. suffix .. " in ") .. containerName(target), function()
+        add(menu, "store", (exactType and "Put all of this type in " or "Put carried " .. suffix .. " in ") .. containerName(target), function()
             quick(playerIndex, context, request("inventory", "container", filter, context))
-        end, "Move eligible carried matches, including nested bags, to this named container.", nil, "map_arrowsouthwest")
+        end, "Move eligible carried matches, including nested bags, to this named container.")
     end
-    add(menu, exactType and "Drop all of this type here" or "Drop carried " .. suffix .. " here", function()
+    add(menu, "drop", exactType and "Drop all of this type here" or "Drop carried " .. suffix .. " here", function()
         quick(playerIndex, context, request("inventory", "floor", filter, context))
     end, "Place eligible carried matches on the clicked or current floor tile. This is an explicit floor destination.")
-    add(menu, exactType and "Sort this item type" or "Sort carried " .. suffix, function()
+    add(menu, "sort", exactType and "Sort this item type" or "Sort carried " .. suffix, function()
         quick(playerIndex, context, request("inventory", "labels", filter, context))
     end, "Move eligible carried matches to loaded storage with matching labels. Items without a destination remain with a reason.")
 end
@@ -331,7 +374,7 @@ end
 local function categoryActions(menu, playerIndex, context, app)
     local item = context.item
     local nativeId = Catalog.categoryId(item)
-    local categories = submenu(menu, "Category: " .. categoryName(nativeId))
+    local categories = submenu(menu, "categories", "Category: " .. categoryName(nativeId))
     typeActions(categories, playerIndex, context, app, filterForCategory(nativeId), categoryName(nativeId))
     local matches = {}
     local descriptor = app.world:describe(item)
@@ -339,7 +382,7 @@ local function categoryActions(menu, playerIndex, context, app)
         if app.world.graph:matches(definition.id, descriptor) then matches[#matches + 1] = definition end
     end
     if #matches > 0 then
-        local custom = submenu(menu, "My matching categories")
+        local custom = submenu(menu, "customCategories", "My matching categories")
         for index = 1, math.min(6, #matches) do
             local definition = matches[index]
             local id, name = definition.id, definition.name
@@ -348,7 +391,8 @@ local function categoryActions(menu, playerIndex, context, app)
                 title = storage(context.targetContainer) and ("Put carried " .. name .. " in " .. containerName(context.targetContainer))
                     or ("Sort carried " .. name)
             end
-            add(custom, title, function()
+            local iconRole = context.carried and (storage(context.targetContainer) and "store" or "sort") or "loot"
+            add(custom, iconRole, title, function()
                 local destination = context.carried and (storage(context.targetContainer) and "container" or "labels") or "inventory"
                 local scope = context.carried and "inventory" or "container"
                 quick(playerIndex, context, request(scope, destination, filterForCategory(id), context))
@@ -356,7 +400,7 @@ local function categoryActions(menu, playerIndex, context, app)
                 or "Take matches from this source using this custom category.")
         end
         if #matches > 6 then
-            add(custom, "More categories in Actions...", function() open(playerIndex, context, "compose") end,
+            add(custom, "choose", "More categories in Actions...", function() open(playerIndex, context, "compose") end,
                 "Open the full category picker; the context menu keeps only a short list.")
         end
     end
@@ -365,19 +409,19 @@ end
 local function itemMenu(menu, playerIndex, context, app, preferences)
     typeActions(menu, playerIndex, context, app, filterForType(context.item), "of this type")
     if preferences.categoryShortcuts then categoryActions(menu, playerIndex, context, app) end
-    local keep = add(menu, "Keep this copy", function()
+    local keep = add(menu, "keep", "Keep this copy", function()
         local ok, err = app:protect(context.item, not app:isKept(context.item))
         if not ok then context.labelKind = "item"; open(playerIndex, context, "labels", err) end
-    end, "Protect only this copy from automatic movement and deletion. Turn this off to make it eligible again.", nil, "map_lock")
+    end, "Protect only this copy from automatic movement and deletion. Turn this off to make it eligible again.")
     menu:setOptionChecked(keep, app:isKept(context.item))
-    add(menu, "Tag this copy...", function()
+    add(menu, "tag", "Tag this copy...", function()
         context.labelKind = "item"
         open(playerIndex, context, "labels")
     end, "Add only this particular copy to custom or native categories. Keep is managed alongside its tags.")
-    add(menu, "Create a category with this type...", function() open(playerIndex, context, "categories") end,
+    add(menu, "createCategory", "Create a category with this type...", function() open(playerIndex, context, "categories") end,
         "Start a custom category containing every copy of this item type. You can add more items and nested categories.")
     if storage(context.targetContainer) then
-        add(menu, "Label " .. containerName(context.targetContainer) .. "...", function()
+        add(menu, "label", "Label " .. containerName(context.targetContainer) .. "...", function()
             context.container, context.labelKind = context.targetContainer, "container"
             open(playerIndex, context, "labels")
         end, "Choose which categories belong in the currently selected storage container.")
@@ -389,51 +433,51 @@ local function worldActions(menu, playerIndex, context, app)
     local square = player:getCurrentSquare()
     local room = call(square, "getRoom")
     local building = call(square, "getBuilding")
-    local loot = submenu(menu, "Loot supplies", "map_pill")
-    add(loot, "Within reach...", function()
+    local loot = submenu(menu, "find", "Loot supplies")
+    add(loot, "reach", "Within reach...", function()
         quick(playerIndex, context, request("reach", "inventory", app:getChecklist(), context))
     end, "Inspect reachable sources and collect your checklist. Choose supplies first if no checklist is saved.")
-    local function workflow(title, taskId, area, unavailable)
-        add(loot, title, function()
+    local function workflow(iconRole, title, taskId, area, unavailable)
+        add(loot, iconRole, title, function()
             local setup, err = Guides.prepare(taskId, app, context)
             if not setup then open(playerIndex, context, "compose", err); return end
             quick(playerIndex, context, setup, area)
         end, "Collect your checklist; choose supplies first if none is saved.", unavailable)
     end
-    workflow("Current room...", "loot-room", false, not room and "Stand inside the room, or choose an area." or nil)
-    add(loot, "Current building...", function()
+    workflow("room", "Current room...", "loot-room", false, not room and "Stand inside the room, or choose an area." or nil)
+    add(loot, "building", "Current building...", function()
         quick(playerIndex, context, request("building", "inventory", app:getChecklist(), context))
     end, "Walk and inspect your building section by section across its floors. Blocked and unloaded sections remain reported as unsearched.",
         not building and "Stand inside the building, or choose an area." or nil)
-    workflow("Select an area...", "loot-area", true)
-    local clean = submenu(menu, "Clean and delete", "map_exclamation")
-    add(clean, "Clean current room...", function()
+    workflow("area", "Select an area...", "loot-area", true)
+    local clean = submenu(menu, "delete", "Clean and delete")
+    add(clean, "room", "Clean current room...", function()
         quick(playerIndex, context, request("room", "trash", allItems(), context))
     end, "Select all unprotected items in the current room. Carried items are excluded. Review includes existing bin contents.",
         not room and "Stand inside the room, or use Clean an area." or nil)
-    add(clean, "Clean current building...", function()
+    add(clean, "building", "Clean current building...", function()
         quick(playerIndex, context, request("building", "trash", allItems(), context))
     end, "Search this building across its floors, then haul unprotected items to eligible trash cans. Carried items are excluded. Deletion needs a fresh review.",
         not building and "Stand inside the building, or choose an area." or nil)
-    add(clean, "Clean an area...", function()
+    add(clean, "area", "Clean an area...", function()
         quick(playerIndex, context, request("area", "trash", allItems(), context), true)
     end, "Choose two corners on the current floor, then review unprotected items and whole-bin deletion contents.")
-    add(menu, "Sort my carried items...", function()
+    add(menu, "sortCarried", "Sort my carried items...", function()
         quick(playerIndex, context, request("inventory", "labels", allItems(), context))
     end, "Route eligible carried and nested-bag contents to matching labeled storage. Keep and favorites stay protected.")
 end
 
 local function vehicleActions(menu, playerIndex, context, app)
-    add(menu, "Remember this vehicle", function()
+    add(menu, "rememberVehicle", "Remember this vehicle", function()
         local ok, err = app:rememberVehicle(context.vehicle)
         if not ok then open(playerIndex, context, "labels", err) end
-    end, "Use this loaded vehicle as the destination for future hauling setups. The native key association and model are checked again.", nil, "map_steeringwheel")
-    add(menu, "Haul my checklist to this vehicle...", function()
+    end, "Use this loaded vehicle as the destination for future hauling setups. The native key association and model are checked again.")
+    add(menu, "vehicle", "Haul my checklist to this vehicle...", function()
         local setup = request("inventory", "vehicle", app:getChecklist(), context)
         setup.destination.ref = context.vehicle
         quick(playerIndex, context, setup)
     end, "Move your selected supplies into this car, preferring trunk then available seat storage. Choose supplies in Actions if no checklist is saved.")
-    add(menu, "Label this vehicle's storage...", function()
+    add(menu, "vehicleLabels", "Label this vehicle's storage...", function()
         context.labelKind = "container"
         open(playerIndex, context, "labels")
     end, "Choose a storage compartment and assign the categories it should accept.")
@@ -461,7 +505,7 @@ function Menus.inventoryMenu(playerIndex, parent, items)
         if native(item, "InventoryContainer") then
             local contents = item:getInventory()
             if contents then
-                local child = submenu(menu, "Contents of " .. containerName(contents))
+                local child = submenu(menu, "contents", "Contents of " .. containerName(contents), contents)
                 containerActions(child, playerIndex, containerContext(playerIndex, contents), app)
             end
         end
@@ -546,7 +590,7 @@ function Menus.worldMenu(playerIndex, parent, objects, test)
         for _, container in ipairs(context.containers) do
             local source = container
             local target = containerContext(playerIndex, source)
-            local contents = #context.containers > 1 and submenu(menu, "Contents of " .. names[source]) or menu
+            local contents = #context.containers > 1 and submenu(menu, "contents", "Contents of " .. names[source], source) or menu
             containerActions(contents, playerIndex, target, app)
         end
     end
