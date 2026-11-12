@@ -84,3 +84,9 @@ The user reported scrolling text clipping and asked for clearer workflows, visua
 ## Context-menu icons
 
 "can we please add icons for all places for lootbox? not just some? I mean in context menus. Ideally they fit the option/action too! I like the ones you've made so far! They fit zomboid perfectly. Though I don't think we should have duplicates"
+
+## Stack amount selection
+
+"ALSO another thing I wanted is to add th ability to "take X amount" so you can right click a stack and "Take X amount" or similar. Doesn't have to be inside of the lootbox menu. Just added as a conditional one when right clicking an item. then you can type an amount and it only takes that much. Same with when putting into containers. Not sure how to pull that one off! Maybe select X amount is better for both directions?"
+
+"then it just selects them and the user can do whatever they want next"

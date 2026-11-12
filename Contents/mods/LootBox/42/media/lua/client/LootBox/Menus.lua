@@ -4,6 +4,7 @@ require "ISUI/ISToolTip"
 local App = require "LootBox/App"
 local Catalog = require "LootBox/Catalog"
 local Guides = require "LootBox/Guides"
+local Selection = require "LootBox/Selection"
 local Menus = {}
 local interface
 local containerCallbacks = setmetatable({}, { __mode = "k" })
@@ -39,6 +40,7 @@ local iconPaths = {
     sortCarried = "media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",
     rememberVehicle = "media/ui/LootableMaps/map_key.png",
     contents = "media/ui/Container_Crate.png",
+    selectAmount = "media/ui/LootableMaps/map_checkmark.png",
 }
 
 local function call(object, method, ...)
@@ -488,6 +490,13 @@ function Menus.inventoryMenu(playerIndex, parent, items)
     if not preferences.contextMenus or not menuAllowed(playerIndex) then return end
     local app, item = App.get(playerIndex), selectedItem(items)
     if not app or not item then return end
+    if preferences.inventoryShortcuts then
+        local selection = Selection.capture(playerIndex, items)
+        if selection then
+            add(parent, "selectAmount", "Select amount...", function() Selection.open(selection) end,
+                "Choose how many items to highlight in this stack, then drag or right-click the highlighted rows for a normal game action.")
+        end
+    end
     local player = getSpecificPlayer(playerIndex)
     local source = item:getContainer()
     local carried = app.world:owns(source)
@@ -534,6 +543,7 @@ end
 
 function Menus.refreshContainers(page, phase)
     if phase ~= "end" then return end
+    Selection.attach(page.inventoryPane)
     for _, button in ipairs(page.backpacks or {}) do
         local previous = button.onRightMouseDown
         if previous and previous ~= containerCallbacks[button] then
@@ -602,6 +612,7 @@ end
 function Menus.install(ui)
     if interface then return end
     interface = ui
+    Selection.install()
     Events.OnFillInventoryObjectContextMenu.Add(Menus.inventoryMenu)
     LuaEventManager.AddEvent("OnFillInventoryContextMenuNoItems")
     Events.OnFillInventoryContextMenuNoItems.Add(Menus.inventoryBackgroundMenu)
