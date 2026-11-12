@@ -142,3 +142,9 @@ The user reported scrolling text clipping and asked for clearer workflows, visua
 "should also be smart enough to know to put similar items in all containers too nad not just a single one."
 
 For this continuation the user again explicitly waived Claude: "no claude for this." They also requested "also use [@pstack:poteto-agent](subagent://pstack:poteto-agent)".
+
+## Condense grouping and Workshop publication
+
+"Does Condense also keep similar items together across bags when optimizing? If not, please make it do that too while still prioritizing weight reduction."
+
+"Then, please publish the mod using the SteamWorkshop after in ~/repos"

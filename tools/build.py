@@ -32,7 +32,7 @@ def build(output: Path) -> Path:
                 raise RuntimeError(f"Missing client module {module} required by {path.relative_to(ROOT)}")
         subprocess.run([compiler, "-p", str(path)], check=True, timeout=30)
     output.mkdir(parents=True, exist_ok=True)
-    archive = output / "LootBox-0.9.0.zip"
+    archive = output / "LootBox-0.9.1.zip"
     hashes = {}
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
         for path in files:
@@ -40,7 +40,7 @@ def build(output: Path) -> Path:
             data = path.read_bytes()
             package.writestr(relative, data)
             hashes[relative] = hashlib.sha256(data).hexdigest()
-    manifest = {"modId": "LootBox", "version": "0.9.0", "scripts": len(scripts), "files": hashes,
+    manifest = {"modId": "LootBox", "version": "0.9.1", "scripts": len(scripts), "files": hashes,
                 "archiveSha256": hashlib.sha256(archive.read_bytes()).hexdigest()}
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"Built {archive} ({len(scripts)} client modules)")
