@@ -278,7 +278,7 @@ Guides.list = {
         steps = {
             "Press Condense before Transfer All in the inventory footer. It always uses main inventory and eligible bags, independently of which pane you are viewing.",
             "The default Pack main inventory mode tries loose items by raw weight, heaviest first, and prefers bags with the best actual equipped reduction that can accept each item. Existing bag contents are not rearranged.",
-            "Enable Condense: optimize bag contents in Settings for a deeper pass. It also considers moving contents between bags and useful multi-item exchanges. Bag objects themselves stay in place, and Condense never equips a bag or drops an item on the floor.",
+            "Enable Condense: optimize bag contents in Settings for a deeper pass. It also considers moving contents between bags and useful multi-item exchanges. Weight reduction comes first; at equal carried weight it groups matching types into fewer bags. Bag objects themselves stay in place, and Condense never equips a bag or drops an item on the floor.",
             "Leave Include unequipped bags off when those bags are loot you want kept intact. Enable it only when their contents and available storage may participate. An unequipped bag's printed reduction does not lower its actual carried contents weight.",
             "Include nested contents is a separate choice. A nested pouch inside an equipped outer bag uses the outer bag's actual reduction, rather than multiplying the printed percentages.",
             "Quick Condense follows the ordinary transfer-review and quick Progress preferences. An optional review shows its first arrangement estimate; later arrangements are checked as the job runs. Condense settings opens the relevant Settings section.",
@@ -287,7 +287,7 @@ Guides.list = {
         },
         expected = "Pack mode reduces main-inventory clutter using available bags. Optimize searches for a useful reachable improvement, without promising the global optimum. Keep, favorite, equipped, held, attached and recovery-reserved items remain protected.",
         troubleshooting = {
-            "Two bags already full by raw weight gain nothing from exchanging equal total weight. Condense avoids that churn.",
+            "Exchanging equal total weight does not reduce encumbrance. Optimize can still make that exchange when it groups matching types without increasing carried weight.",
             "Example: a 90%-reduction bag of capacity 10 holds six one-weight items, and a 50%-reduction bag holds one eight-weight item. If native working space permits it, moving four light items out and the heavy item in changes their contribution from 4.6 to 3.0. That saves 1.6 encumbrance.",
             "Example: main inventory holds items weighing 9, 8 and 2, and a 90%-reduction bag has capacity 10. Heavy-first packing takes the 9. A deeper arrangement can replace it with 8 + 2, reducing the contribution from 10.9 to 10.0.",
             "A better final arrangement can still be unreachable. Native transfers may require room for the incoming raw weight before the reduction applies. If the legal intermediate moves cannot fit, Condense leaves that exchange undone.",

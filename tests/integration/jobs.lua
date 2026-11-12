@@ -2698,4 +2698,122 @@ test("Smart Take unwanted exclusion survives preview and final native dispatch c
     assert(#ordinary.moves == 2, "Only Smart Take's explicit unwanted policy changes selection")
 end)
 
+test("Condense packing groups with protected seeds among equally reducing bags", function()
+    local f = condenseFixture()
+    local empty = f:addBag("AlphaEmpty", 10, 0.5)
+    local matching = f:addBag("ZetaMatching", 10, 0.5)
+    local seed = item(matching, "Test.Match", 1)
+    seed.protected = true
+    local selected = item(f.inventory, "Test.Match", 2)
+    f:startCondense()
+    local status = finish(f)
+    assert(status.state == "finished" and #f.transfers == 1 and empty:isEmpty())
+    assert(matching:contains(seed) and matching:contains(selected) and f.transfers[1].item == selected)
+    assert(math.abs(f.world:carrying() - 1.5) < 0.0001)
+end)
+
+test("Condense consolidates split pairs without an immediate reduction in type locations", function()
+    local f = condenseFixture()
+    local first = f:addBag("First", 10, 0.5)
+    local second = f:addBag("Second", 10, 0.5)
+    for _ = 1, 2 do item(first, "Test.Match", 1); item(second, "Test.Match", 1) end
+    f:startCondense({rebalance = true})
+    local status = finish(f)
+    assert(status.state == "finished" and math.abs(f.world:carrying() - 2) < 0.0001)
+    assert((#first.items == 4 and second:isEmpty()) or (#second.items == 4 and first:isEmpty()))
+    local count = #f.transfers
+    f:startCondense({rebalance = true})
+    assert(finish(f).state == "finished" and #f.transfers == count)
+end)
+
+test("Condense groups equal-weight full bags across Pause and Resume without later churn", function()
+    local f = condenseFixture()
+    local first = f:addBag("First", 2, 0.5)
+    local second = f:addBag("Second", 2, 0.5)
+    item(first, "Test.A", 1); item(first, "Test.B", 1)
+    item(second, "Test.A", 1); item(second, "Test.B", 1)
+    f.holdTransferResult = true
+    f:startCondense({rebalance = true})
+    for _ = 1, 100 do tick(f); if #f.transfers == 1 then break end end
+    assert(#f.transfers == 1)
+    f.completeDuringCancel = true
+    assert(f.jobs:pause())
+    assert(awaitState(f, "paused").canResume)
+    f.holdTransferResult = false
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished" and status.condense.buffered == 0)
+    assert(#first.items == 2 and #second.items == 2)
+    assert(first.items[1].fullType == first.items[2].fullType)
+    assert(second.items[1].fullType == second.items[2].fullType and first.items[1].fullType ~= second.items[1].fullType)
+    assert(math.abs(f.world:carrying() - 2) < 0.0001 and math.abs(status.condense.saved) < 0.0001)
+    local count = #f.transfers
+    f:startCondense({rebalance = true})
+    assert(finish(f).state == "finished" and #f.transfers == count)
+end)
+
+test("Condense uses native clothing aliases when grouping with a protected seed", function()
+    local previous = ISInventoryWindowControlHandler_TransferSameType
+    ISInventoryWindowControlHandler_TransferSameType = {getItemsTable = function(_, source)
+        local map = {}
+        for _, value in ipairs(source.items) do
+            map[value.fullType] = map[value.fullType] or {}
+            map[value.fullType][#map[value.fullType] + 1] = value
+            if value.alias then
+                map[value.alias] = map[value.alias] or {}
+                map[value.alias][#map[value.alias] + 1] = value
+            end
+        end
+        return map
+    end}
+    local f = condenseFixture()
+    local first = f:addBag("First", 10, 0.5)
+    local second = f:addBag("Second", 10, 0.5)
+    local seed = item(first, "Test.SleevesDown", 1)
+    seed.alias, seed.protected = "Test.SleevesUp", true
+    local selected = item(second, "Test.SleevesUp", 1)
+    f:startCondense({rebalance = true})
+    local status = finish(f)
+    ISInventoryWindowControlHandler_TransferSameType = previous
+    assert(status.state == "finished" and #f.transfers == 1 and f.transfers[1].item == selected)
+    assert(first:contains(seed) and first:contains(selected) and second:isEmpty())
+    assert(f.world:carrying() == 1)
+end)
+
+test("Condense prefers even tiny reduction gains and rejects tiny increases for grouping", function()
+    local f = condenseFixture()
+    local stronger = f:addBag("AlphaStronger", 10, 0.10)
+    local matching = f:addBag("ZetaMatching", 10, 0.11)
+    local seed = item(matching, "Test.Match", 1)
+    seed.protected = true
+    local selected = item(f.inventory, "Test.Match", 0.001)
+    f:startCondense()
+    assert(finish(f).state == "finished" and stronger:contains(selected) and matching:contains(seed))
+    assert(#f.transfers == 1 and math.abs(f.world:carrying() - 0.1101) < 0.0000001)
+    f:startCondense({rebalance = true})
+    assert(finish(f).state == "finished" and #f.transfers == 1 and stronger:contains(selected))
+end)
+
+test("Condense rejects a grouping exchange with a tiny positive net mass delta", function()
+    local f = condenseFixture()
+    local stronger = f:addBag("Stronger", 3, 0.5)
+    local weaker = f:addBag("Weaker", 4, 0.50001)
+    local firstA = item(stronger, "Test.A", 2)
+    local firstB = item(stronger, "Test.B", 1)
+    local secondA = item(weaker, "Test.A", 2)
+    local secondB = item(weaker, "Test.B", 1)
+    f:startCondense({rebalance = true})
+    assert(finish(f).state == "finished" and #f.transfers == 0)
+    assert(stronger:contains(firstA) and stronger:contains(firstB) and weaker:contains(secondA) and weaker:contains(secondB))
+    assert(math.abs(f.world:carrying() - 3.00003) < 0.0000001)
+    weaker.carryFactor = 0.5
+    f:startCondense({rebalance = true})
+    assert(finish(f).state == "finished")
+    assert(stronger:contains(firstB) and stronger:contains(secondB) and weaker:contains(firstA) and weaker:contains(secondA))
+    assert(math.abs(f.world:carrying() - 3) < 0.0000001)
+    local count = #f.transfers
+    f:startCondense({rebalance = true})
+    assert(finish(f).state == "finished" and #f.transfers == count)
+end)
+
 print("PASS " .. tests .. " Jobs integration scenarios")

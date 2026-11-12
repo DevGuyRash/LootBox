@@ -26,15 +26,51 @@ local function copy(values)
     return result
 end
 local function clone(state)
+    local groups = {}
+    for key, counts in pairs(state.groups) do
+        groups[key] = {}
+        for node, count in pairs(counts) do groups[key][node] = count end
+    end
     return {at = copy(state.at), used = copy(state.used), mass = state.mass,
-        mainMass = state.mainMass, mainCount = state.mainCount}
+        mainMass = state.mainMass, mainCount = state.mainCount,
+        groups = groups, spread = state.spread, groupPairs = state.groupPairs}
 end
 local function better(a, b)
-    if a.mass < b.mass - EPS then return true end
-    if math.abs(a.mass - b.mass) > EPS then return false end
+    if a.mass ~= b.mass then return a.mass < b.mass end
     if a.mainMass < b.mainMass - EPS then return true end
     if math.abs(a.mainMass - b.mainMass) > EPS then return false end
-    return a.mainCount < b.mainCount
+    if a.mainCount ~= b.mainCount then return a.mainCount < b.mainCount end
+    if a.spread ~= b.spread then return a.spread < b.spread end
+    return a.groupPairs > b.groupPairs
+end
+
+local function matchingKeys(container)
+    local byItem = {}
+    local rules = ISInventoryWindowControlHandler_TransferSameType
+    if rules and type(rules.getItemsTable) == "function" then
+        local ok, map = pcall(rules.getItemsTable, rules, container)
+        if ok and type(map) == "table" then
+            for key, items in pairs(map) do
+                for _, item in ipairs(items) do
+                    byItem[item] = byItem[item] or {}
+                    byItem[item][key] = true
+                end
+            end
+        end
+    end
+    return byItem
+end
+
+local function groupChanges(state, keys, source, destination)
+    local spread, pairDelta = 0, 0
+    for _, key in ipairs(keys) do
+        local counts = state.groups[key]
+        local from, to = counts and counts[source] or 0, counts and counts[destination] or 0
+        if from == 1 then spread = spread - 1 end
+        if to == 0 then spread = spread + 1 end
+        pairDelta = pairDelta + to - from + 1
+    end
+    return spread, pairDelta
 end
 local function descendants(nodes, child, ancestor)
     while child and child ~= 1 do
@@ -64,15 +100,30 @@ local function capture(self)
     local nodes = {{key = "main", ref = main, factor = 1, capacity = math.huge, used = 0, parent = nil, rawGate = true}}
     local byContainer, seenContainers, seenItems = {[main] = 1}, {}, {}
     local items, protected, bagCount = {}, 0, 0
+    local groups, spread, groupPairs = {}, 0, 0
     local fingerprint = {}
     local function scan(container, node, root)
         if seenContainers[container] then return nil, "Carried bag nesting is cyclic or ambiguous" end
         seenContainers[container] = true
         local values = container:getItems()
+        local aliases = matchingKeys(container)
         for index = 0, values:size() - 1 do
             local item = values:get(index)
             if not seenItems[item] then
                 seenItems[item] = true
+                local keys = {}
+                local types = aliases[item] or {}
+                types[tostring(item:getFullType())] = true
+                for key in pairs(types) do keys[#keys + 1] = key end
+                table.sort(keys)
+                for _, key in ipairs(keys) do
+                    groups[key] = groups[key] or {}
+                    local count = groups[key][node] or 0
+                    if count == 0 then spread = spread + 1 end
+                    groupPairs = groupPairs + count
+                    groups[key][node] = count + 1
+                end
+                fingerprint[#fingerprint + 1] = itemKey(item) .. ":" .. nodes[node].key .. ":" .. table.concat(keys, ",")
                 if isBag(item) then
                     local inside = call(item, "getInventory")
                     local equipped = call(player, "isEquipped", item) == true or call(item, "isFakeEquipped", player) == true
@@ -102,7 +153,7 @@ local function capture(self)
                     elseif self.options.rebalance or node == 1 then
                         local weight = math.max(0, item:getUnequippedWeight())
                         local entry = {key = itemKey(item), id = item:getID(), fullType = tostring(item:getFullType()),
-                            ref = item, weight = weight, start = node, name = tostring(item:getName())}
+                            ref = item, weight = weight, start = node, name = tostring(item:getName()), groups = keys}
                         items[#items + 1] = entry
                         fingerprint[#fingerprint + 1] = entry.key .. ":" .. nodes[node].key .. ":" .. numericKey(weight)
                     end
@@ -117,7 +168,8 @@ local function capture(self)
         if math.abs(a.weight - b.weight) > EPS then return a.weight > b.weight end
         return a.key < b.key
     end)
-    local state = {at = {}, used = {}, mass = current, mainMass = 0, mainCount = 0}
+    local state = {at = {}, used = {}, mass = current, mainMass = 0, mainCount = 0,
+        groups = groups, spread = spread, groupPairs = groupPairs}
     for index, node in ipairs(nodes) do state.used[index] = node.used end
     for index, item in ipairs(items) do
         state.at[index] = item.start
@@ -186,6 +238,13 @@ end
 
 local function apply(self, state, step)
     local item = self.items[step.item]
+    local spread, pairDelta = groupChanges(state, item.groups, step.source, step.destination)
+    state.spread, state.groupPairs = state.spread + spread, state.groupPairs + pairDelta
+    for _, key in ipairs(item.groups) do
+        local counts = state.groups[key]
+        counts[step.source] = counts[step.source] - 1
+        counts[step.destination] = (counts[step.destination] or 0) + 1
+    end
     state.at[step.item] = step.destination
     for node, value in pairs(step.changes) do state.used[node] = state.used[node] + value end
     state.mass = state.mass + step.delta
@@ -193,12 +252,13 @@ local function apply(self, state, step)
     if step.destination == 1 then state.mainMass, state.mainCount = state.mainMass + item.weight, state.mainCount + 1 end
 end
 
-local function directAllowed(self, state, item, destination)
-    local source = state.at[item]
-    if source == destination then return false end
-    if not self.options.rebalance and source ~= 1 then return false end
-    return self.nodes[destination].factor < self.nodes[source].factor - EPS
-        or (source == 1 and self.nodes[destination].factor <= 1 + EPS)
+local function scoreMove(self, state, step)
+    local item = self.items[step.item]
+    local fromMain, toMain = step.source == 1 and 1 or 0, step.destination == 1 and 1 or 0
+    local spread, pairDelta = groupChanges(state, item.groups, step.source, step.destination)
+    return {mass = step.delta, mainMass = state.mainMass + (toMain - fromMain) * item.weight,
+        mainCount = state.mainCount + toMain - fromMain,
+        spread = state.spread + spread, groupPairs = state.groupPairs + pairDelta}
 end
 
 local function beginDirect(self, state, steps)
@@ -209,16 +269,27 @@ local function directTick(self, direct, budget)
     local spent = 0
     while direct.item <= #self.items and spent < budget do
         local item, destination = direct.item, self.destinations[direct.destination]
-        if not destination then direct.item, direct.destination, spent = direct.item + 1, 1, spent + 1
+        if not destination then
+            if direct.best then
+                direct.steps[#direct.steps + 1] = direct.best
+                apply(self, direct.state, direct.best)
+                direct.added = direct.added + 1
+            end
+            direct.item, direct.destination, spent = direct.item + 1, 1, spent + 1
+            direct.best, direct.bestScore = nil, nil
         else
             spent = spent + 1
-            local step = directAllowed(self, direct.state, item, destination) and self:legal(direct.state, item, destination)
-            if step then
-                direct.steps[#direct.steps + 1] = step
-                apply(self, direct.state, step)
-                direct.added = direct.added + 1
-                direct.item, direct.destination = direct.item + 1, 1
-            else direct.destination = direct.destination + 1 end
+            local source = direct.state.at[item]
+            local step = (self.options.rebalance or source == 1) and self:legal(direct.state, item, destination)
+            if step and step.delta <= 0 then
+                local score = scoreMove(self, direct.state, step)
+                local baseline = {mass = 0, mainMass = direct.state.mainMass, mainCount = direct.state.mainCount,
+                    spread = direct.state.spread, groupPairs = direct.state.groupPairs}
+                if better(score, baseline) and (not direct.bestScore or better(score, direct.bestScore)) then
+                    direct.best, direct.bestScore = step, score
+                end
+            end
+            direct.destination = direct.destination + 1
         end
     end
     if direct.item <= #self.items then return false, spent end
@@ -298,13 +369,30 @@ local function planKey(self, steps)
     return table.concat(parts, "|")
 end
 
+local function arrangementScore(self, state)
+    local mass, mainMass, mainCount = 0, 0, 0
+    for index, item in ipairs(self.items) do
+        local node = state.at[index]
+        mass = mass + item.weight * self.nodes[node].factor
+        if node == 1 then mainMass, mainCount = mainMass + item.weight, mainCount + 1 end
+    end
+    return {mass = mass, mainMass = mainMass, mainCount = mainCount,
+        spread = state.spread, groupPairs = state.groupPairs}
+end
+
 local function candidateBetter(self, candidate, best)
-    if not better(candidate.state, self.state) then return false end
+    local massDelta = 0
+    for index, item in ipairs(self.items) do
+        massDelta = massDelta + item.weight * (self.nodes[candidate.state.at[index]].factor - self.nodes[self.state.at[index]].factor)
+    end
+    if massDelta > 0 then return false end
+    candidate.score = arrangementScore(self, candidate.state)
+    if not better(candidate.score, arrangementScore(self, self.state)) then return false end
     candidate.key = planKey(self, candidate.steps)
     if self.rejectedPlans[candidate.key] then return false end
     if not best then return true end
-    if better(candidate.state, best.state) then return true end
-    if better(best.state, candidate.state) then return false end
+    if better(candidate.score, best.score) then return true end
+    if better(best.score, candidate.score) then return false end
     return #candidate.steps < #best.steps
 end
 
