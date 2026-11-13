@@ -17,6 +17,11 @@ local function actualItems(group)
     return ISInventoryPane.getActualItems({ group })
 end
 
+local function gridView(pane)
+    local views = NeatInventory and NeatInventory.Views
+    if views and views.isGrid(pane) then return views end
+end
+
 local function normalizeSelection(pane, selected)
     local result
     for _, group in ipairs(pane.itemslist or {}) do
@@ -41,6 +46,11 @@ local function revealSelection(pane, state)
     end
     if not first then return end
     local top = math.max(0, (first - 2) * pane.itemHgt)
+    local views = gridView(pane)
+    if views then
+        local y, height = views.itemTop(pane, first)
+        top = math.max(0, y - height - (pane.headerHgt or 0))
+    end
     pane:setYScroll(-math.min(top, math.max(0, pane:getScrollHeight() - pane:getHeight())))
     pane.smoothScrollY, pane.smoothScrollTargetY = nil, nil
 end
@@ -60,12 +70,15 @@ local function invoke(pane, previous, method, ...)
     if scopeDepth == 0 then scopeBase = old end
     scopeDepth = scopeDepth + 1
     ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER = math.max(scopeBase, state.cap or scopeBase)
-    local result = pack(pcall(previous, pane, unpack(args, 1, args.n)))
+    local result = pack(pcall(function()
+        local result = pack(previous(pane, unpack(args, 1, args.n)))
+        if method == "renderdetails" and args[1] == false then revealSelection(pane, state) end
+        return unpack(result, 1, result.n)
+    end))
     ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER = old
     scopeDepth = scopeDepth - 1
     if scopeDepth == 0 then scopeBase = nil end
     if not result[1] then error(result[2], 0) end
-    if method == "renderdetails" and args[1] == false then revealSelection(pane, state) end
     return unpack(result, 2, result.n)
 end
 
@@ -117,7 +130,7 @@ local function groupForRow(pane, row)
 end
 
 local function overPane(pane)
-    local x, y = getMouseXScaled(), getMouseYScaled()
+    local x, y = getMouseX(), getMouseY()
     local left, top = pane:getAbsoluteX(), pane:getAbsoluteY()
     return x >= left and y >= top and x < left + pane:getWidth() and y < top + pane:getHeight()
 end
@@ -170,13 +183,22 @@ function Selection.apply(target, text)
     if count > #members then return nil, "Only " .. tostring(#members) .. " items remain. Choose a smaller amount." end
     local pane, selected = target.pane, {}
     local state = panes[pane]
+    local views = gridView(pane)
+    if count < #members then
+        state.cap = math.max(state.cap or scopeBase or ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER, count + 1)
+    end
+    if views then
+        views.buildItems(pane)
+        for index, row in ipairs(pane.items) do
+            if row == group then views.setOpen(pane, index, count < #members); break end
+        end
+    else
+        pane.collapsed[group.name] = count == #members
+    end
     if count == #members then
-        pane.collapsed[group.name] = true
         selected[group.items[1]] = "group"
     else
-        state.cap = math.max(state.cap or scopeBase or ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER, count + 1)
-        pane.collapsed[group.name] = false
-        for index = 1, count do selected[members[index]] = true end
+        for index = 1, count do selected[members[index]] = "item" end
     end
     pane.selected = {}
     pane:restoreSelection(selected)
