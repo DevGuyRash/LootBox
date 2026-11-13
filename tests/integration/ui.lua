@@ -117,6 +117,7 @@ function Widgets.combo(parent, x, y, width, target, callback, tooltip)
     local widget = control(parent, "", x, y, width, Widgets.H)
     widget.options, widget.selected = {}, 0
     function widget:setToolTipMap(values) self.tooltip = values end
+    function widget:setSelected(index) self.selected = index end
     widget:setToolTipMap({defaultTooltip = tooltip})
     function widget:addOptionWithData(text, data, optionTooltip)
         self.options[#self.options + 1] = {text = text, data = data, tooltip = optionTooltip}
@@ -1427,6 +1428,113 @@ test("a cancelled resumable checkpoint can still start a new quick action when t
     f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
     assert(UI.quickAction(0, {}, request("inventory")) == true)
     assert(f.starts == 1 and f.previews == 1 and not f.progress and not f.opened)
+end)
+
+test("shrinking destination choices selects a visible match and preserves a same-kind choice", function(f)
+    local window = managerWindow(f, "compose", {request = request("inventory")})
+    window.destination:selectData("labels"); window:onDestinationChanged()
+    assert(#window.endpoint.options > 2)
+    window.endpoint:setSelected(3)
+    window.destination:selectData("matching"); window:onDestinationChanged()
+    assert(#window.endpoint.options == 2 and window.endpoint.selected == 1)
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == "nearby")
+    assert(window:readRequest().destination.mode == "nearby")
+    window.endpoint:selectData("displayed"); window:onDestinationChanged()
+    assert(window.endpoint.selected == 2 and window:readRequest().destination.mode == "displayed")
+    assert(f.starts == 0 and f.previews == 0)
+end)
+
+test("saved matching choices restore on a new composer while reflow retains its current choice", function(f)
+    local setup = request("matching")
+    setup.destination.mode = "displayed"
+    local window = managerWindow(f, "compose", {request = setup})
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == "displayed")
+    window.endpoint:selectData("nearby"); window:onDestinationChanged()
+    resize(window, 900, 740)
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == "nearby")
+    window:setRequest(setup); window:show("compose")
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == "displayed")
+    assert(window:readRequest().destination.mode == "displayed" and f.starts == 0)
+end)
+
+test("cross-kind default sentinels cannot override a saved vehicle and same-kind defaults remain selected", function(f)
+    local savedVehicle = {}
+    local previousVehicleMenu = ISVehicleMenu
+    ISVehicleMenu = {getVehicleDisplayName = function(vehicle) assert(vehicle == savedVehicle); return "Saved car" end}
+    f.app.knownVehicles = function() return {savedVehicle} end
+    local setup = request("vehicle")
+    setup.destination.ref = savedVehicle
+    local window = managerWindow(f, "compose", {request = setup})
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == savedVehicle)
+    window.destination:selectData("labels"); window:onDestinationChanged()
+    window.endpoint:selectData(false)
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == false)
+    window.destination:selectData("vehicle"); window:onDestinationChanged()
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == savedVehicle)
+    window.endpoint:selectData(false); window:onDestinationChanged()
+    assert(window.endpoint.selected == 1 and window.endpoint:getOptionData(window.endpoint.selected) == false)
+    assert(window:readRequest().destination.ref == nil and f.starts == 0)
+    ISVehicleMenu = previousVehicleMenu
+end)
+
+test("an empty destination pool stays unselected and cannot create an implicit container target", function(f)
+    local container = {getContainingItem = function() end, getVehiclePart = function() end,
+        getParent = function() end, getType = function() return "crate" end}
+    local setup = request("container")
+    setup.destination.ref = container
+    local window = managerWindow(f, "compose", {request = setup, container = container})
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == container)
+    window.context.container, window.context.targetContainer, window.context.containers = nil, nil, {}
+    window:onDestinationChanged()
+    assert(#window.endpoint.options == 0 and window.endpoint.selected == 0)
+    assert(window.endpoint:getOptionData(window.endpoint.selected) == nil)
+    local chosen, err = window:readRequest()
+    assert(chosen == nil and err:find("destination container", 1, true) and f.starts == 0)
+end)
+
+local function labelContainer(name)
+    return {getContainingItem = function() end, getVehiclePart = function() end,
+        getParent = function() end, getType = function() return name end}
+end
+
+test("changing a third storage target to item tags selects and saves the only item", function(f)
+    local item = {getName = function() return "My hammer" end, getFullType = function() return "Base.Hammer" end}
+    local containers = {labelContainer("cupboard"), labelContainer("shelf"), labelContainer("crate")}
+    f.app.setItemLabels = function(_, target) f.savedTagTarget = target; return true end
+    f.app.protect = function(_, target) f.savedKeepTarget = target; return true end
+    local window = managerWindow(f, "labels", {containers = containers, item = item, labelKind = "container"})
+    window.labelTarget:setSelected(3); window:loadLabels()
+    assert(window.labelTarget:getOptionData(3).ref == containers[3])
+    window.labelKind:selectData("item"); window:fillLabelTargets()
+    local target = window.labelTarget:getOptionData(window.labelTarget.selected)
+    assert(#window.labelTarget.options == 1 and window.labelTarget.selected == 1)
+    assert(target.kind == "item" and target.ref == item and window.saveLabelsButton.enabled)
+    press(window.body, "Save tags and Keep")
+    assert(f.savedTagTarget == item and f.savedKeepTarget == item and f.starts == 0)
+end)
+
+test("same-kind label rebuilding keeps the same storage identity after the pool order changes", function(f)
+    local first, second, third = labelContainer("cupboard"), labelContainer("shelf"), labelContainer("crate")
+    local window = managerWindow(f, "labels", {containers = {first, second, third}, labelKind = "container"})
+    window.labelTarget:setSelected(3); window:loadLabels()
+    window.labelContainers = {second, third, first}
+    window:fillLabelTargets()
+    local target = window.labelTarget:getOptionData(window.labelTarget.selected)
+    assert(window.labelTarget.selected == 2 and target.kind == "container" and target.ref == third)
+    assert(window.saveLabelsButton.enabled and f.starts == 0)
+end)
+
+test("empty label pools disable saving and a later available pool selects its first target", function(f)
+    local first, second, third = labelContainer("cupboard"), labelContainer("shelf"), labelContainer("crate")
+    local window = managerWindow(f, "labels", {containers = {first, second, third}, labelKind = "container"})
+    window.labelTarget:setSelected(3); window:loadLabels()
+    window.labelContainers = {}; window:fillLabelTargets()
+    assert(window.labelTarget.selected == 0 and window.labelTarget:getOptionData(0) == nil)
+    assert(not window.saveLabelsButton.enabled and not window.keep.visible)
+    assert(window.labelCount.text:find("No label target", 1, true))
+    window.labelContainers = {second, first}; window:fillLabelTargets()
+    assert(window.labelTarget.selected == 1 and window.labelTarget:getOptionData(1).ref == second)
+    assert(window.saveLabelsButton.enabled and f.starts == 0)
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")
