@@ -19,8 +19,10 @@ function instanceof(object, class) return type(object) == "table" and object.cla
 function getSpecificPlayer() return current.player end
 function getPlayerInventory() return current.inventoryPage end
 function getPlayerLoot() return current.lootPage end
-function getMouseXScaled() return current.mouseX end
-function getMouseYScaled() return current.mouseY end
+function getMouseX() return current.mouseX end
+function getMouseY() return current.mouseY end
+function getMouseXScaled() return current.mouseX * current.zoom end
+function getMouseYScaled() return current.mouseY * current.zoom end
 function getCore() return {getScreenWidth = function() return 1280 end, getScreenHeight = function() return 900 end} end
 Keyboard = {KEY_ESCAPE = 1}
 ISMouseDrag = {}
@@ -144,9 +146,10 @@ local function updateMembers(value, members)
 end
 local function fixture(count)
     if current then Selection.closeAll() end
+    NeatInventory = nil
     ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER = 50
     ISMouseDrag = {}
-    local f = {mouseX = 20, mouseY = 20, dead = false, joypad = -1}
+    local f = {mouseX = 20, mouseY = 20, zoom = 1, dead = false, joypad = -1}
     f.player = {isDead = function() return f.dead end, getJoypadBind = function() return f.joypad end}
     f.inventory, f.loot = pane(0), pane(400)
     f.inventoryPage, f.lootPage = {inventoryPane = f.inventory}, {inventoryPane = f.loot}
@@ -166,12 +169,51 @@ local function mapSize(value)
     for _ in pairs(value or {}) do count = count + 1 end
     return count
 end
-local function assertExact(p, members, count, marker)
-    assert(mapSize(p.restored) == count)
-    for index, member in ipairs(members) do
-        if index <= count then assert(p.restored[member] == (marker or true))
-        else assert(p.restored[member] == nil) end
+local function assertExact(p, members, count)
+    local selected = {}
+    for _, row in pairs(p.selected) do
+        for _, item in ipairs(ISInventoryPane.getActualItems({row})) do selected[item] = true end
     end
+    assert(mapSize(selected) == count)
+    for index, member in ipairs(members) do
+        assert(selected[member] == (index <= count and true or nil))
+    end
+end
+
+local function grid(p, g)
+    local views = {isGrid = function(pane) return pane == p end}
+    function views.buildItems(pane)
+        assert(pane == p)
+        pane.items = {g}
+        if pane.gridOpen then
+            for index = 1, math.min(#actualByGroup[g], ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER) do
+                pane.items[#pane.items + 1] = actualByGroup[g][index]
+            end
+        end
+    end
+    function views.setOpen(pane, index, open)
+        assert(pane == p and pane.items[index] == g)
+        pane.gridOpen = open
+        views.buildItems(pane)
+    end
+    function views.itemTop(pane, index)
+        assert(pane == p and index == 2)
+        pane.layoutCap = ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER
+        return 80, 20
+    end
+    function p:restoreSelection(selected)
+        self.restored = selected
+        if selected[g.items[1]] == "group" then self.selected[1] = g end
+        if self.gridOpen then
+            for index = 1, math.min(#actualByGroup[g], ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER) do
+                local member = actualByGroup[g][index]
+                if selected[member] == "item" then self.selected[index + 1] = member end
+            end
+        end
+    end
+    p.headerHgt = 20
+    p.hooks.renderdetails = function(pane, dragged) if not dragged then views.buildItems(pane) end end
+    NeatInventory = {Views = views}
 end
 local function lastCap(p, method)
     for index = #p.calls, 1, -1 do if p.calls[index].name == method then return p.calls[index].cap end end
@@ -211,6 +253,17 @@ test("loot bag and floor sources bind the clicked pane rather than the carried p
         f.loot.inventory.kind = kind
         local selected = assert(capture(f, f.loot, f.otherGroup))
         assert(selected.pane == f.loot and selected.inventory == f.loot.inventory)
+    end
+end)
+
+test("stack capture uses UI coordinates independently of camera zoom", function(f)
+    for _, zoom in ipairs({0.5, 1, 1.25, 2}) do
+        f.zoom = zoom
+        for _, source in ipairs({{pane = f.inventory, group = f.group}, {pane = f.loot, group = f.otherGroup}}) do
+            f.mouseX, f.mouseY = source.pane.left + source.pane.width - 20, source.pane.top + 20
+            local selected = assert(Selection.capture(0, {source.group}))
+            assert(selected.pane == source.pane and selected.maxCount == 4)
+        end
     end
 end)
 
@@ -505,6 +558,37 @@ test("native Enter confirms the typed exact amount and Escape cancels even inval
     box = Selection.open(target(f)); box.entry:setText("0")
     box.entry.onOtherKey(box.entry, Keyboard.KEY_ESCAPE)
     assert(box.removed and f.inventory.selected == before)
+end)
+
+test("native grid Enter opens exact children in either pane and preserves their native markers", function()
+    for _, kind in ipairs({"inventory", "loot"}) do
+        local f = fixture(4)
+        local pane = f[kind]
+        local g, members = kind == "inventory" and f.group or f.otherGroup, kind == "inventory" and f.members or f.otherMembers
+        grid(pane, g)
+        local selected = assert(capture(f, pane, g))
+        local box = Selection.open(selected)
+        box.entry:setText("2"); box.entry.onCommandEntered(box.entry)
+        assert(box.removed and pane.gridOpen and pane.collapsed[g.name])
+        assertExact(pane, members, 2)
+        assert(pane.selected[1] == nil)
+        pane.refreshSelection = {[members[1]] = "item", [members[2]] = "item"}
+        pane.selected = {}; pane:refreshContainer()
+        assertExact(pane, members, 2)
+        assert(Selection.apply(selected, "4") and not pane.gridOpen)
+        assert(pane.selected[1] == g and mapSize(pane.selected) == 1)
+    end
+end)
+
+test("large grid partial selection renders its sentinel and reveals actual view coordinates", function()
+    local f = fixture(120)
+    grid(f.inventory, f.group)
+    assert(Selection.apply(target(f), "100"))
+    f.inventory:renderdetails(false)
+    assertExact(f.inventory, f.members, 100)
+    assert(#f.inventory.items == 102 and f.inventory.selected[102] == nil)
+    assert(f.inventory.scroll == -40 and f.inventory.layoutCap == 101)
+    assert(ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER == 50)
 end)
 
 test("invalid prompt values disable native OK and cannot trigger selection through Enter", function(f)
