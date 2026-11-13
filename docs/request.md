@@ -158,3 +158,7 @@ For this continuation the user again explicitly waived Claude: "no claude for th
 ## Remaining-error follow-up
 
 "anything relevant to lootbox, fix. If the others are one-off fixes not related to OUR mods and just gamefiles then have a subagent fix them. Otherwise focus on lootbox. It's published in the workshop too?"
+
+## Matching label spacing
+
+"This looks better! But why is there so much blank space after??"
