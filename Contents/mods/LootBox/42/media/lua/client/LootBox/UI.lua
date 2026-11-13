@@ -661,8 +661,11 @@ function Window:onScopeChanged()
 end
 
 function Window:onDestinationChanged()
+    local previous, previousKind = self.endpoint:getOptionData(self.endpoint.selected), self.endpointKind
     self.endpoint:clear()
+    self.endpoint:setSelected(0)
     local kind = value(self.destination)
+    self.endpointKind = kind
     local matching = kind == "matching"
     if matching then
         if not self.matchingSourceDraft then
@@ -724,6 +727,7 @@ function Window:onDestinationChanged()
         elseif kind == "matching" then self.endpoint:selectData(self.request.destination.mode or "nearby")
         elseif kind == "labels" then self.endpoint:selectData(self.request.destination.labels and self.request.destination.labels[1] or false) end
     end
+    if previousKind == kind and previous ~= nil then self.endpoint:selectData(previous) end
 end
 
 function Window:fillSelectionList()
@@ -1172,7 +1176,9 @@ function Window:buildLabels()
 end
 
 function Window:fillLabelTargets()
+    local previous = value(self.labelTarget)
     self.labelTarget:clear()
+    self.labelTarget:setSelected(0)
     if value(self.labelKind) == "item" and self.context.item then
         self.labelTarget:addOptionWithData(self.context.item:getName(), { kind = "item", ref = self.context.item },
             "Only this copy receives tags or Keep. Use a custom category to select every copy of its type.")
@@ -1180,6 +1186,14 @@ function Window:fillLabelTargets()
         for _, container in ipairs(self.labelContainers) do
             self.labelTarget:addOptionWithData(containerName(container), { kind = "container", ref = container },
                 "Matching items may be routed to this storage container when sorting.")
+        end
+    end
+    if previous then
+        for _, option in ipairs(self.labelTarget.options) do
+            if option.data.kind == previous.kind and option.data.ref == previous.ref then
+                self.labelTarget:selectData(option.data)
+                break
+            end
         end
     end
     self:loadLabels()
