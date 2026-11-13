@@ -250,7 +250,7 @@ local function fixture()
     f.app.resume = function()
         f.resumes = (f.resumes or 0) + 1
         if f.resumeError then return nil, f.resumeError end
-        f.jobStatus.state, f.jobStatus.canResume = "running", false
+        f.jobStatus.state, f.jobStatus.canResume, f.jobStatus.canPreview, f.jobStatus.hasJob = "running", false, false, true
         return true
     end
     f.activeJob, f.paused = {}, true
@@ -1368,6 +1368,82 @@ test("Condense follows the ordinary review setting and can start quietly", funct
     f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
     assert(UI.condense(2) == true and f.starts == 1 and f.condensePreviews == 2 and not f.progress)
     assert(preview.closed and UI.quickWindows[2] == nil)
+end)
+
+test("toolbar continuation resumes paused and cancelled checkpoints before fresh-job eligibility", function(f)
+    for _, state in ipairs({"paused", "cancelled"}) do
+        f.jobStatus = {state = state, hasJob = true, canResume = true, canPreview = state == "cancelled"}
+        local handled, result, err = UI.continueJob(0)
+        assert(handled and result == true and err == nil and f.jobStatus.state == "running")
+    end
+    assert(f.resumes == 2 and f.previews == 0 and f.starts == 0)
+    assert(not f.progress and not f.review and not f.opened)
+end)
+
+test("repeated toolbar continuation leaves active and settling jobs quiet", function(f)
+    for _, state in ipairs({"running", "pausing", "cancelling", "needs_review"}) do
+        f.jobStatus = {state = state, hasJob = true, canResume = false, canPreview = false}
+        for _ = 1, 2 do
+            local handled, result, err = UI.continueJob(0)
+            assert(handled and result == true and err == nil and f.jobStatus.state == state)
+        end
+    end
+    assert(not f.resumes and f.previews == 0 and f.starts == 0 and not f.approvals)
+    assert(not f.progress and not f.review and not f.opened)
+end)
+
+test("toolbar continuation preserves a recovery-blocked checkpoint even when fresh previews are allowed", function(f)
+    f.jobStatus = {state = "failed", hasJob = true, canResume = false, canPreview = true,
+        recovery = {pending = true}}
+    local handled, result = UI.continueJob(0)
+    assert(handled and result == true and not f.resumes and not f.recoveries)
+    assert(f.previews == 0 and f.starts == 0 and not f.progress and not f.review and not f.opened)
+end)
+
+test("a rejected toolbar resume returns its failure without creating a second job or a window", function(f)
+    f.jobStatus = {state = "paused", hasJob = true, canResume = true, canPreview = false}
+    f.resumeError = "Stop aiming before resuming"
+    local handled, result, err = UI.continueJob(0)
+    assert(handled and result == nil and err == f.resumeError and f.resumes == 1)
+    assert(f.jobStatus.state == "paused" and f.previews == 0 and f.starts == 0)
+    assert(not f.progress and not f.review and not f.opened)
+end)
+
+test("toolbar continuation permits a fresh job after idle or terminal states with no checkpoint", function(f)
+    for _, state in ipairs({"idle", "finished", "finished_with_skips", "failed"}) do
+        f.jobStatus = {state = state, hasJob = false, canResume = false, canPreview = true}
+        assert(UI.continueJob(0) == false)
+    end
+    f.jobStatus = {state = "idle", hasJob = false, canResume = false, canPreview = false}
+    assert(UI.continueJob(0) == true)
+    assert(not f.resumes and f.previews == 0 and f.starts == 0 and not f.progress)
+end)
+
+test("continuing a toolbar job releases only its existing LootBox editor focus", function(f)
+    local body, other = {}, {}
+    UI.windows[0], UI.windows[1] = {body = body}, {body = other}
+    f.jobStatus = {state = "running", hasJob = true, canPreview = false}
+    assert(UI.continueJob(0) and f.unfocused == body)
+    assert(UI.windows[0].body == body and UI.windows[1].body == other and not f.progress)
+end)
+
+test("Condense resumes a stopped job and consumes repeated clicks without reoptimizing", function(f)
+    f.jobStatus = {state = "cancelled", hasJob = true, canResume = true, canPreview = true}
+    f.app.previewCondense = function() error("Existing work must not be replaced by Condense") end
+    assert(UI.condense(0) == true and f.resumes == 1)
+    assert(UI.condense(0) == true and f.resumes == 1)
+    assert(f.starts == 0 and not f.progress and not f.review and not f.opened)
+end)
+
+test("Condense returns a resume refusal quietly and preserves a blocked checkpoint", function(f)
+    f.app.previewCondense = function() error("A stopped checkpoint must not be replaced") end
+    f.jobStatus = {state = "paused", hasJob = true, canResume = true, canPreview = false}
+    f.resumeError = "The player cannot resume now"
+    local result, err = UI.condense(0)
+    assert(result == nil and err == f.resumeError and f.resumes == 1)
+    f.jobStatus = {state = "failed", hasJob = true, canResume = false, canPreview = true}
+    assert(UI.condense(0) == true and f.resumes == 1)
+    assert(f.starts == 0 and not f.progress and not f.review and not f.opened)
 end)
 
 test("Condense review starts its reviewed plan and opens its settings section", function(f)
