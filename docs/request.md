@@ -154,3 +154,7 @@ For this continuation the user again explicitly waived Claude: "no claude for th
 "Why does it just say SMART?"
 
 "also when surrounded by multiple containers and I hit smart take all it had a bunch of errors"
+
+## Remaining-error follow-up
+
+"anything relevant to lootbox, fix. If the others are one-off fixes not related to OUR mods and just gamefiles then have a subagent fix them. Otherwise focus on lootbox. It's published in the workshop too?"
