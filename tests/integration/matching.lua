@@ -39,10 +39,6 @@ function getTextManager() return {
     getFontHeight = function(_, font) assert(font == UIFont.Small); return current.fontHeight end,
     MeasureStringX = function(_, font, text) assert(font == UIFont.Small); return #text * current.fontWidth end,
 } end
-function getTexture(path)
-    return {path = path, getWidth = function() return 32 end, getHeight = function() return 16 end}
-end
-
 local function item(fullType)
     return {getFullType = function() return fullType end}
 end
@@ -163,18 +159,25 @@ test("repeated installation cannot duplicate or move controls", function(f)
     assert(#ISInventoryWindowContainerControls_HandlerList == 7)
 end)
 
-test("native matching images get a distinct all-source badge with measured sizing", function(f)
+test("inventory matching companions name distinct destinations with compact native sizing", function(f)
     local displayed, nearby = f:handler("displayed"), f:handler("nearby")
-    assert(displayed.control.title == "ALL" and nearby.control.title == "ALL")
-    assert(displayed.control.iconRight.path == "media/ui/inventoryPanes/TransferSameTypeOneContainer.png")
-    assert(nearby.control.iconRight.path == "media/ui/inventoryPanes/TransferSameTypeMultiContainer.png")
-    assert(displayed.control.width == 59 and displayed.control.height == 18)
-    assert(displayed.control.iconRightWidth == 28 and displayed.control.iconRightHeight == 14 and displayed.control.titleLeft)
+    assert(displayed.control.title == "Match Displayed" and nearby.control.title == "Match Nearby")
+    assert(displayed.control.width == 115 and displayed.control.height == 18)
+    assert(nearby.control.width == 94 and nearby.control.height == 18)
+    assert(not displayed.control.iconRight and not displayed.control.titleLeft)
+    assert(not nearby.control.iconRight and not nearby.control.titleLeft)
     assert(displayed.control.tooltip:find("ALL carried containers", 1, true))
+    assert(nearby.control.tooltip:find("ALL carried containers", 1, true))
     assert(nearby.control.tooltip:find("matching floor stacks", 1, true))
-    local control = displayed.control
+    local displayedControl, nearbyControl = displayed.control, nearby.control
     f.fontHeight, f.fontWidth = 20, 10
-    assert(displayed:getControl() == control and control.width == 80 and control.height == 24)
+    assert(displayed:getControl() == displayedControl and nearby:getControl() == nearbyControl)
+    assert(displayedControl.width == 160 and displayedControl.height == 24)
+    assert(nearbyControl.width == 130 and nearbyControl.height == 24)
+    f.fontHeight, f.fontWidth = 14, 7
+    assert(displayed:getControl() == displayedControl and nearby:getControl() == nearbyControl)
+    assert(displayedControl.width == 115 and displayedControl.height == 18)
+    assert(nearbyControl.width == 94 and nearbyControl.height == 18)
 end)
 
 test("aggregate sources remain available when the selected inventory bag is empty", function(f)

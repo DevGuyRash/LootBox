@@ -193,15 +193,15 @@ Guides.list = {
     },
     {
         id = "matching-transfers", title = "Transfer matching types from every carried container",
-        summary = "Use the ALL-source companions beside the native matching-transfer icons.",
+        summary = "Match items from every carried container to displayed or nearby storage.",
         prerequisites = "Open inventory and nearby loot storage. A destination must already contain a matching item type. Enable All-container matching transfer buttons in Settings.",
         steps = {
-            "Find the native matching-transfer buttons at the bottom of inventory. Each has a neighboring ALL-source icon, in the same displayed-container or nearby-container order.",
-            "Use the ALL icon beside the displayed-container button to send eligible matches from every carried container to the currently displayed loot container.",
-            "Use the ALL icon beside the nearby-container button to distribute eligible matches across nearby containers shown by the loot window. Each item uses a matching destination with room.",
-            "Changing the selected inventory bag does not narrow an ALL-source action. It includes nested carried contents while retaining Keep, favorites, equipped items and other LootBox protections.",
+            "Find Match Displayed and Match Nearby beside the native matching-transfer icons at the bottom of inventory.",
+            "Use Match Displayed to send eligible matches from every carried container to the currently displayed loot container.",
+            "Use Match Nearby to distribute eligible matches across nearby containers shown by the loot window. Each item uses a matching destination with room.",
+            "Changing the selected inventory bag does not narrow either action. It includes nested carried contents while retaining Keep, favorites, equipped items and other LootBox protections.",
             "Hover to inspect matching highlights in the visible inventory pane. A click with no eligible matches does nothing. Otherwise the action follows your optional quick-transfer review setting.",
-            "Check Current job and the actual inventories. Native capacity, access and item rules can retain items with a reason. You can hide the ALL-source buttons without hiding context menus.",
+            "Check Current job and the actual inventories. Native capacity, access and item rules can retain items with a reason. You can hide the matching-transfer buttons without hiding context menus.",
         },
         expected = "Only native matching item types move from carried sources. Existing original buttons keep their selected-container behavior.",
         troubleshooting = {
@@ -303,7 +303,7 @@ Guides.list = {
             "Choose the inventory, world, vehicle, category, and saved-setup shortcut groups you want. Turning off a group does not change categories or stored items.",
             "Enable the reviews you find useful in Settings. With reviews off, context-menu actions and Start job plan against current items and run directly. Preview job remains available whenever you want to inspect a plan.",
             "Quick transfers, quick cleanup previews, and arrival bin reviews are separate optional settings. New installations start quick actions directly; existing saved preferences are retained. Any review can remember your choice after a successful start or approval.",
-            "Use the all-container matching-transfer setting to show or hide the ALL-source icons beside the native matching-transfer buttons. Choose whether the manager remembers the last setup and shows inline tips. The full manager and Help remain available from the game's Mods options.",
+            "Use the all-container matching-transfer setting to show or hide Match Displayed and Match Nearby beside the native matching-transfer icons. Choose whether the manager remembers the last setup and shows inline tips. The full manager and Help remain available from the game's Mods options.",
         },
         expected = "Preferences persist locally without resetting another mod's pending options or changing native server settings.",
         troubleshooting = {
