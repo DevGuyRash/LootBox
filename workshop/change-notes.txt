@@ -1,3 +1,3 @@
-LootBox 0.9.4
+LootBox 0.9.5
 
-Tighten the Smart Take Matching button to the native text-button width, keeping the complete label without reserving unused icon space.
+Replace the two inventory ALL badges with distinct Match Displayed and Match Nearby labels. Each action still matches items from all carried containers, including nested bags. Both buttons use compact native text sizing.
