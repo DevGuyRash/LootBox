@@ -1926,9 +1926,25 @@ function UI.quickAction(playerIndex, context, request, pickArea)
     return review
 end
 
-function UI.condense(playerIndex)
+function UI.continueJob(playerIndex)
     playerIndex = playerIndex or 0
     if UI.windows[playerIndex] then W.unfocus(UI.windows[playerIndex].body) end
+    local app, err = App.get(playerIndex)
+    if not app then return true, nil, err end
+    local status = app:status()
+    if status.canResume then
+        local result
+        result, err = app:resume()
+        return true, result, err
+    end
+    if status.hasJob or status.canPreview == false then return true, true end
+    return false
+end
+
+function UI.condense(playerIndex)
+    playerIndex = playerIndex or 0
+    local handled, result, problem = UI.continueJob(playerIndex)
+    if handled then return result, problem end
     local app, err = App.get(playerIndex)
     if not app then return nil, err end
     local plan
