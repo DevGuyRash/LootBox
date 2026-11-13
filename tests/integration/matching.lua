@@ -20,6 +20,7 @@ function Base:getButtonControl(title)
         }
     end
     self.control.title = title
+    self.control.width = getTextManager():MeasureStringX(UIFont.Small, title) + 10
     return self.control
 end
 
@@ -402,12 +403,23 @@ test("Smart Take empty matches paused input and native failures cannot start par
     assert(#f.quick == 0 and f.progress[1].player == 3 and f.progress[1].reason == f.smartError)
 end)
 
-test("Smart matching names its action and measures the full label with its native image", function(f)
-    local handler = f:smart("matching")
-    assert(handler.control.title == "Smart Take Matching" and handler.control.width == 171 and handler.control.height == 18)
-    assert(handler.control.iconRight.path == "media/ui/inventoryPanes/TakeSameTypeOneContainer.png")
-    assert(handler.control.tooltip:find("similar items first", 1, true))
-    assert(f:smart("all").control.title == "Smart Take All")
+test("Smart Take buttons use compact native title sizing on object and floor footers", function(f)
+    for _, floor in ipairs({false, true}) do
+        f.fontHeight, f.fontWidth = 14, 7
+        local matching, all = f:smart("matching", floor), f:smart("all", floor)
+        local matchingControl, allControl = matching.control, all.control
+        assert(matchingControl.title == "Smart Take Matching" and matchingControl.width == 143 and matchingControl.height == 18)
+        assert(allControl.title == "Smart Take All" and allControl.width == 108 and allControl.height == 18)
+        assert(not matchingControl.iconRight and not matchingControl.titleLeft)
+        assert(matchingControl.tooltip:find("similar items first", 1, true))
+        f.fontHeight, f.fontWidth = 20, 10
+        assert(matching:getControl() == matchingControl and all:getControl() == allControl)
+        assert(matchingControl.width == 200 and matchingControl.height == 24)
+        assert(allControl.width == 150 and allControl.height == 24)
+        f.fontHeight, f.fontWidth = 14, 7
+        assert(matching:getControl() == matchingControl and matchingControl.width == 143 and matchingControl.height == 18)
+        assert(all:getControl() == allControl and allControl.width == 108 and allControl.height == 18)
+    end
 end)
 
 test("Condense belongs before Transfer All and follows its own visibility preference", function(f)
