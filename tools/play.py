@@ -75,7 +75,7 @@ def run(game: Path, evidence: Path, resume: bool = False, luabuddy_runtime: Path
         with (evidence / f"display-{launch}.log").open("wb") as display_log, (evidence / f"client-{launch}.log").open("wb") as client_log:
             read_fd, write_fd = os.pipe()
             try:
-                display = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+                display = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x900x24", "-nolisten", "tcp", "-noreset"],
                                            pass_fds=(write_fd,), stdout=display_log, stderr=subprocess.STDOUT)
                 processes.append(display)
                 os.close(write_fd)

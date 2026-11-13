@@ -58,6 +58,7 @@ end
 function Jobs:status()
     local result = {}
     for key, value in pairs(self.view) do result[key] = value end
+    result.hasJob = self.execution ~= nil or self.ending ~= nil or self.suspended ~= nil
     result.canResume = self.suspended ~= nil and not self.ending and not self.native:isBusy()
         and (not self.recoveryRequired or self.suspended.execution.recoveryOnly == true)
     result.canPause = self.execution ~= nil and not self.ending
