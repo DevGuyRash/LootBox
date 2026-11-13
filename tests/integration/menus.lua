@@ -1155,7 +1155,7 @@ test("workflow help explains optional reviews and the paired all-source transfer
     local choices = table.concat(settings.steps, " ")
     assert(choices:find("separate optional settings", 1, true) and choices:find("existing saved preferences", 1, true))
     local steps = table.concat(matching.steps, " ")
-    assert(steps:find("ALL", 1, true) and steps:find("displayed", 1, true) and steps:find("nearby", 1, true))
+    assert(steps:find("Match Displayed", 1, true) and steps:find("Match Nearby", 1, true))
     assert(steps:find("every carried", 1, true) and steps:find("optional", 1, true))
 end)
 
