@@ -8,7 +8,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 Subscribe to [LootBox on Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3838652822), or install the local package. The Workshop ID is `3838652822`, and the mod ID is `LootBox`.
 
-Extract the built `LootBox-0.9.6.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.9.7.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -16,7 +16,7 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.9.6.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop listing metadata and the preview are kept in `workshop/`; release uploads use the shared SteamWorkshopPublisher.
+The archive is `dist/LootBox-0.9.7.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop listing metadata and the preview are kept in `workshop/`; release uploads use the shared SteamWorkshopPublisher.
 
 ## Start with a workflow
 
@@ -42,7 +42,9 @@ Quick context actions start directly by default, including cleanup, and normally
 
 The inventory footer keeps each native matching-transfer icon and places **Match Displayed** or **Match Nearby** immediately after it. Match Displayed targets the displayed loot container; Match Nearby targets nearby loot containers in the native order. Both buttons search main inventory and every nested carried container, independently of which inventory pane is selected. They use the game's matching item-type and clothing-variant rules, retain LootBox protections and native capacity checks, and avoid duplicate item transfers. The nearby mode includes matching floor stacks, as the native button does.
 
-The companions follow the native tutorial and target visibility conditions, use compact native text-button sizing, and can be hidden through Settings. Hover highlights matches in the current pane. Click always checks fresh items and captures its targets, so changing the displayed pane afterward does not redirect the running job. Empty matching pools do nothing, like the native buttons. The same displayed/nearby mode is available in Actions for carried matching items.
+Repeated clicks on LootBox footer buttons keep the current job running quietly or resume a stopped job when it is ready, even if the displayed container has changed. When no job remains to continue, the button starts its usual fresh action. F7 or the explicit Current job menu opens progress.
+
+The companions follow the native tutorial and target visibility conditions, use compact native text-button sizing, and can be hidden through Settings. Hover highlights matches in the current pane. Each new job checks fresh items and captures its targets, so changing the displayed pane afterward does not redirect the running job. Empty matching pools do nothing, like the native buttons. The same displayed/nearby mode is available in Actions for carried matching items.
 
 The loot footer adds **Smart Take All** immediately after native Take All and a **Smart Take Matching** companion after native Take Matching, for both containers and the floor. Smart Take Matching looks for types in every carried container, including nested bags, rather than only the inventory pane being viewed. Both actions take from the displayed source and distribute into all eligible carried bags using Smart Load, preferring bags holding similar items and falling back as each fills. Main inventory is last. Protected and unwanted loot stays in place. Hover highlights candidates; empty matching pools do nothing. The toolbar setting controls these and the inventory matching companions. Quick transfer previews and Progress follow the same optional preferences as other quick actions.
 

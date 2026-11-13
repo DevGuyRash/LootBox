@@ -98,6 +98,8 @@ end
 
 function Handler:perform()
     if isGamePaused() then return end
+    local handled, result, problem = Matching.UI.continueJob(self.playerNum)
+    if handled then return result, problem end
     local app, err = App.get(self.playerNum)
     if not app then return end
     local records, _
@@ -221,6 +223,8 @@ end
 
 function SmartTake:perform()
     if isGamePaused() then return end
+    local handled, result, problem = Matching.UI.continueJob(self.playerNum)
+    if handled then return result, problem end
     local app = App.get(self.playerNum)
     if not app then return end
     local records, err = app.world:smartLootRecords(self.mode, self.container)

@@ -106,7 +106,10 @@ local function fixture()
         AddHandler = function(class) add(ISLootWindowContainerControls_HandlerList, class) end,
         AddFloorHandler = function(class) add(ISLootWindowContainerControls_FloorHandlerList, class) end,
     }
-    f.ui = {condense = function(playerNum) f.condensePlayer = playerNum end, quickAction = function(playerNum, context, request)
+    f.ui = {continueJob = function(playerNum)
+        f.continueCalls, f.continuePlayer = (f.continueCalls or 0) + 1, playerNum
+        return f.continueHandled, f.continueResult, f.continueError
+    end, condense = function(playerNum) f.condensePlayer = playerNum end, quickAction = function(playerNum, context, request)
         f.quick[#f.quick + 1] = {player = playerNum, context = context, request = request}
     end, showProgress = function(playerNum, reason)
         f.progress[#f.progress + 1] = {player = playerNum, reason = reason}
@@ -293,7 +296,26 @@ end)
 test("paused game input does not plan or start a transfer", function(f)
     f.paused = true
     f:handler("nearby"):perform()
-    assert(f.calls == 0 and #f.quick == 0)
+    assert(f.calls == 0 and #f.quick == 0 and not f.continueCalls)
+end)
+
+test("both inventory matching buttons continue existing work before inspecting fresh matches", function(f)
+    f.continueHandled, f.continueResult = true, true
+    f.matchingError = "The new displayed container is unavailable"
+    for _, mode in ipairs({"displayed", "nearby"}) do
+        assert(f:handler(mode):perform() == true)
+    end
+    assert(f.continueCalls == 2 and f.continuePlayer == 3)
+    assert(f.calls == 0 and #f.quick == 0 and #f.progress == 0)
+end)
+
+test("inventory toolbar resume refusals retain their result without opening a window", function(f)
+    f.continueHandled, f.continueError = true, "Stop aiming before resuming"
+    for _, mode in ipairs({"displayed", "nearby"}) do
+        local result, err = f:handler(mode):perform()
+        assert(result == nil and err == f.continueError)
+    end
+    assert(f.calls == 0 and #f.quick == 0 and #f.progress == 0)
 end)
 
 test("native matching errors are reported without starting a partial transfer", function(f)
@@ -404,6 +426,35 @@ test("Smart Take empty matches paused input and native failures cannot start par
     f.paused = true; handler:perform(); assert(f.smartCalls == 1 and #f.quick == 0)
     f.paused, f.smartError = false, "Displayed source changed"; handler:perform()
     assert(#f.quick == 0 and f.progress[1].player == 3 and f.progress[1].reason == f.smartError)
+end)
+
+test("all object and floor Smart Take buttons continue before inspecting an empty or changed source", function(f)
+    f.continueHandled, f.continueResult = true, true
+    f.smartError = "Displayed source changed"
+    for _, floor in ipairs({false, true}) do
+        for _, mode in ipairs({"all", "matching"}) do
+            assert(f:smart(mode, floor):perform() == true)
+        end
+    end
+    assert(f.continueCalls == 4 and f.continuePlayer == 3 and not f.smartCalls)
+    assert(#f.quick == 0 and #f.progress == 0)
+end)
+
+test("Smart Take resume refusals and paused input do not plan or open windows", function(f)
+    f.continueHandled, f.continueError = true, "The player cannot resume now"
+    for _, floor in ipairs({false, true}) do
+        for _, mode in ipairs({"all", "matching"}) do
+            local handler = f:smart(mode, floor)
+            local result, err = handler:perform()
+            assert(result == nil and err == f.continueError)
+            local calls = f.continueCalls
+            f.paused = true
+            handler:perform()
+            f.paused = false
+            assert(f.continueCalls == calls)
+        end
+    end
+    assert(not f.smartCalls and #f.quick == 0 and #f.progress == 0)
 end)
 
 test("Smart Take buttons use compact native title sizing on object and floor footers", function(f)

@@ -180,3 +180,7 @@ For this continuation the user again explicitly waived Claude: "no claude for th
 "any stack at all in the columns"
 
 "Remember too not everyone will have neatui installed so try not to  go bespoke here"
+
+## Resume through repeated toolbar clicks
+
+"I don't like how doduble clicking it can open the menu. If I move after clicking it for example on accident and need to re-click a button for anything at all then it opens the menu instead of just resuming the job if there is one or starting a new one"

@@ -1,5 +1,3 @@
-LootBox 0.9.6
+LootBox 0.9.7
 
-Fix Select amount disappearing from loot menus when the camera is zoomed. Stack capture now uses screen-space UI mouse coordinates.
-
-Fix confirming partial amounts in grid and Columns views clearing selection. Use native item-selection markers and the active view's stack-opening and scroll APIs when available, preserving the standard inventory behavior without extra mods.
+Repeated clicks on Smart Take All, Smart Take Matching, Match Displayed, Match Nearby, and Condense now continue the current job quietly or resume its stopped checkpoint. They start a new job when there is none to continue. F7 and Current job still open progress, and new jobs keep your review preferences.
