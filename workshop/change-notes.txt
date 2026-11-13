@@ -1,3 +1,5 @@
-LootBox 0.9.5
+LootBox 0.9.6
 
-Replace the two inventory ALL badges with distinct Match Displayed and Match Nearby labels. Each action still matches items from all carried containers, including nested bags. Both buttons use compact native text sizing.
+Fix Select amount disappearing from loot menus when the camera is zoomed. Stack capture now uses screen-space UI mouse coordinates.
+
+Fix confirming partial amounts in grid and Columns views clearing selection. Use native item-selection markers and the active view's stack-opening and scroll APIs when available, preserving the standard inventory behavior without extra mods.
