@@ -166,3 +166,17 @@ For this continuation the user again explicitly waived Claude: "no claude for th
 ## Inventory matching labels
 
 "can we also update the buttons in our inventory to not both just say ALL?"
+
+## Stack selection in Columns
+
+"Why am I not seeing the "Take X amount" option when right clicking stacks?"
+
+"only appears in inventory, not in the loot one"
+
+"also doesn't seem to actually work"
+
+"I hit enter after typig an amount and then nothing is selected anymore"
+
+"any stack at all in the columns"
+
+"Remember too not everyone will have neatui installed so try not to  go bespoke here"
