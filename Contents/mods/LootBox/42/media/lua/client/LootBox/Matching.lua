@@ -13,12 +13,12 @@ local Handler = ISInventoryWindowControlHandler:derive("LootBoxMatchingTransfer"
 local modes = {
     displayed = {
         peer = "ISInventoryWindowControlHandler_TransferSameType",
-        texture = "media/ui/inventoryPanes/TransferSameTypeOneContainer.png",
+        title = "Match Displayed",
         tooltip = "Transfer matching items from ALL carried containers to the displayed loot container.\nIncludes nested carried bags. Keep, favorite, equipped and attached items stay protected.",
     },
     nearby = {
         peer = "ISInventoryWindowControlHandler_TransferSameTypeMultiContainer",
-        texture = "media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",
+        title = "Match Nearby",
         tooltip = "Transfer matching items from ALL carried containers to nearby loot containers.\nUses the native target order, including matching floor stacks. Includes nested carried bags and respects LootBox protection.",
     },
 }
@@ -48,14 +48,9 @@ function Handler:shouldBeVisible()
 end
 
 function Handler:getControl()
-    local button = self:getButtonControl("ALL")
-    local texture = getTexture(modes[self.mode].texture)
+    local button = self:getButtonControl(modes[self.mode].title)
     local height = getTextManager():getFontHeight(UIFont.Small)
-    local width = texture:getWidth() / texture:getHeight() * height
-    button.titleLeft = true
-    button.iconRight, button.iconRightHeight, button.iconRightWidth = texture, height, width
     button.textColor = {r = 0.68, g = 0.86, b = 0.75, a = 1}
-    button:setWidth(getTextManager():MeasureStringX(UIFont.Small, "ALL") + width + 10)
     button:setHeight(height + 4)
     button:setTooltip(modes[self.mode].tooltip)
     button:setOnMouseOverFunction(self.onMouseOverButton)

@@ -162,3 +162,7 @@ For this continuation the user again explicitly waived Claude: "no claude for th
 ## Matching label spacing
 
 "This looks better! But why is there so much blank space after??"
+
+## Inventory matching labels
+
+"can we also update the buttons in our inventory to not both just say ALL?"
