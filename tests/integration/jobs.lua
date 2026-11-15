@@ -546,9 +546,9 @@ local function awaitOperation(f, predicate)
 end
 
 local function stopJob(f)
-    assert(f.jobs:cancel())
+    assert(f.jobs:pause())
     local stopped = finish(f)
-    assert(stopped.state == "cancelled" and stopped.canResume, "A settled cancellation must retain a resumable checkpoint")
+    assert(stopped.state == "paused" and stopped.canResume, "A settled pause must retain a resumable checkpoint")
     return stopped
 end
 
@@ -1730,7 +1730,7 @@ test("explicit takeover stops pending work until the user resumes", function()
     awaitOperation(f, function(op) return op.kind == "transfer" end)
     f.takeover = "Aiming stopped the job"
     local stopped = finish(f)
-    assert(stopped.state == "cancelled" and stopped.canResume and #f.transfers == 0)
+    assert(stopped.state == "paused" and stopped.canResume and #f.transfers == 0)
     assert(not f.jobs:resume())
     for _ = 1, 10 do tick(f) end
     assert(#f.transfers == 0)
@@ -1740,7 +1740,7 @@ test("explicit takeover stops pending work until the user resumes", function()
     assert(result.done == 2 and result.skipped == 0 and #f.destination.items == 2)
 end)
 
-test("a completed pickup during cancellation is counted exactly once after resume", function()
+test("a completed pickup during pause is counted exactly once after resume", function()
     local f = fixture(3)
     local selected = item(f.source)
     f.holdTransferResult, f.completeDuringCancel = true, true
@@ -2060,7 +2060,7 @@ test("invalid approval cannot turn off future bin reviews", function()
     assert(finish(f).done == 1)
 end)
 
-test("manual pause preserves work and blocks replacement until Cancel", function()
+test("manual pause preserves work while allowing a new reviewed plan", function()
     local f = fixture(2)
     item(f.source); item(f.source)
     start(f)
@@ -2068,7 +2068,7 @@ test("manual pause preserves work and blocks replacement until Cancel", function
     assert(f.jobs:status().canPause and f.jobs:pause())
     local status = awaitState(f, "paused")
     assert(status.canResume and not status.canPause and #f.transfers == 0)
-    assert(not f.jobs:preview(request("inventory")))
+    assert(f.jobs:preview(request("inventory")))
     assert(f.jobs:resume())
     assert(finish(f).done == 2 and #f.transfers == 4)
 end)
@@ -2079,19 +2079,22 @@ test("shortcut readiness follows the running job and permits fresh work after se
     local selected = item(f.source, "Test.New", 1)
     local original = request("container", f.destination)
     original.filter = {all = false, ids = {}, types = {"Test.Old"}}
+    original.shortcutIntent = "matching:put"
     assert(f.jobs:status().state == "idle" and f.jobs:status().canPreview and f.jobs:status().hasJob == false)
     start(f, original)
     assert(not f.jobs:status().canPreview and f.jobs:status().hasJob == true)
+    assert(f.jobs:status().intent == "matching:put" and f.jobs:status().action == "transfer")
     awaitOperation(f, function(op) return op.kind == "transfer" end)
     assert(f.adapter:isBusy() and not f.jobs:status().canPreview)
     assert(f.jobs:pause() and not f.jobs:status().canPreview and f.jobs:status().hasJob == true)
     local paused = awaitState(f, "paused")
-    assert(paused.canResume and not paused.canPreview and paused.hasJob == true and #f.transfers == 0)
-    assert(not f.jobs:preview(original))
+    assert(paused.canResume and paused.canPreview and paused.hasJob == true and #f.transfers == 0)
+    assert(f.jobs:preview(original))
     assert(f.jobs:resume() and not f.jobs:status().canPreview)
     assert(f.jobs:cancel() and not f.jobs:status().canPreview)
     local cancelled = finish(f)
-    assert(cancelled.state == "cancelled" and cancelled.canResume and cancelled.canPreview and cancelled.hasJob == true)
+    assert(cancelled.state == "cancelled" and not cancelled.canResume and cancelled.canPreview and cancelled.hasJob == false)
+    assert(cancelled.intent == nil and cancelled.action == nil)
     local fresh = request("inventory")
     fresh.filter = {all = false, ids = {}, types = {"Test.New"}}
     local plan = assert(f.jobs:preview(fresh))
@@ -2246,7 +2249,7 @@ test("failed manual recovery keeps the original checkpoint and prevents prematur
     assert(f.jobs:recoverPersonalGear())
     local failed = finish(f)
     assert(failed.state == "failed" and recovery.pending and not failed.canResume and not f.jobs:resume())
-    assert(failed.hasJob == true and failed.canPreview)
+    assert(failed.hasJob == true and not failed.canPreview)
     recovery.failRestore = false
     assert(f.jobs:recoverPersonalGear())
     local recovered = finish(f)
@@ -2697,7 +2700,7 @@ test("Condense Pause and Resume settle an observed transfer exactly once", funct
     f.completeDuringCancel = true
     assert(f.jobs:pause())
     local paused = awaitState(f, "paused")
-    assert(paused.canResume and not f.jobs:previewCondense())
+    assert(paused.canResume and f.jobs:previewCondense())
     f.holdTransferResult = false
     assert(f.jobs:resume())
     local status = finish(f)
@@ -2852,6 +2855,94 @@ test("Condense rejects a grouping exchange with a tiny positive net mass delta",
     local count = #f.transfers
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished" and #f.transfers == count)
+end)
+
+test("new manager preview preserves pause until start and Resume invalidates it", function()
+    local f = condenseFixture()
+    local bag = f:addBag("Strong", 10, 0.1)
+    local old = item(f.inventory, "Test.Loose", 2)
+    local fresh = item(f.source, "Test.New", 1)
+    f:startCondense()
+    awaitOperation(f, function(op) return op.kind == "transfer" end)
+    assert(f.jobs:pause()); awaitState(f, "paused")
+    local preview = assert(f.jobs:preview(request("inventory")))
+    assert(f.jobs:status().canResume and f.jobs.suspended and f.jobs:resume())
+    assert(f.jobs:pause()); awaitState(f, "paused")
+    assert(not f.jobs:start(preview), "Resume must invalidate the speculative replacement")
+    preview = assert(f.jobs:preview(request("inventory")))
+    assert(f.jobs:start(preview) and not f.jobs.suspended)
+    assert(finish(f).done == 1 and f.inventory:contains(fresh))
+    assert(f.inventory:contains(old) and not bag:contains(old) and not f.jobs:resume())
+end)
+
+test("Cancel supersedes pending Condense pause and releases the scheduler", function()
+    for _, settleFirst in ipairs({false, true}) do
+        local f = condenseFixture()
+        local bag = f:addBag("Strong", 10, 0.1)
+        local selected = item(f.inventory, "Test.Loose", 2)
+        f:startCondense()
+        awaitOperation(f, function(op) return op.kind == "transfer" end)
+        assert(f.jobs:pause())
+        if settleFirst then awaitState(f, "paused") end
+        assert(f.jobs:cancel())
+        if not settleFirst then assert(not f.jobs:status().canPreview) end
+        local cancelled = finish(f)
+        assert(cancelled.state == "cancelled" and not cancelled.canResume and not cancelled.hasJob and cancelled.canPreview)
+        assert(not f.jobs:resume() and f.jobs.suspended == nil and f.jobs.plan == nil and f.jobs.operation == nil)
+        assert(f.inventory:contains(selected) and not bag:contains(selected))
+        local fresh = item(f.source, "Test.Fresh", 1)
+        local nextRequest = request("inventory")
+        nextRequest.filter = {all = false, ids = {}, types = {"Test.Fresh"}}
+        start(f, nextRequest)
+        assert(finish(f).done == 1 and f.inventory:contains(fresh))
+        for _ = 1, 20 do tick(f) end
+        assert(f.inventory:contains(selected) and not bag:contains(selected) and #f.transfers == 1)
+    end
+end)
+
+test("Cancel retains an observed Condense transfer without replaying its continuation", function()
+    local f = condenseFixture()
+    local bag = f:addBag("Strong", 10, 0.1)
+    local first, second = item(f.inventory, "Test.First", 2), item(f.inventory, "Test.Second", 1)
+    f.holdTransferResult, f.completeDuringCancel = true, true
+    f:startCondense()
+    for _ = 1, 30 do tick(f); if #f.transfers == 1 then break end end
+    assert(#f.transfers == 1 and bag:contains(first))
+    assert(f.jobs:cancel())
+    local cancelled = finish(f)
+    assert(cancelled.state == "cancelled" and not cancelled.canResume)
+    f.holdTransferResult = false
+    for _ = 1, 20 do tick(f) end
+    assert(#f.transfers == 1 and bag:contains(first) and f.inventory:contains(second))
+    assert(f.jobs.operation == nil and f.jobs.pending == nil and f.jobs.suspended == nil)
+end)
+
+test("Cancel drops recovery continuation but preserves the personal gear receipt", function()
+    local f = fixture(3)
+    local personal, selected = item(f.inventory, "Base.Personal", 1), item(f.source)
+    start(f)
+    awaitOperation(f, function(op) return op.kind == "approach" end)
+    assert(f.jobs:pause()); awaitState(f, "paused")
+    local recovery, safe = recoveryFixture(f, personal)
+    assert(remove(f.inventory.items, personal)); safe.items[#safe.items + 1], personal.container = personal, safe
+    recovery.pending = true
+    assert(f.jobs:recoverPersonalGear())
+    awaitOperation(f, function(op) return op.kind == "approach" end)
+    assert(f.jobs:cancel())
+    local cancelled = finish(f)
+    assert(not cancelled.canResume and not cancelled.hasJob and recovery.pending and f.jobs.recovery == recovery)
+    assert(cancelled.recoveryRequired and not cancelled.canPreview)
+    local preview, problem = f.jobs:preview(request("inventory"))
+    assert(not preview and problem:find("Recover personal gear", 1, true))
+    assert(not f.jobs:previewCondense() and not f.jobs:start({}))
+    assert(f.jobs:recoverPersonalGear())
+    local recovered = finish(f)
+    assert(recovered.state == "finished" and not recovered.canResume and not recovered.hasJob)
+    assert(f.inventory:contains(personal) and f.source:contains(selected) and not recovery.pending)
+    start(f, request("inventory"))
+    awaitOperation(f, function(op) return op.kind == "approach" end)
+    assert(f.jobs:pause()); awaitState(f, "paused")
+    assert(f.jobs:resume() and finish(f).done == 1)
 end)
 
 print("PASS " .. tests .. " Jobs integration scenarios")

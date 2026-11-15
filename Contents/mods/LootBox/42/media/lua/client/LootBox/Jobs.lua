@@ -52,13 +52,17 @@ function Jobs.new(player, world, graph)
 end
 
 local function planningBlocked(self)
-    return self.execution or self.ending or self.native:isBusy() or (self.suspended and self.view.state == "paused")
+    return self.recoveryRequired or self.execution or self.ending or self.native:isBusy()
 end
 
 function Jobs:status()
     local result = {}
     for key, value in pairs(self.view) do result[key] = value end
     result.hasJob = self.execution ~= nil or self.ending ~= nil or self.suspended ~= nil
+    result.recoveryRequired = self.recoveryRequired == true
+    result.intent = result.hasJob and self.plan and self.plan.request and self.plan.request.shortcutIntent or nil
+    result.sourceContainer = result.hasJob and self.plan and self.plan.request and self.plan.request.sourceContainer or nil
+    result.action = result.hasJob and self.plan and (self.plan.action or "transfer") or nil
     result.canResume = self.suspended ~= nil and not self.ending and not self.native:isBusy()
         and (not self.recoveryRequired or self.suspended.execution.recoveryOnly == true)
     result.canPause = self.execution ~= nil and not self.ending
@@ -171,6 +175,7 @@ local function validate(request)
 end
 
 function Jobs:preview(request)
+    if self.recoveryRequired then return nil, "Recover personal gear before starting another job" end
     if planningBlocked(self) then return nil, "Finish or cancel the current job before previewing another" end
     local ok, err = validate(request)
     if not ok then return nil, err end
@@ -311,6 +316,7 @@ function Jobs:preview(request)
 end
 
 function Jobs:previewCondense(options)
+    if self.recoveryRequired then return nil, "Recover personal gear before starting another job" end
     if planningBlocked(self) then return nil, "Finish or cancel the current job before condensing" end
     local controller, err = Condense.new(self.world, options)
     if not controller then return nil, err end
@@ -318,7 +324,7 @@ function Jobs:previewCondense(options)
     info, err = controller:preview()
     if not info then return nil, err end
     self.revision = self.revision + 1
-    local request = {scope = "inventory", includeBags = true, filter = {all = true, ids = {}, types = {}},
+    local request = {scope = "inventory", shortcutIntent = "condense", includeBags = true, filter = {all = true, ids = {}, types = {}},
         destination = {kind = "inventory"}}
     local display = {}
     for _, key in ipairs({"mode", "eligible", "bagCount", "beforeWeight", "estimatedSaving", "useUnequipped", "nested", "reason"}) do display[key] = info[key] end
@@ -336,6 +342,7 @@ function Jobs:previewCondense(options)
 end
 
 function Jobs:start(plan, options)
+    if self.recoveryRequired then return nil, "Recover personal gear before starting another job" end
     if planningBlocked(self) then return nil, "A LootBox job is already active" end
     local reviewed = self.reviewed
     if not reviewed or reviewed.token ~= plan or reviewed.revision ~= self.revision then
@@ -1708,7 +1715,8 @@ function Jobs:complete(state, reason)
     if self.execution and self.execution.condense then
         self.view.condense = self.execution.condense:status()
         if (self.view.condense.buffered or 0) > 0 then
-            reason = (reason or "Condense stopped") .. "; a bag arrangement is incomplete and buffered items remain carried. Resume to finish or repair it."
+            reason = (reason or "Condense stopped") .. "; a bag arrangement is incomplete and buffered items remain carried."
+            if state == "paused" then reason = reason .. " Resume to finish or repair it." end
         end
     end
     if state == "failed" and self.execution and self.execution.recoveryOnly then
@@ -1722,7 +1730,7 @@ function Jobs:complete(state, reason)
     self.view.state, self.view.reason = state, reason or self.view.reason
     if self.view.carried > 0 then self.view.reason = (self.view.reason and self.view.reason .. "; " or "") .. self.view.carried .. " hauled items remain in carried storage" end
     if self.operation and self.operation.completed and self.operation.op.kind == "trash" then self:settleTrash(self.operation) end
-    if (state == "cancelled" or state == "paused") and self.execution then
+    if state == "paused" and self.execution then
         self.suspended = {execution = self.execution, operation = self.operation, graph = self.activeGraph, binReview = self.binReview, stoppedAt = now()}
         if self.binReview then self.binReview.token, self.binReview.approved = nil, nil end
         for _, target in ipairs(self.plan.bins or {}) do target.approved, target.needsInspection = {}, true end
@@ -1731,6 +1739,11 @@ function Jobs:complete(state, reason)
     self:diagnostic("complete", self.view.reason)
     self.execution, self.pending, self.operation, self.activeGraph, self.ending, self.binReview = nil, nil, nil, nil, nil, nil
     self.view.waiting = nil
+    if state == "cancelled" then
+        -- Keep the personal-gear receipt separate from discarded scheduler state.
+        -- Cancellation is terminal; only Pause retains execution callbacks.
+        self.suspended, self.reviewed, self.plan, self.carry, self.hauled = nil, nil, nil, nil, nil
+    end
 end
 
 function Jobs:advance()
@@ -1798,8 +1811,8 @@ end
 
 function Jobs:tick()
     if self.execution and not self.ending then
-        local reason, code = self.native:takeoverReason()
-        if reason then self:finishWhenSettled(code == "combat" and "paused" or "cancelled", reason) end
+        local reason = self.native:takeoverReason()
+        if reason then self:finishWhenSettled("paused", reason) end
     end
     if self.ending then
         if self.native:isBusy() then
@@ -1838,6 +1851,7 @@ function Jobs:resume()
     local reason = self.native:takeoverReason()
     if reason then return nil, reason .. ". Stop that action before choosing Resume job." end
     self.execution, self.operation, self.activeGraph, self.binReview = saved.execution, saved.operation, saved.graph, nil
+    self.reviewed = nil
     self.suspended, self.view.state, self.view.reason = nil, "running", "Continuing the stopped job with current item and destination checks."
     if self.execution.condense then self.execution.condense:onResume() end
     if self.operation and not self.operation.completed then
@@ -1879,12 +1893,14 @@ function Jobs:pause()
 end
 
 function Jobs:cancel()
-    if self.ending then return true end
+    if self.ending then
+        -- Cancel supersedes an in-flight Pause without issuing native cleanup twice.
+        self.ending.state, self.ending.reason = "cancelled", "Cancelled"
+        self.view.state = "cancelling"
+        return true
+    end
     if not self.execution and not self.native:isBusy() then
-        if self.suspended then
-            self.view.state, self.view.reason = "cancelled", "Cancelled. Choose Resume job to continue."
-            self:diagnostic("cancelled-checkpoint", self.view.reason)
-        end
+        if self.suspended then self:complete("cancelled", "Cancelled") end
         return true
     end
     self:finishWhenSettled("cancelled", "Cancelled")

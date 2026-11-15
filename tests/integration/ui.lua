@@ -745,7 +745,7 @@ end)
 
 test("stopped progress exposes Resume and resizes without cancelling or duplicating notes", function(f)
     local window = progressWindow(f)
-    f.jobStatus = {state = "cancelled", canResume = true, done = 13, total = 159, skipped = 1,
+    f.jobStatus = {state = "paused", canResume = true, done = 13, total = 159, skipped = 1,
         reasons = {{itemName = "Garbage Bag", status = "Protected", reason = "Bag contains items", tone = "warning"}}}
     for index = 2, 25 do
         f.jobStatus.reasons[index] = {itemName = "Kept item " .. index, status = "Protected", reason = "Keep", tone = "warning"}
@@ -755,7 +755,7 @@ test("stopped progress exposes Resume and resizes without cancelling or duplicat
     rows:setYScroll(-28)
     resize(window, 520, 410); resize(window, 900, 650)
     window:update()
-    assert(window.resumeButton.visible and window.resumeButton.enabled and not window.cancelButton.enabled)
+    assert(window.resumeButton.visible and window.resumeButton.enabled and window.cancelButton.enabled)
     assert(window.reasonsList == rows and #rows.items == 25 and rows:getYScroll() == -28)
     assert(f.jobStatus == status and f.starts == 0 and not f.cancelled and not f.resumes)
     local row = rows.items[1]
@@ -770,7 +770,7 @@ end)
 
 test("a rejected Resume stays visible and temporary waiting never offers a second job", function(f)
     local window = progressWindow(f)
-    f.jobStatus.state, f.jobStatus.canResume = "cancelled", true
+    f.jobStatus.state, f.jobStatus.canResume = "paused", true
     f.resumeError = "Stop aiming before resuming"
     window:update(); press(window, "Resume job"); window:update()
     assert(window.reasonPanel.text:find(f.resumeError, 1, true) and window.resumeButton.visible)
@@ -1370,13 +1370,13 @@ test("Condense follows the ordinary review setting and can start quietly", funct
     assert(preview.closed and UI.quickWindows[2] == nil)
 end)
 
-test("toolbar continuation resumes paused and cancelled checkpoints before fresh-job eligibility", function(f)
-    for _, state in ipairs({"paused", "cancelled"}) do
+test("toolbar continuation resumes paused checkpoints before fresh-job eligibility", function(f)
+    for _, state in ipairs({"paused"}) do
         f.jobStatus = {state = state, hasJob = true, canResume = true, canPreview = state == "cancelled"}
         local handled, result, err = UI.continueJob(0)
         assert(handled and result == true and err == nil and f.jobStatus.state == "running")
     end
-    assert(f.resumes == 2 and f.previews == 0 and f.starts == 0)
+    assert(f.resumes == 1 and f.previews == 0 and f.starts == 0)
     assert(not f.progress and not f.review and not f.opened)
 end)
 
@@ -1427,8 +1427,70 @@ test("continuing a toolbar job releases only its existing LootBox editor focus",
     assert(UI.windows[0].body == body and UI.windows[1].body == other and not f.progress)
 end)
 
+test("quick action preserves its shortcut identity in the scheduler request", function(f)
+    local setup = request("inventory")
+    setup.shortcutIntent = "smart:matching"
+    UI.quickAction(0, {}, setup)
+    assert(f.reviewed.shortcutIntent == "smart:matching")
+end)
+
+test("different shortcut cancels a settled paused job instead of resuming it", function(f)
+    f.jobStatus = {state = "paused", intent = "condense", hasJob = true, canResume = true, canPreview = false}
+    f.app.cancel = function()
+        f.cancelled = true
+        f.jobStatus = {state = "cancelled", hasJob = false, canPreview = true}
+        return true
+    end
+    assert(UI.continueJob(0, "smart:all", {}) == false)
+    assert(f.cancelled and not f.resumes and not f.progress)
+end)
+
+test("different running shortcut cancels and requires retry after native cleanup", function(f)
+    f.jobStatus = {state = "running", intent = "condense", hasJob = true, canPreview = false}
+    f.app.cancel = function()
+        f.cancelled = true
+        f.jobStatus = {state = "cancelling", hasJob = true, canPreview = false}
+        return true
+    end
+    local handled, result, err = UI.continueJob(0, "matching:nearby")
+    assert(handled and result == nil and err:find("Retry", 1, true))
+    assert(f.cancelled and not f.resumes and f.previews == 0 and f.starts == 0 and f.progress)
+end)
+
+test("failed replacement cancellation cannot preview and newly required recovery stays gated", function(f)
+    f.jobStatus = {state = "paused", intent = "condense", hasJob = true, canResume = true}
+    f.app.cancel = function() return nil, "Cleanup still owns the action" end
+    local handled, result, err = UI.continueJob(0, "smart:all")
+    assert(handled and result == nil and err == "Cleanup still owns the action" and not f.resumes)
+    f.app.cancel = function()
+        f.jobStatus = {state = "cancelled", hasJob = false, canPreview = false, recoveryRequired = true}
+        return true
+    end
+    handled, result, err = UI.continueJob(0, "smart:all")
+    assert(handled and result == nil and err:find("Recover personal gear", 1, true))
+    assert(f.previews == 0 and f.starts == 0 and not f.recoveries)
+end)
+
+test("same smart source resumes but a different container replaces its checkpoint", function(f)
+    local source, other = {}, {}
+    f.jobStatus = {state = "paused", intent = "smart:all", sourceContainer = source, hasJob = true, canResume = true}
+    assert(UI.continueJob(0, "smart:all", source) == true and f.resumes == 1)
+    f.jobStatus.state, f.jobStatus.canResume = "paused", true
+    f.app.cancel = function()
+        f.cancelled = true; f.jobStatus = {hasJob = false, canPreview = true}; return true
+    end
+    assert(UI.continueJob(0, "smart:all", other) == false and f.resumes == 1 and f.cancelled)
+end)
+
+test("recovery gating provides guidance without cancelling or reviving old work", function(f)
+    f.jobStatus = {state = "cancelled", hasJob = false, canPreview = false, recoveryRequired = true}
+    local handled, result, err = UI.continueJob(0, "condense")
+    assert(handled and result == nil and err:find("Recover", 1, true))
+    assert(f.progress and not f.cancelled and not f.resumes and not f.recoveries)
+end)
+
 test("Condense resumes a stopped job and consumes repeated clicks without reoptimizing", function(f)
-    f.jobStatus = {state = "cancelled", hasJob = true, canResume = true, canPreview = true}
+    f.jobStatus = {state = "paused", intent = "condense", hasJob = true, canResume = true, canPreview = false}
     f.app.previewCondense = function() error("Existing work must not be replaced by Condense") end
     assert(UI.condense(0) == true and f.resumes == 1)
     assert(UI.condense(0) == true and f.resumes == 1)
@@ -1437,11 +1499,11 @@ end)
 
 test("Condense returns a resume refusal quietly and preserves a blocked checkpoint", function(f)
     f.app.previewCondense = function() error("A stopped checkpoint must not be replaced") end
-    f.jobStatus = {state = "paused", hasJob = true, canResume = true, canPreview = false}
+    f.jobStatus = {state = "paused", intent = "condense", hasJob = true, canResume = true, canPreview = false}
     f.resumeError = "The player cannot resume now"
     local result, err = UI.condense(0)
     assert(result == nil and err == f.resumeError and f.resumes == 1)
-    f.jobStatus = {state = "failed", hasJob = true, canResume = false, canPreview = true}
+    f.jobStatus = {state = "failed", intent = "condense", hasJob = true, canResume = false, canPreview = true}
     assert(UI.condense(0) == true and f.resumes == 1)
     assert(f.starts == 0 and not f.progress and not f.review and not f.opened)
 end)
@@ -1499,8 +1561,8 @@ test("invalid source previews retain the full adjustment route when the core all
     assert(window:readRequest().sourceContainer == source and f.starts == 0 and f.remembered == 0)
 end)
 
-test("a cancelled resumable checkpoint can still start a new quick action when the core permits it", function(f)
-    f.jobStatus.state, f.jobStatus.canResume = "cancelled", true
+test("a terminal cancelled job can start a new quick action when the core permits it", function(f)
+    f.jobStatus.state, f.jobStatus.canResume = "cancelled", false
     f.preferences.confirmQuickMoves, f.preferences.showQuickProgress = false, false
     assert(UI.quickAction(0, {}, request("inventory")) == true)
     assert(f.starts == 1 and f.previews == 1 and not f.progress and not f.opened)

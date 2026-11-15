@@ -16,7 +16,7 @@ local H, GAP, C = W.H, W.GAP, W.colors
 local button, entry, combo, check, list, wrapped = W.button, W.entry, W.combo, W.check, W.list, W.text
 local states = { idle = "Ready for a job", running = "Working", cancelling = "Stopping and restoring access", pausing = "Pausing and restoring access",
     needs_review = "Review bin before continuing", paused = "Paused - ready to resume",
-    cancelled = "Stopped - ready to resume", failed = "Stopped after an error", complete = "Finished",
+    cancelled = "Cancelled", failed = "Stopped after an error", complete = "Finished",
     finished = "Finished", finished_with_skips = "Finished with notes" }
 local sourceNames = { inventory = "my carried items", reach = "within reach", room = "the current room",
     building = "the current building", area = "the selected area", labeled = "labeled containers", container = "the selected container" }
@@ -118,6 +118,7 @@ local function copyRequest(request)
     request = request or {}
     local filter, destination = request.filter or {}, request.destination or {}
     local result = { scope = request.scope or "inventory", sourceContainer = request.sourceContainer,
+        shortcutIntent = request.shortcutIntent,
         includeInventory = request.includeInventory == true, includeBags = request.includeBags ~= false, excludeUnwanted = request.excludeUnwanted == true,
         filter = { ids = {}, types = {}, all = filter.all == true },
         destination = { kind = destination.kind or "inventory", ref = destination.ref, mode = destination.mode } }
@@ -1926,12 +1927,36 @@ function UI.quickAction(playerIndex, context, request, pickArea)
     return review
 end
 
-function UI.continueJob(playerIndex)
+function UI.continueJob(playerIndex, intent, sourceContainer)
     playerIndex = playerIndex or 0
     if UI.windows[playerIndex] then W.unfocus(UI.windows[playerIndex].body) end
     local app, err = App.get(playerIndex)
     if not app then return true, nil, err end
     local status = app:status()
+    if status.recoveryRequired then
+        local problem = "Recover personal gear in Current job before starting another job."
+        UI.showProgress(playerIndex, problem)
+        return true, nil, problem
+    end
+    local same = not intent or (status.intent == intent and status.sourceContainer == sourceContainer)
+    if status.hasJob and not same then
+        local cancelled
+        cancelled, err = app:cancel()
+        if not cancelled then
+            UI.showProgress(playerIndex, err)
+            return true, nil, err
+        end
+        status = app:status()
+        if status.recoveryRequired then
+            local problem = "Recover personal gear in Current job before starting another job."
+            UI.showProgress(playerIndex, problem)
+            return true, nil, problem
+        end
+        if not status.hasJob and status.canPreview ~= false then return false end
+        local problem = "Cancelling the previous job safely. Retry this shortcut when cleanup finishes."
+        UI.showProgress(playerIndex, problem)
+        return true, nil, problem
+    end
     if status.canResume then
         local result
         result, err = app:resume()
@@ -1943,7 +1968,7 @@ end
 
 function UI.condense(playerIndex)
     playerIndex = playerIndex or 0
-    local handled, result, problem = UI.continueJob(playerIndex)
+    local handled, result, problem = UI.continueJob(playerIndex, "condense")
     if handled then return result, problem end
     local app, err = App.get(playerIndex)
     if not app then return nil, err end
