@@ -491,11 +491,50 @@ local function vehicleActions(menu, playerIndex, context, app)
     end, "Choose a storage compartment and assign the categories it should accept.")
 end
 
+local function runTillFull(selection)
+    local app, err = App.get(selection.playerIndex)
+    local ok
+    if app then ok, err = app:tillFull(selection.items, selection.kind) end
+    if not ok and interface and interface.showProgress then interface.showProgress(selection.playerIndex, err) end
+    return ok, err
+end
+
+local function consumptionMenu(playerIndex, parent, items)
+    local nativeMenu = ISInventoryPaneContextMenu
+    if not nativeMenu or not ISInventoryPane or not ISInventoryPane.getActualItems or not parent.getSubMenu then return end
+    local snapshot, seen = {}, {}
+    for _, item in ipairs(ISInventoryPane.getActualItems(items) or {}) do
+        if native(item, "InventoryItem") and not seen[item] then
+            seen[item] = true
+            snapshot[#snapshot + 1] = item
+        end
+    end
+    if #snapshot == 0 then return end
+    -- Match native callback identities, never translated labels or invented eligibility.
+    for _, root in ipairs(parent.options or {}) do
+        local child = root.subOption and parent:getSubMenu(root.subOption)
+        if child and not root.notAvailable then
+            local kind, already
+            for _, option in ipairs(child.options or {}) do
+                if option.onSelect == runTillFull then already = true end
+                if not option.notAvailable and option.param3 == nil then
+                    if nativeMenu.onEatItems and option.onSelect == nativeMenu.onEatItems then kind = "food"
+                    elseif nativeMenu.onDrinkFluid and option.onSelect == nativeMenu.onDrinkFluid then kind = "fluid" end
+                end
+            end
+            if kind and not already then
+                child:addOption("Til Full", {playerIndex = playerIndex, items = snapshot, kind = kind}, runTillFull)
+            end
+        end
+    end
+end
+
 function Menus.inventoryMenu(playerIndex, parent, items)
     local preferences = App.getPreferences()
     if not preferences.contextMenus or not menuAllowed(playerIndex) then return end
     local app, item = App.get(playerIndex), selectedItem(items)
     if not app or not item then return end
+    if preferences.tillFullEnabled then consumptionMenu(playerIndex, parent, items) end
     if preferences.inventoryShortcuts then
         local selection = Selection.capture(playerIndex, items)
         if selection then

@@ -35,6 +35,7 @@ package.loaded["LootBox/Jobs"] = { new = function()
     return { status = function() return { state = "idle" } end, cancel = function() return true end,
         tick = function() end, start = function() return true end }
 end }
+package.loaded["LootBox/TillFull"] = {new = function() error("Unexpected consumption boundary") end}
 local App = require "LootBox/App"
 local Store = require "LootBox/Store"
 local function fixture()
@@ -63,11 +64,11 @@ end
 test("quick reviews default off while interface features stay on and copies remain independent", function()
     local preferences, err = App.getPreferences()
     assert(not err)
-    for _, name in ipairs({ "contextMenus", "inventoryShortcuts", "worldShortcuts", "vehicleShortcuts",
+    for _, name in ipairs({ "tillFullEnabled", "contextMenus", "inventoryShortcuts", "worldShortcuts", "vehicleShortcuts",
         "categoryShortcuts", "savedShortcuts", "matchingTransferButtons", "rememberLastSetup", "showTips" }) do
         assert(preferences[name] == true)
     end
-    for _, name in ipairs({"confirmQuickMoves", "confirmQuickCleanup", "confirmBinReviews", "showQuickProgress"}) do assert(preferences[name] == false) end
+    for _, name in ipairs({"tillFullBothNeeds", "confirmQuickMoves", "confirmQuickCleanup", "confirmBinReviews", "showQuickProgress"}) do assert(preferences[name] == false) end
     preferences.contextMenus = false
     assert(App.getPreferences().contextMenus == true)
 end)
@@ -346,6 +347,15 @@ test("Condense defaults keep unequipped and nested loot bags untouched and choic
     assert(App.setPreferences({condenseButton = false, condenseRebalance = true, condenseUseUnequipped = true, condenseNested = true}))
     App.reset(); preferences = assert(App.getPreferences())
     assert(not preferences.condenseButton and preferences.condenseRebalance and preferences.condenseUseUnequipped and preferences.condenseNested)
+end)
+
+test("Til Full policy preferences persist and reject non-booleans", function()
+    assert(App.setPreferences({tillFullEnabled = false, tillFullBothNeeds = true}))
+    App.reset()
+    local preferences = App.getPreferences()
+    assert(not preferences.tillFullEnabled and preferences.tillFullBothNeeds)
+    assert(not App.setPreferences({tillFullBothNeeds = "both"}))
+    assert(App.getPreferences().tillFullBothNeeds)
 end)
 
 print(passed .. " setup and preference integration cases passed (explicit world/action and native file doubles)")

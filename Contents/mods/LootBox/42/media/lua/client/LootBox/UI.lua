@@ -1328,6 +1328,8 @@ local preferenceRows = {
     { key = "showQuickProgress", title = "Open Current job for quick actions", description = "Show Progress after a direct quick action starts. Off keeps quick actions quiet; F7 and Current job still show their result. Important startup notices remain visible." },
     { key = "rememberLastSetup", title = "Remember my last action setup", description = "Restore the last source, destination, selection and bag options when continuing a setup." },
     { key = "showTips", title = "Show workflow tips", description = "Show additional guidance in the Home view. Tooltips and the Help field guide stay available." },
+    { key = "tillFullEnabled", title = "Show Til Full in Eat and Drink", description = "Add Til Full beside native consumption amounts for the selected stack. Native restrictions still apply." },
+    { key = "tillFullBothNeeds", title = "Til Full: satisfy both needs", description = "Off stops mixed food and drink when the first relevant need is restored. On continues until both hunger and thirst are restored, which may consume beyond one already satisfied need." },
     { key = "condenseButton", title = "Show Condense before Transfer All", description = "Add a Condense button to the inventory footer. It uses main inventory and eligible carried bags, independently of the pane you are viewing." },
     { key = "condenseRebalance", title = "Condense: optimize bag contents", description = "Off packs main-inventory items heaviest first into the best useful bags and leaves existing contents alone. On also redistributes contents and considers useful multi-item exchanges. Weight reduction comes first; at equal carried weight it groups matching types into fewer bags. It searches for an improvement, without promising a global optimum." },
     { key = "condenseUseUnequipped", title = "Condense: include unequipped bags", description = "Off leaves unequipped loot bags and their contents alone. On makes other carried bags eligible too. They are never automatically equipped, and their printed reduction does not apply while unequipped." },
@@ -1687,7 +1689,7 @@ function Progress:createChildren()
     self.reasonsList = list(self, GAP, self.listY, self.width - 2 * GAP, H, self)
     self.reasonCount, self.surveyReasonRows = 0, {}
     self.cancelButton = button(self, GAP, 0, 100, "Cancel job", self, function(s) App.get(s.playerIndex):cancel() end,
-        "Stop owned work. Resume continues the remaining job after native cleanup settles. Sent trash commands cannot be recalled.", "danger")
+        "Stop owned work and discard this job after native cleanup. Use Pause to keep resumable work. Sent trash commands cannot be recalled.", "danger")
     self.pauseButton = button(self, GAP, 0, 100, "Pause job", self, function(s)
         local ok, err = App.get(s.playerIndex):pause()
         if not ok then s.notice = err else s.notice = nil end

@@ -42,3 +42,38 @@ The server implementation of `object.emptyTrash` removes every server item from 
 `ISPathFindAction:update` stops on native movement or cancel input even though its aim/walk/run flags permit those states. External inventory transfers can stop on walking, and transfers stop on running. `ISBaseTimedAction:stop` resets the native queue, so LootBox temporarily detaches and restores foreign pending actions while stopping only owned work. Food and drink can queue preparation, transfers and restoration; classifying arbitrary foreign actions as job cancellation cannot support those workflows.
 
 `ISInventoryTransferAction:getNotFullFloorSquare` first tries the character's square and then the adjacent 3 by 3 area if that square is blocked or full. Its existing `canDropOnFloor` checks native floor, wall, window and stair constraints. Exact-origin completion checks can therefore miss real successful drops. LootBox asks the admitted native action which nearby squares are permitted while the character is at the frozen origin, stores their coordinates, and later checks the immutable item ID and type there after it leaves the original source. It neither copies the chooser nor switches to the character's new position after a pause.
+
+## Til Full source research (cloud, November 15, 2026)
+
+This feature was researched separately from the installed-game evidence above. The
+[Build 42.22 vanilla Lua mirror commit](https://github.com/Project-Zomboid-Community-Modding/ProjectZomboid-Vanilla-Lua/tree/3b21e63fe4905a0a300a4021d05d01a9bb534729)
+and official [Stats](https://projectzomboid.com/modding/zombie/characters/Stats.html)
+and [Food](https://projectzomboid.com/modding/zombie/inventory/types/Food.html)
+API references informed the implementation. No installed game or multiplayer
+server was available for this feature's acceptance testing.
+
+Native inventory menu callbacks, rather than translated labels, identify Eat and
+Drink submenus. `ISInventoryPane.getActualItems` expands a clicked stack without
+its duplicate representative. `onEatItems` consumes only one actual item; finite
+stack continuation therefore belongs to LootBox. Food percentages are measured
+against original base hunger, requiring conversion for partially eaten food.
+`eatItem` and `onDrinkFluid` retain vanilla transfers, mask removal/restoration,
+and container return; LootBox does not mutate nutrition or item quantities.
+`ISDrinkFromBottle` uses a different units contract and is not used here.
+
+Eating can apply nutrition at native completion or partial interruption rather
+than each frame; fluid actions update consumed fractions during progress. Native
+stopping and server latency can therefore overshoot a requested target. The
+controller observes needs and requests an owned-action stop, never promises an
+instantaneous server rollback, and never resets unrelated queued actions. Client
+completion is not a server acknowledgment: absent observed need improvement it
+waits briefly and stops rather than queuing the rest of the stack blindly.
+Restoration may itself stall; cancellation keeps ownership until native cleanup
+settles rather than claiming masks or items have been restored.
+
+The target is no positive hunger/thirst (zero, bounded by the native minimum), not
+maximum stuffed moodles. The default stops a mixed restorative item when the first
+relevant need is satisfied; the optional both-needs policy may exceed one already
+satisfied need. A harmful effect is not a restorative need. Portable tests use
+actual controller/menu/adapter Lua with explicit game-boundary doubles; they are
+not proof of in-game timing, traits, modded nutrition, or multiplayer behavior.

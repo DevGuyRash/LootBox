@@ -54,6 +54,7 @@ package.loaded["LootBox/Jobs"] = { new = function()
             return true
         end }
 end }
+package.loaded["LootBox/TillFull"] = {new = function() error("Unexpected consumption boundary") end}
 local App = require "LootBox/App"
 local Store = require "LootBox/Store"
 local function same(actual, expected)
@@ -252,6 +253,41 @@ test("unreadable preferences require reviews until a current explicit choice is 
     assert(Store.load("LootBox/preferences").unknownSetting == true)
     assert(Store.save("LootBox/preferences", prior))
     App.reset()
+end)
+
+test("Til Full owns the App action boundary until cancellation settles", function()
+    local app = assert(App.get(0))
+    local controller = {busy = true, state = "running"}
+    function controller:isBusy() return self.busy end
+    function controller:status() return {state = self.state, hasJob = self.busy, canPreview = not self.busy} end
+    function controller:tick() self.ticks = (self.ticks or 0) + 1 end
+    function controller:cancel() self.cancelled = true; self.state = "cancelling"; return true end
+    local module = package.loaded["LootBox/TillFull"]
+    local oldNew, oldStatus, oldCancel = module.new, app.jobs.status, app.jobs.cancel
+    module.new = function(_, _, items, kind, both)
+        assert(items[1] == item and kind == "food" and both == false)
+        return controller
+    end
+    local pending = true
+    app.jobs.status = function() return {hasJob = pending, canPreview = not pending, state = "paused"} end
+    app.jobs.cancel = function() calls.consumeJobCancel = true; return true end
+    assert(not app:tillFull({item}, "food") and calls.consumeJobCancel)
+    pending = false
+    assert(app:tillFull({item}, "food") and controller.ticks == 1)
+    local previews, starts, recoveries, resumes = calls.previews, calls.starts, calls.recoveries, resumeCalls
+    assert(not app:preview({}) and not app:previewCondense() and not app:start({}))
+    assert(not app:pause() and not app:resume() and not app:recoverPersonalGear())
+    assert(calls.previews == previews and calls.starts == starts and calls.recoveries == recoveries and resumeCalls == resumes)
+    assert(not app:tillFull({item}, "food"))
+    assert(app:cancel() and controller.cancelled and app:status().state == "cancelling")
+    assert(not app:start({}), "Cancellation still owns pending cleanup")
+    controller.busy, controller.state = false, "cancelled"
+    assert(app:start({}) and app.consumption == nil)
+    app.consumption = controller
+    assert(app:recoverPersonalGear() and app.consumption == nil)
+    app.consumption = controller
+    assert(app:resume() and app.consumption == nil)
+    app.jobs.status, app.jobs.cancel, module.new = oldStatus, oldCancel, oldNew
 end)
 
 test("a validly encoded malformed category document remains read-only", function()
