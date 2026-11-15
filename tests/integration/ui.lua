@@ -831,6 +831,20 @@ test("default and minimum frames retain a full decision row at larger font sizes
     Widgets.H, package.loaded["LootBox/UI"] = originalH, originalModule
 end)
 
+test("Til Full settings explain contextual targets and the explicit both-needs override", function(f)
+    local window = UI.Window:new(0, {}, "settings")
+    window:createChildren()
+    local found
+    for _, row in ipairs(window.preferenceViewport.items) do
+        if row.item.key == "tillFullBothNeeds" then
+            found = row.item.description
+        end
+    end
+    assert(found and found:find("Eat restore hunger and Drink restore thirst", 1, true))
+    assert(found:find("On targets both needs", 1, true) and found:find("Native fullness limits still apply", 1, true))
+    assert(not window.preferenceSelection.tillFullBothNeeds)
+end)
+
 test("Settings keeps every preference reachable above Save across native font sizes", function()
     local originalModule, originalH = package.loaded["LootBox/UI"], Widgets.H
     for _, rowHeight in ipairs({28, 31, 38, 45, 50}) do
