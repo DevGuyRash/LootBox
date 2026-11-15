@@ -495,7 +495,12 @@ local function runTillFull(selection)
     local app, err = App.get(selection.playerIndex)
     local ok
     if app then ok, err = app:tillFull(selection.items, selection.kind) end
-    if not ok and interface and interface.showProgress then interface.showProgress(selection.playerIndex, err) end
+    if not ok then
+        local player = getSpecificPlayer(selection.playerIndex)
+        local message = "Til Full: " .. tostring(err or "The native action could not start")
+        if player and HaloTextHelper and HaloTextHelper.addBadText then HaloTextHelper.addBadText(player, message)
+        else print("[LootBox] " .. message) end
+    end
     return ok, err
 end
 
@@ -523,7 +528,9 @@ local function consumptionMenu(playerIndex, parent, items)
                 end
             end
             if kind and not already then
-                child:addOption("Til Full", {playerIndex = playerIndex, items = snapshot, kind = kind}, runTillFull)
+                local added = child:addOption("Til Full", {playerIndex = playerIndex, items = snapshot, kind = kind}, runTillFull)
+                -- Use vanilla item-icon rendering, including modded food/drink textures.
+                if added then added.itemForTexture = root.itemForTexture or snapshot[1] end
             end
         end
     end
