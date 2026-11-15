@@ -135,4 +135,48 @@ test("interrupted player and required adjunct reject before any preparation",fun
     f.item.getRequireInHandOrInventory=function() return {size=function() return 0 end} end
     assert(f:begin())
 end)
+test("carried worn held and attached consumption does not mutate equipment",function()
+    for _,kind in ipairs({"food","fluid"}) do
+    for _,equipment in ipairs({"worn","held","attached"}) do
+        for _,cancel in ipairs({false,true}) do
+            local f=fixture()
+            f.noPrep=true -- Carried item: native wrapper needs no inventory transfer.
+            local inventory={}
+            f.item.getContainer=function() return inventory end
+            f.player.getInventory=function() return inventory end
+            f.item.isWorn=function() return equipment=="worn" end
+            f.item.isEquipped=function() return equipment=="worn" or equipment=="held" end
+            f.player.isEquipped=function(_,item) return item==f.item and equipment~="attached" end
+            f.player.getPrimaryHandItem=function() return equipment=="held" and f.item or nil end
+            f.item.getAttachedSlot=function() return equipment=="attached" and 2 or -1 end
+            local function forbidden() error("Consumption adapter must not mutate equipment") end
+            f.player.setPrimaryHandItem=forbidden
+            f.player.setSecondaryHandItem=forbidden
+            f.player.setWornItem=forbidden
+            f.player.removeWornItem=forbidden
+            f.player.setAttachedItem=forbidden
+            f.player.removeAttachedItem=forbidden
+            f.item.setAttachedSlot=forbidden
+            f.item.setAttachedSlotType=forbidden
+            assert(f:begin(kind,.25))
+            local actionType=kind=="food" and "ISEatFoodAction" or "ISDrinkFluidAction"
+            assert(f.queue.current.Type==actionType and f.calls[1][1]==kind)
+            if cancel then
+                f.native:cancel("User cancelled")
+                assert(f.queue.current.Type=="WearMask")
+            end
+            f:finish()
+            local done,reason=f.native:poll()
+            assert(done==not cancel and not f.native:isBusy())
+            if cancel then assert(reason=="User cancelled") end
+            assert(f.item:getContainer()==inventory)
+            assert(f.item:isWorn()==(equipment=="worn"))
+            assert(f.item:isEquipped()==(equipment=="worn" or equipment=="held"))
+            assert(f.player:getPrimaryHandItem()==(equipment=="held" and f.item or nil))
+            assert(f.item:getAttachedSlot()==(equipment=="attached" and 2 or -1))
+            assert(#f.calls==1)
+        end
+    end
+    end
+end)
 print("PASS "..tests.." Till Full native boundary scenarios")

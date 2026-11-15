@@ -1189,6 +1189,70 @@ case("Explicit consumption favorite permission preserves every other protection"
     assert(f.world:protected(selected), "Default transfer/trash favorite policy must remain unchanged")
 end)
 
+case("Explicit consumption permits owned food and fluid equipment without weakening transfer safety", function(f)
+    local vessel = f.item(f.inventory, "Canteen")
+    local fluid = {}
+    function vessel:getFluidContainer() return fluid end
+    function vessel:isFavorite() return true end
+    local policy = {allowFavorite = true, allowEquippedConsumption = true}
+    local function assertEquipment()
+        assert(f.world:protected(vessel, {allowFavorite = true}))
+        assert(not f.world:protected(vessel, policy))
+        assert(f.world:protected(vessel), "Default transfer/trash protections must remain")
+    end
+    function vessel:isWorn() return true end
+    assertEquipment()
+    function vessel:isWorn() return false end
+    function f.player:isEquipped(item) return item == vessel end
+    assertEquipment()
+    function f.player:isEquipped() return false end
+    function f.player:getPrimaryHandItem() return vessel end
+    assertEquipment()
+    function f.player:getPrimaryHandItem() return nil end
+    function vessel:getAttachedSlot() return 0 end
+    assertEquipment()
+    f.state.keep[tostring(vessel.id)] = true
+    local protected, reason = f.world:protected(vessel, policy)
+    assert(protected and reason == "Keep")
+    f.state.keep[tostring(vessel.id)] = nil
+    f.world.recovery = {isProtected = function() return true end}
+    protected, reason = f.world:protected(vessel, policy)
+    assert(protected and reason == "Personal gear reserved for recovery")
+    f.world.recovery = nil
+    fluid = nil
+    assert(f.world:protected(vessel, policy), "Non-fluid equipment must remain protected")
+    fluid = {}
+    local originalContainer = vessel.getContainer
+    function vessel:getContainer() return f.junk end
+    assert(f.world:protected(vessel, policy), "External or bag equipment must not be moved")
+    function vessel:getContainer() return nil end
+    assert(f.world:protected(vessel, policy))
+    vessel.getContainer = originalContainer
+    assert(not f.world:protected(vessel, policy))
+    assert(f.world:protected(vessel, {allowFavorite = true, allowEquippedConsumption = "true"}))
+    local bag = f.item(f.inventory, "WaterBag", "Container")
+    bag.inventory = f.container("bag"); bag.inventory.bag = bag
+    f.item(bag.inventory, "Beans")
+    function bag:getFluidContainer() return fluid end
+    function bag:isWorn() return true end
+    protected, reason = f.world:protected(bag, policy)
+    assert(protected and reason == "Bag contains items")
+    local food = f.item(f.inventory, "Apple")
+    local previousInstance = instanceof
+    instanceof = function(value, class) return value == food and class == "Food" or previousInstance(value, class) end
+    function f.player:getPrimaryHandItem() return food end
+    assert(f.world:protected(food), "Held food remains protected for ordinary transfers")
+    assert(not f.world:protected(food, policy), "Explicit consumption permits held native Food")
+    f.state.keep[tostring(food.id)] = true
+    assert(f.world:protected(food, policy), "Keep still protects held Food")
+    f.state.keep[tostring(food.id)] = nil
+    local foodContainer = food.getContainer
+    function food:getContainer() return f.junk end
+    assert(f.world:protected(food, policy), "External Food cannot use equipment exception")
+    food.getContainer = foodContainer
+    instanceof = previousInstance
+end)
+
 case("All-carried matching retains Keep favorite worn attached and whole-bag protection", function(f)
     local maps = matchingFixture(f)
     local normal = f.item(f.inventory, "Beans")
