@@ -72,8 +72,8 @@ Restoration may itself stall; cancellation keeps ownership until native cleanup
 settles rather than claiming masks or items have been restored.
 
 The target is no positive hunger/thirst (zero, bounded by the native minimum), not
-maximum stuffed moodles. The default stops a mixed restorative item when the first
-relevant need is satisfied; the optional both-needs policy may exceed one already
+maximum stuffed moodles. The default follows native action intent: Eat targets hunger, Drink targets thirst,
+even for mixed food/drink. The optional both-needs policy may exceed one already
 satisfied need. A harmful effect is not a restorative need. Portable tests use
 actual controller/menu/adapter Lua with explicit game-boundary doubles; they are
 not proof of in-game timing, traits, modded nutrition, or multiplayer behavior.
