@@ -98,7 +98,7 @@ end
 
 function Handler:perform()
     if isGamePaused() then return end
-    local handled, result, problem = Matching.UI.continueJob(self.playerNum)
+    local handled, result, problem = Matching.UI.continueJob(self.playerNum, "matching:" .. self.mode)
     if handled then return result, problem end
     local app, err = App.get(self.playerNum)
     if not app then return end
@@ -111,7 +111,7 @@ function Handler:perform()
         local fullType = tostring(record.item:getFullType())
         if not seen[fullType] then types[#types + 1] = fullType; seen[fullType] = true end
     end
-    local request = {scope = "inventory", includeInventory = false, includeBags = true,
+    local request = {shortcutIntent = "matching:" .. self.mode, scope = "inventory", includeInventory = false, includeBags = true,
         filter = {all = false, ids = {}, types = types},
         destination = {kind = "matching", mode = self.mode}}
     Matching.UI.quickAction(self.playerNum, {kind = "matching", scope = "inventory"}, request)
@@ -223,7 +223,7 @@ end
 
 function SmartTake:perform()
     if isGamePaused() then return end
-    local handled, result, problem = Matching.UI.continueJob(self.playerNum)
+    local handled, result, problem = Matching.UI.continueJob(self.playerNum, "smart:" .. self.mode, self.container)
     if handled then return result, problem end
     local app = App.get(self.playerNum)
     if not app then return end
@@ -235,7 +235,7 @@ function SmartTake:perform()
         local fullType = tostring(record.item:getFullType())
         if not seen[fullType] then types[#types + 1], seen[fullType] = fullType, true end
     end
-    local request = {scope = "container", sourceContainer = self.container, includeInventory = false, includeBags = false,
+    local request = {shortcutIntent = "smart:" .. self.mode, scope = "container", sourceContainer = self.container, includeInventory = false, includeBags = false,
         excludeUnwanted = true, filter = {all = self.mode == "all", ids = {}, types = types}, destination = {kind = "inventory"}}
     Matching.UI.quickAction(self.playerNum, {kind = "container", container = self.container}, request)
 end
