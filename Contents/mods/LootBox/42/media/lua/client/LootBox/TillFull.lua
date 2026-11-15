@@ -44,13 +44,15 @@ local function fluidEffects(fluid)
     return -properties:getHungerChange(), -properties:getThirstChange()
 end
 
-function TillFull.portion(hunger, thirst, hrelief, trelief, both)
+function TillFull.portion(hunger, thirst, hrelief, trelief, both, kind)
     if not finite(hunger) or not finite(thirst) or not finite(hrelief) or not finite(trelief) then return nil end
     local h = hrelief > 0 and math.max(0, hunger) / hrelief or nil
     local t = trelief > 0 and math.max(0, thirst) / trelief or nil
-    if h == nil and t == nil then return nil end
-    local fraction = h or t
-    if h ~= nil and t ~= nil then fraction = both and math.max(h, t) or math.min(h, t) end
+    local fraction
+    if kind == "food" then fraction = h elseif kind == "fluid" then fraction = t end
+    -- Never silently substitute the other need for the native action selected.
+    if fraction == nil then return nil end
+    if both and h ~= nil and t ~= nil then fraction = math.max(h, t) end
     return math.min(1, fraction)
 end
 
@@ -133,7 +135,11 @@ function TillFull:step()
     local hunger, thirst = needs(self.player)
     if self.confirmation then
         local before = self.inflight
-        if not ((before.hrelief > 0 and hunger < before.hunger) or (before.trelief > 0 and thirst < before.thirst)) then
+        local hungerImproved = before.hrelief > 0 and hunger < before.hunger
+        local thirstImproved = before.trelief > 0 and thirst < before.thirst
+        local improved = self.kind == "food" and hungerImproved or self.kind == "fluid" and thirstImproved
+        if self.both then improved = hungerImproved or thirstImproved end
+        if not improved then
             if getTimestampMs() < self.confirmation then return end
             self:finish("failed", "No need improvement was observed; no more items were queued"); return
         end
@@ -149,8 +155,8 @@ function TillFull:step()
     if not record then self:finish("finished", "The selected stack is exhausted"); return end
     local effects, reason = self:inspect(record)
     if not effects then self:finish("cancelled", reason); return end
-    local portion = TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both)
-    if portion == nil then self:finish("cancelled", "This item cannot restore hunger or thirst"); return end
+    local portion = TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both, self.kind)
+    if portion == nil then self:finish("cancelled", "This item cannot restore the need selected by Eat or Drink"); return end
     if portion <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
     if self.attempts >= 256 then self:finish("cancelled", "Til Full reached its bounded action limit"); return end
     if self.kind == "food" then
@@ -184,7 +190,7 @@ function TillFull:step()
             return true
         end
         local h, t = needs(self.player)
-        local fraction = TillFull.portion(h, t, effects.hunger, effects.thirst, self.both)
+        local fraction = TillFull.portion(h, t, effects.hunger, effects.thirst, self.both, self.kind)
         self.targetReached = fraction ~= nil and fraction <= 0
         return self.targetReached
     end)

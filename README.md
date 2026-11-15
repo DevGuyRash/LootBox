@@ -108,16 +108,13 @@ Portable verification builds the full package before running contracts. The opti
 
 **Til Full** appears alongside vanilla amounts in eligible Eat and Drink submenus.
 It uses only the clicked selection/stack, one native consumption action at a time,
-and stops when no positive hunger or thirst remains for the item's restorative
-needs. It does not aim for maximum stuffed moodles or find extra items elsewhere.
+and stops when the chosen action's need is restored: Eat targets hunger, Drink targets thirst, even when the item restores both. It does not aim for maximum stuffed moodles or find extra items elsewhere.
 Open sealed items normally first; food requiring another item uses the normal Eat action instead. Favorited items are allowed for this explicit consumption action. Food and fluid vessels already in the player's main inventory may be worn, held, or attached: normal native consumption runs without LootBox unequipping them. Keep and personal-gear recovery protections still apply, as do native vessel-size and safety restrictions. Unsafe, changed, or unavailable items
 stop the request; normal native admission rules still apply.
 
 In LootBox Settings, **Show Til Full in Eat and Drink** controls the menu entry.
-**Til Full: satisfy both needs** is off by default: mixed food/drink stops at the
-first satisfied restorative need. Turn it on to continue until both are satisfied,
-which may consume beyond one already satisfied need. Pure food/drink considers
-only the need it restores. The normal context-menu setting also controls this entry.
+**Til Full: satisfy both needs** is off by default: Eat targets hunger and Drink targets thirst. Turn it on to continue until both are satisfied,
+which may consume beyond one already satisfied need. An item must restore the chosen action's need; otherwise the request stops rather than silently switching goals. The normal context-menu setting also controls this entry.
 
 The menu action starts directly without opening another window. A refusal uses compact native feedback; Current job remains available if you want details or to cancel consumption. Movement/action interruption or another queued
 player action prevents further stack consumption. Native mask/item restoration is
