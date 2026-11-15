@@ -106,7 +106,8 @@ local function fixture()
         AddHandler = function(class) add(ISLootWindowContainerControls_HandlerList, class) end,
         AddFloorHandler = function(class) add(ISLootWindowContainerControls_FloorHandlerList, class) end,
     }
-    f.ui = {continueJob = function(playerNum)
+    f.ui = {continueJob = function(playerNum, intent, sourceContainer)
+        f.continueIntent, f.continueSource = intent, sourceContainer
         f.continueCalls, f.continuePlayer = (f.continueCalls or 0) + 1, playerNum
         return f.continueHandled, f.continueResult, f.continueError
     end, condense = function(playerNum) f.condensePlayer = playerNum end, quickAction = function(playerNum, context, request)
@@ -269,6 +270,7 @@ test("click recomputes source matches and sends a deduplicated portable all-cont
     assert(call.player == 3 and call.context.kind == "matching")
     assert(call.request.scope == "inventory" and call.request.includeBags == true and call.request.includeInventory == false)
     assert(call.request.destination.kind == "matching" and call.request.destination.mode == "nearby")
+    assert(call.request.shortcutIntent == "matching:nearby" and f.continueIntent == "matching:nearby")
     assert(#call.request.filter.types == 1 and call.request.filter.types[1] == "Base.Bandage")
     assert(call.request.filter.all == false and call.request.destination.targets == nil)
 end)
@@ -304,6 +306,7 @@ test("both inventory matching buttons continue existing work before inspecting f
     f.matchingError = "The new displayed container is unavailable"
     for _, mode in ipairs({"displayed", "nearby"}) do
         assert(f:handler(mode):perform() == true)
+        assert(f.continueIntent == "matching:" .. mode)
     end
     assert(f.continueCalls == 2 and f.continuePlayer == 3)
     assert(f.calls == 0 and #f.quick == 0 and #f.progress == 0)
@@ -357,6 +360,7 @@ test("Smart Take All captures one displayed source and uses all carried destinat
         local call = f.quick[#f.quick]
         assert(call.player == 3 and f.appPlayer == 3 and call.context.container == f.displayed)
         assert(call.request.scope == "container" and call.request.sourceContainer == f.displayed)
+        assert(call.request.shortcutIntent == "smart:all" and f.continueIntent == "smart:all" and f.continueSource == f.displayed)
         assert(call.request.includeInventory == false and call.request.includeBags == false and call.request.excludeUnwanted == true)
         assert(call.request.filter.all == true and call.request.destination.kind == "inventory")
         f.loot.inventoryPane.inventory = {}
@@ -434,6 +438,7 @@ test("all object and floor Smart Take buttons continue before inspecting an empt
     for _, floor in ipairs({false, true}) do
         for _, mode in ipairs({"all", "matching"}) do
             assert(f:smart(mode, floor):perform() == true)
+            assert(f.continueIntent == "smart:" .. mode and f.continueSource == f.displayed)
         end
     end
     assert(f.continueCalls == 4 and f.continuePlayer == 3 and not f.smartCalls)
