@@ -56,7 +56,7 @@ end)
 test("reject invalid admission before wrapper dispatch",function(f)
     for _,p in ipairs({0,-1,1.01,math.huge,0/0}) do assert(not f.native:begin(f.item,"food",p,function() return false end)) end
     f.item.isSealed=function() return true end; assert(not f:begin())
-    
+
     assert(#f.calls==0)
 end)
 test("busy and already full do not queue",function(f)
