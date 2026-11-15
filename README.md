@@ -110,7 +110,7 @@ Portable verification builds the full package before running contracts. The opti
 It uses only the clicked selection/stack, one native consumption action at a time,
 and stops when no positive hunger or thirst remains for the item's restorative
 needs. It does not aim for maximum stuffed moodles or find extra items elsewhere.
-Open sealed items normally first; food requiring another item uses the normal Eat action instead. Favorited items are allowed for this explicit consumption action; Keep and personal-gear protections still apply. Unsafe, changed, or unavailable items
+Open sealed items normally first; food requiring another item uses the normal Eat action instead. Favorited items are allowed for this explicit consumption action. Food and fluid vessels already in the player's main inventory may be worn, held, or attached: normal native consumption runs without LootBox unequipping them. Keep and personal-gear recovery protections still apply, as do native vessel-size and safety restrictions. Unsafe, changed, or unavailable items
 stop the request; normal native admission rules still apply.
 
 In LootBox Settings, **Show Til Full in Eat and Drink** controls the menu entry.

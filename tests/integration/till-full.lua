@@ -44,7 +44,8 @@ local function food(id,relief,base)
  function f:getFoodSicknessChange() return 0 end
  return f
 end
-local world={protected=function(_,f,options) return f.protected or (f.favorite and not (options and options.allowFavorite)) end}
+local world={protected=function(_,f,options) return f.protected or (f.favorite and not (options and options.allowFavorite))
+    or (f.equipped and not (options and options.allowEquippedConsumption)) end}
 local function test(name,fn) fn(); count=count+1; print('ok '..name) end
 local function close(a,b) assert(math.abs(a-b)<1e-9,tostring(a)..' ~= '..tostring(b)) end
 
@@ -176,5 +177,19 @@ test('explicit favorite stack consumption and live favorite flag are allowed',fu
  a.source=nil; p.h=.3; c:tick(); assert(#created.calls==2 and created.calls[2].item==b)
  assert(not created.target()); b.protected=true; assert(created.target())
  c:tick(); assert(c.state=='cancelled')
+end)
+test('explicit equipped fluid stack consumption keeps flags and remains cancellable',function()
+ local p=player(0,.5); local a,fa=bottle(1,.2); local b,fb=bottle(2,.5)
+ a.equipped=true; a.favorite=true; b.equipped=true
+ local c=assert(Full.new(p,world,{a,b},'fluid')); c:tick()
+ assert(#created.calls==1 and not created.target())
+ fa.empty=true; p.t=.3; c:tick(); assert(#created.calls==2 and created.calls[2].item==b)
+ assert(a.equipped and a.favorite and b.equipped)
+ b.protected=true; assert(created.target()); c:tick(); assert(c.state=='cancelled')
+ assert(a.equipped and b.equipped)
+ local f=food(3,.2); f.equipped=true
+ local foodJob=assert(Full.new(player(.5,0),world,{f},'food')); foodJob:tick()
+ assert(foodJob:isBusy() and #created.calls==1 and not created.target())
+ foodJob:cancel(); foodJob:tick(); assert(foodJob.state=='cancelled' and f.equipped)
 end)
 print('Til Full controller: '..count..' scenarios passed')
