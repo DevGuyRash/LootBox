@@ -845,7 +845,7 @@ test("Settings keeps every preference reachable above Save across native font si
         local viewport, choices = window.preferenceViewport, window.preferenceSelection
         local rows, save = viewport.items
         for _, widget in ipairs(window.body.controls) do if widget.text == "Save preferences" then save = widget end end
-        assert(#rows == 20 and save and viewport.height >= rowHeight)
+        assert(#rows == 22 and save and viewport.height >= rowHeight)
         assert(viewport.y + viewport.height < save.y)
         local preferences, sections, lastY = 0, 0, 0
         for _, row in ipairs(rows) do
@@ -858,7 +858,7 @@ test("Settings keeps every preference reachable above Save across native font si
             else sections = sections + 1; assert(row.item.selectable == false) end
             lastY = lastY + row.height
         end
-        assert(preferences == 17 and sections == 3)
+        assert(preferences == 19 and sections == 3)
         viewport.callback(viewport.target, rows[1].item)
         assert(choices.contextMenus == true and viewport.selected == 0)
         viewport.callback(viewport.target, rows[2].item)
@@ -894,7 +894,7 @@ test("Settings changes only persist through its fixed Save control", function(f)
     assert(saves.contextMenus == false and saves.showTips == false)
     local count = 0
     for _, value in pairs(saves) do assert(type(value) == "boolean"); count = count + 1 end
-    assert(count == 17 and window.preferenceSelection == choices)
+    assert(count == 19 and window.preferenceSelection == choices)
     assert(window.messagePanel.text:find("Preferences saved", 1, true) and not f.cancelled and f.starts == 0)
     App.setPreferences = previous
 end)

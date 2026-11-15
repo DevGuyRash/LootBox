@@ -5,6 +5,7 @@ local World = require "LootBox/World"
 local Jobs = require "LootBox/Jobs"
 local Setups = require "LootBox/Setups"
 local Recovery = require "LootBox/Recovery"
+local TillFull = require "LootBox/TillFull"
 
 local App = {}
 local Instance = {}
@@ -440,6 +441,7 @@ function Instance:currentContainer()
     return loot and loot.inventoryPane and loot.inventoryPane.inventory or nil
 end
 function Instance:preview(request)
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before starting another job" end
     if self.error or loadError then return nil, self.error or loadError end
     local recovery = self.recovery:status()
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
@@ -447,6 +449,7 @@ function Instance:preview(request)
     return self.jobs:preview(request)
 end
 function Instance:previewCondense()
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before starting another job" end
     if self.error or loadError then return nil, self.error or loadError end
     local recovery = self.recovery:status()
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before condensing" end
@@ -457,6 +460,7 @@ function Instance:previewCondense()
         useUnequipped = preferences.condenseUseUnequipped, nested = preferences.condenseNested})
 end
 function Instance:start(plan, options)
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before starting another job" end
     local recovery = self.recovery:status()
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
     local ok, err = self:persist()
@@ -464,18 +468,53 @@ function Instance:start(plan, options)
     local chosen = {}
     for key, value in pairs(options or {}) do chosen[key] = value end
     if chosen.reviewBins == nil then chosen.reviewBins = App.reviewPreference(nil, true) end
-    return self.jobs:start(plan, chosen)
+    local started, problem = self.jobs:start(plan, chosen)
+    if started then self.consumption = nil end
+    return started, problem
 end
-function Instance:cancel() return self.jobs:cancel() end
-function Instance:pause() return self.jobs:pause() end
-function Instance:resume() return self.jobs:resume() end
+function Instance:tillFull(items, kind)
+    if self.error or loadError then return nil, self.error or loadError end
+    local options, err = App.getPreferences()
+    if err then return nil, err end
+    if not options.tillFullEnabled then return nil, "Til Full is disabled in settings" end
+    if self.recovery:status().pending then return nil, "Recover personal gear before consuming" end
+    if self.consumption and self.consumption:isBusy() then return nil, "Til Full is already active; use Current job to cancel" end
+    if self.jobs:status().hasJob then self.jobs:cancel() end
+    if not self.jobs:status().canPreview then return nil, "Wait for native job cleanup, then try Til Full again" end
+    local controller
+    controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds)
+    if not controller then return nil, err end
+    self.consumption = controller
+    controller:tick()
+    if not controller:isBusy() and controller.state ~= "finished" then return nil, controller.reason end
+    return true
+end
+function Instance:cancel()
+    if self.consumption and self.consumption:isBusy() then return self.consumption:cancel() end
+    return self.jobs:cancel()
+end
+function Instance:pause()
+    if self.consumption and self.consumption:isBusy() then return nil, "Til Full cannot be paused; cancel it instead" end
+    return self.jobs:pause()
+end
+function Instance:resume()
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before resuming another job" end
+    local ok, err = self.jobs:resume()
+    if ok then self.consumption = nil end
+    return ok, err
+end
 function Instance:status()
-    local status = self.jobs:status()
+    local status = self.consumption and self.consumption:status() or self.jobs:status()
     status.recovery = self:recoveryStatus()
     return status
 end
 function Instance:recoveryStatus() return self.recovery:status() end
-function Instance:recoverPersonalGear() return self.jobs:recoverPersonalGear() end
+function Instance:recoverPersonalGear()
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before recovering personal gear" end
+    local ok, err = self.jobs:recoverPersonalGear()
+    if ok then self.consumption = nil end
+    return ok, err
+end
 function Instance:reviewBin() return self.jobs:reviewBin() end
 function Instance:approveBin(review, options) return self.jobs:approveBin(review, options) end
 function Instance:rejectBin(review) return self.jobs:rejectBin(review) end
@@ -483,6 +522,7 @@ function Instance:rejectBin(review) return self.jobs:rejectBin(review) end
 function App.tick()
     local stamp = getTimestampMs()
     for _, instance in pairs(sessions) do
+        if instance.consumption then instance.consumption:tick() end
         instance.jobs:tick()
         if not instance.lastObserve or stamp - instance.lastObserve >= 1000 then
             instance.lastObserve = stamp
