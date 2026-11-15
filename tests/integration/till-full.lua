@@ -44,7 +44,7 @@ local function food(id,relief,base)
  function f:getFoodSicknessChange() return 0 end
  return f
 end
-local world={protected=function(_,f) return f.protected end}
+local world={protected=function(_,f,options) return f.protected or (f.favorite and not (options and options.allowFavorite)) end}
 local function test(name,fn) fn(); count=count+1; print('ok '..name) end
 local function close(a,b) assert(math.abs(a-b)<1e-9,tostring(a)..' ~= '..tostring(b)) end
 
@@ -168,5 +168,13 @@ test('oversized vessel and malformed selection fail safely',function()
  assert(c.state=='cancelled' and #created.calls==0)
  assert(Full.new(player(1,1),world,{},'food')==nil)
  assert(Full.new(player(1,1),world,{false},'food')==nil)
+end)
+test('explicit favorite stack consumption and live favorite flag are allowed',function()
+ local p=player(.5,0); local a,b=food(1,.2),food(2,.2); a.favorite=true; b.favorite=true
+ local c=assert(Full.new(p,world,{a,b},'food')); c:tick()
+ assert(#created.calls==1 and not created.target())
+ a.source=nil; p.h=.3; c:tick(); assert(#created.calls==2 and created.calls[2].item==b)
+ assert(not created.target()); b.protected=true; assert(created.target())
+ c:tick(); assert(c.state=='cancelled')
 end)
 print('Til Full controller: '..count..' scenarios passed')

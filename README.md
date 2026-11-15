@@ -110,7 +110,7 @@ Portable verification builds the full package before running contracts. The opti
 It uses only the clicked selection/stack, one native consumption action at a time,
 and stops when no positive hunger or thirst remains for the item's restorative
 needs. It does not aim for maximum stuffed moodles or find extra items elsewhere.
-Open sealed items normally first; food requiring another item uses the normal Eat action instead. Protected, unsafe, changed, or unavailable items
+Open sealed items normally first; food requiring another item uses the normal Eat action instead. Favorited items are allowed for this explicit consumption action; Keep and personal-gear protections still apply. Unsafe, changed, or unavailable items
 stop the request; normal native admission rules still apply.
 
 In LootBox Settings, **Show Til Full in Eat and Drink** controls the menu entry.
@@ -119,7 +119,7 @@ first satisfied restorative need. Turn it on to continue until both are satisfie
 which may consume beyond one already satisfied need. Pure food/drink considers
 only the need it restores. The normal context-menu setting also controls this entry.
 
-Current job can cancel consumption. Movement/action interruption or another queued
+The menu action starts directly without opening another window. A refusal uses compact native feedback; Current job remains available if you want details or to cancel consumption. Movement/action interruption or another queued
 player action prevents further stack consumption. Native mask/item restoration is
 preserved, so cancellation can remain pending during cleanup. No-progress or
 unavailable native actions stop safely rather than repeatedly queuing items.

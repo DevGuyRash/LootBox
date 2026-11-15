@@ -376,12 +376,12 @@ function World:describe(item)
         labels = copy(id and self.state.itemLabels[id] or {})}
 end
 
-function World:protected(item)
+function World:protected(item, options)
     if not item then return true, "Item is missing" end
     if self.recovery and self.recovery:isProtected(item) then return true, "Personal gear reserved for recovery" end
     local id = self:itemId(item)
     if id and self.state.keep[id] then return true, "Keep" end
-    if call(item, "isFavorite") then return true, "Favorite" end
+    if call(item, "isFavorite") and not (type(options) == "table" and options.allowFavorite == true) then return true, "Favorite" end
     if call(self.player, "isEquipped", item) or call(item, "isEquipped") or call(item, "isWorn") then return true, "Equipped" end
     if item == call(self.player, "getPrimaryHandItem") or item == call(self.player, "getSecondaryHandItem") then return true, "Held" end
     local attached = call(item, "getAttachedSlot")
