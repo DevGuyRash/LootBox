@@ -49,11 +49,16 @@ local world={protected=function(_,f,options) return f.protected or (f.favorite a
 local function test(name,fn) fn(); count=count+1; print('ok '..name) end
 local function close(a,b) assert(math.abs(a-b)<1e-9,tostring(a)..' ~= '..tostring(b)) end
 
-test('portion mixed and irrelevant dimensions',function()
- close(Full.portion(.1,.3,.2,.2,false),.5); close(Full.portion(.1,.3,.2,.2,true),1)
- assert(Full.portion(0,.3,.2,.2,false)==0); assert(Full.portion(0,.3,.2,.2,true)==1)
- close(Full.portion(.1,0,.2,-.1,false),.5)
- assert(Full.portion(1,1,0,0)==nil); assert(Full.portion(1,1,0/0,1)==nil)
+test('portion follows native Eat or Drink intent, with explicit both override',function()
+ close(Full.portion(.1,.3,.2,.2,false,'food'),.5)
+ close(Full.portion(.1,.3,.2,.2,false,'fluid'),1)
+ close(Full.portion(.1,.3,.2,.2,true,'food'),1)
+ assert(Full.portion(0,.3,.2,.2,false,'food')==0)
+ assert(Full.portion(0,.3,.2,.2,false,'fluid')==1)
+ close(Full.portion(.1,0,.2,-.1,false,'food'),.5)
+ assert(Full.portion(1,1,0,.2,false,'food')==nil)
+ assert(Full.portion(1,1,.2,0,false,'fluid')==nil)
+ assert(Full.portion(1,1,0/0,1,false,'food')==nil)
 end)
 test('partly eaten uses original base units',function()
  local c=assert(Full.new(player(.1,0),world,{food(1,.2,.4)},'food')); c:tick()
@@ -191,5 +196,31 @@ test('explicit equipped fluid stack consumption keeps flags and remains cancella
  local foodJob=assert(Full.new(player(.5,0),world,{f},'food')); foodJob:tick()
  assert(foodJob:isBusy() and #created.calls==1 and not created.target())
  foodJob:cancel(); foodJob:tick(); assert(foodJob.state=='cancelled' and f.equipped)
+end)
+test('hydrating food continues to hunger target after thirst is satisfied',function()
+ local p=player(.4,.01); local f=food(1,.5); f.t=.5
+ local c=assert(Full.new(p,world,{f},'food')); c:tick(); close(created.calls[1].portion,.8)
+ p.t=0; assert(not created.target()); p.h=0; assert(created.target())
+end)
+test('milk drinking targets thirst even with hunger already satisfied',function()
+ local p=player(0,.3); local f,fluid=bottle(1,.5)
+ function fluid:getProperties() return {getPoison=function() return 0 end,getAlcohol=function() return 0 end,
+  getFoodSicknessChange=function() return 0 end,getHungerChange=function() return -.5 end,getThirstChange=function() return -.5 end} end
+ local c=assert(Full.new(p,world,{f},'fluid')); c:tick(); close(created.calls[1].portion,.6)
+ assert(not created.target()); p.t=0; assert(created.target()); c:tick(); assert(c.state=='finished')
+end)
+test('secondary-only improvement cannot continue a default drink job',function()
+ local p=player(.5,.5); local f,fluid=bottle(1,.5)
+ function fluid:getProperties() return {getPoison=function() return 0 end,getAlcohol=function() return 0 end,
+  getFoodSicknessChange=function() return 0 end,getHungerChange=function() return -.5 end,getThirstChange=function() return -.5 end} end
+ local c=assert(Full.new(p,world,{f},'fluid')); c:tick(); p.h=.1; c:tick()
+ assert(c:isBusy() and #created.calls==1); now=now+2001; c:tick()
+ assert(c.state=='failed' and #created.calls==1)
+end)
+test('already satisfied Drink does not eat for secondary hunger',function()
+ local p=player(.5,0); local f,fluid=bottle(1,.5)
+ function fluid:getProperties() return {getPoison=function() return 0 end,getAlcohol=function() return 0 end,
+  getFoodSicknessChange=function() return 0 end,getHungerChange=function() return -.5 end,getThirstChange=function() return -.5 end} end
+ local c=assert(Full.new(p,world,{f},'fluid')); c:tick(); assert(c.state=='finished' and #created.calls==0)
 end)
 print('Til Full controller: '..count..' scenarios passed')
