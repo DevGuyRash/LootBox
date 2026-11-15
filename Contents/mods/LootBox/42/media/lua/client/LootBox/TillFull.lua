@@ -1,0 +1,207 @@
+local Adapter = require "LootBox/TillFullNative"
+local TillFull = {}
+TillFull.__index = TillFull
+
+local function finite(n) return type(n) == "number" and n == n and math.abs(n) < math.huge end
+local function needs(player)
+    local stats = player:getStats()
+    local hunger, thirst = stats:get(CharacterStat.HUNGER), stats:get(CharacterStat.THIRST)
+    local hmin, tmin = CharacterStat.HUNGER:getMinimumValue(), CharacterStat.THIRST:getMinimumValue()
+    if not finite(hunger) or not finite(thirst) or not finite(hmin) or not finite(tmin) then error("The game's need values are unavailable") end
+    -- Zero hunger is satisfied, not the negative stuffed range. Never target
+    -- below the native minimum on builds with different stat bounds.
+    return math.max(0, hunger - math.max(0, hmin)), math.max(0, thirst - math.max(0, tmin))
+end
+
+local function safeFood(item)
+    return not item:isRotten() and not item:isBurnt() and not item:isFrozen() and not item:isTainted()
+        and not item:isPoison() and item:getPoisonPower() <= 0 and item:getFoodSicknessChange() <= 0
+        and not item:isAlcoholic() and (not item:isbDangerousUncooked() or item:isCooked())
+end
+
+local function fluidEffects(fluid)
+    local properties = fluid:getProperties()
+    if fluid:isEmpty() or not fluid:canPlayerEmpty() or fluid:isPoisonous() or fluid:isTainted()
+        or properties:getPoison() > 0 or properties:getAlcohol() > 0 or properties:getFoodSicknessChange() > 0 then
+        return nil, "This drink is empty, sealed, or unsafe"
+    end
+    local sample = fluid:createFluidSample()
+    local ok, safe = pcall(function()
+        for index = 0, sample:size() - 1 do
+            if sample:getPercentage(index) > 0 then
+                local part = sample:getFluid(index)
+                local props = part:getProperties()
+                if not (part:isCategory(FluidCategory.Beverage) or part:isCategory(FluidCategory.Water))
+                    or part:isCategory(FluidCategory.Hazardous) or part:isCategory(FluidCategory.Alcoholic)
+                    or part:isPoisonous() or props:getPoison() > 0 or props:getAlcohol() > 0
+                    or props:getFoodSicknessChange() > 0 then return false end
+            end
+        end
+        return true
+    end)
+    sample:release()
+    if not ok or not safe then return nil, "This fluid mixture cannot be safely consumed automatically" end
+    return -properties:getHungerChange(), -properties:getThirstChange()
+end
+
+function TillFull.portion(hunger, thirst, hrelief, trelief, both)
+    if not finite(hunger) or not finite(thirst) or not finite(hrelief) or not finite(trelief) then return nil end
+    local h = hrelief > 0 and math.max(0, hunger) / hrelief or nil
+    local t = trelief > 0 and math.max(0, thirst) / trelief or nil
+    if h == nil and t == nil then return nil end
+    local fraction = h or t
+    if h ~= nil and t ~= nil then fraction = both and math.max(h, t) or math.min(h, t) end
+    return math.min(1, fraction)
+end
+
+function TillFull.new(player, world, items, kind, both)
+    if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption action" end
+    if type(items) ~= "table" then return nil, "Choose an item stack" end
+    local records, seen = {}, {}
+    for _, item in ipairs(items) do
+        if not seen[item] then
+            seen[item] = true
+            local ok, record = pcall(function()
+                return {item = item, id = item:getID(), fullType = tostring(item:getFullType()), source = item:getContainer()}
+            end)
+            if not ok then return nil, "The selected item is unavailable" end
+            records[#records + 1] = record
+            if #records > 4096 then return nil, "Choose a bounded item stack" end
+        end
+    end
+    if #records == 0 or #records > 4096 then return nil, "Choose a nonempty bounded item stack" end
+    return setmetatable({player = player, world = world, records = records, kind = kind, both = both == true,
+        index = 1, count = 0, native = Adapter.new(player), state = "running", attempts = 0}, TillFull)
+end
+
+function TillFull:inspect(record)
+    local item, source = record.item, record.item:getContainer()
+    if item:getID() ~= record.id or tostring(item:getFullType()) ~= record.fullType or not source
+        or (source ~= record.source and source ~= self.player:getInventory()) then return nil, "The selected item moved or changed" end
+    local protected, reason = self.world:protected(item)
+    if protected then return nil, "Protected: " .. tostring(reason or "selected item") end
+    if item:isSealed() then return nil, "Open this item normally before using Til Full" end
+    local hunger, thirst
+    if self.kind == "food" then
+        if not instanceof(item, "Food") or not safeFood(item) or item:getScriptItem():isCantEat() then return nil, "This food is not safe to consume automatically" end
+        local required = item.getRequireInHandOrInventory and item:getRequireInHandOrInventory()
+        if required and required:size() > 0 then return nil, "Use the normal Eat action for food requiring another item" end
+        hunger, thirst = -item:getHungerChange(), -item:getThirstChange()
+    else
+        if instanceof(item, "Food") and not safeFood(item) then return nil, "This fluid's food container is unsafe" end
+        local fluid = item:getFluidContainer()
+        if not fluid or fluid:getCapacity() > 3 then return nil, "Use an open drinking vessel" end
+        hunger, thirst = fluidEffects(fluid)
+        if hunger == nil then return nil, thirst end
+    end
+    if not finite(hunger) or not finite(thirst) then return nil, "The item's nutrition is unavailable" end
+    return {hunger = hunger, thirst = thirst}
+end
+
+function TillFull:finish(state, reason)
+    self.state, self.reason = state, reason
+    self.records, self.inflight, self.confirmation = nil, nil, nil
+end
+
+function TillFull:isBusy() return self.state == "running" or self.state == "cancelling" end
+function TillFull:status()
+    return {state = self.state, reason = self.reason, done = self.count, total = self.total or (self.records and #self.records or self.count),
+        moved = 0, skipped = 0, reasons = {}, hasJob = self:isBusy(), canPreview = not self:isBusy(), canResume = false, canPause = false,
+        action = "consume", intent = "consume:" .. self.kind}
+end
+function TillFull:cancel()
+    if not self:isBusy() then return true end
+    self.state, self.reason = "cancelling", "Til Full cancelled"
+    if self.native:isBusy() then self.native:cancel() else self:finish("cancelled", self.reason) end
+    return true
+end
+
+function TillFull:step()
+    if not self:isBusy() then return end
+    self.total = self.total or #self.records
+    if self.native:isBusy() then
+        local done, reason = self.native:poll()
+        if done == nil then return end
+        if self.state == "cancelling" then self:finish("cancelled", self.reason); return end
+        if self.stopReason then self:finish("cancelled", self.stopReason); return end
+        if self.targetReached then self:finish("finished", "The selected need target is satisfied"); return end
+        if not done then self:finish("cancelled", reason or "Native consumption was interrupted"); return end
+        self.confirmation = getTimestampMs() + 2000
+    end
+    if self.state == "cancelling" then self:finish("cancelled", self.reason); return end
+    if self.player:isDead() or self.player:isAsleep() then self:finish("cancelled", "The player cannot consume now"); return end
+    local hunger, thirst = needs(self.player)
+    if self.confirmation then
+        local before = self.inflight
+        if not ((before.hrelief > 0 and hunger < before.hunger) or (before.trelief > 0 and thirst < before.thirst)) then
+            if getTimestampMs() < self.confirmation then return end
+            self:finish("failed", "No need improvement was observed; no more items were queued"); return
+        end
+        self.count = self.count + 1
+        self.confirmation, self.inflight = nil, nil
+        local current = self.records[self.index]
+        local depleted = not current.item:getContainer()
+        if self.kind == "fluid" and current.item:getFluidContainer() then depleted = depleted or current.item:getFluidContainer():isEmpty() end
+        if self.kind == "food" then depleted = depleted or current.item:getHungChange() >= 0 end
+        if depleted then self.index = self.index + 1 end
+    end
+    local record = self.records[self.index]
+    if not record then self:finish("finished", "The selected stack is exhausted"); return end
+    local effects, reason = self:inspect(record)
+    if not effects then self:finish("cancelled", reason); return end
+    local portion = TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both)
+    if portion == nil then self:finish("cancelled", "This item cannot restore hunger or thirst"); return end
+    if portion <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
+    if self.attempts >= 256 then self:finish("cancelled", "Til Full reached its bounded action limit"); return end
+    if self.kind == "food" then
+        local base, remaining = record.item:getBaseHunger(), record.item:getHungChange()
+        if not finite(base) or not finite(remaining) or base >= 0 or remaining >= 0 then
+            self:finish("cancelled", "The native food portion cannot be measured safely"); return
+        end
+        portion = math.min(1, portion * remaining / base)
+    end
+    if not finite(portion) or portion <= 0 then self:finish("cancelled", "The native portion is invalid"); return end
+    self.inflight = {hunger = hunger, thirst = thirst, hrelief = effects.hunger, trelief = effects.thirst}
+    local ok, failure = self.native:begin(record.item, self.kind, portion, function()
+        local item = record.item
+        local protected = self.world:protected(item)
+        local source = item:getContainer()
+        local changed = item:getID() ~= record.id or tostring(item:getFullType()) ~= record.fullType
+            or (source and source ~= record.source and source ~= self.player:getInventory())
+        local unsafe = item:isSealed() or (instanceof(item, "Food") and not safeFood(item))
+        if self.kind == "fluid" then
+            local fluid = item:getFluidContainer()
+            if not fluid then unsafe = true
+            elseif not fluid:isEmpty() then
+                local hrelief, trelief = fluidEffects(fluid)
+                unsafe = unsafe or not finite(hrelief) or not finite(trelief)
+                    or (finite(hrelief) and (hrelief > 0) ~= (effects.hunger > 0))
+                    or (finite(trelief) and (trelief > 0) ~= (effects.thirst > 0))
+            end
+        end
+        if protected or changed or unsafe then
+            self.stopReason = "The selected item is no longer safe to consume automatically"
+            return true
+        end
+        local h, t = needs(self.player)
+        local fraction = TillFull.portion(h, t, effects.hunger, effects.thirst, self.both)
+        self.targetReached = fraction ~= nil and fraction <= 0
+        return self.targetReached
+    end)
+    self.attempts = self.attempts + 1
+    if not ok then
+        self.reason = failure or "The native action could not start"
+        if self.native:isBusy() then self.state = "cancelling" else self:finish("cancelled", self.reason) end
+    end
+end
+
+function TillFull:tick()
+    local ok, reason = pcall(self.step, self)
+    if not ok then
+        self.reason = "Til Full stopped safely: " .. tostring(reason)
+        self.state = "cancelling"
+        if self.native:isBusy() then self.native:cancel() else self:finish("failed", self.reason) end
+    end
+end
+
+return TillFull
