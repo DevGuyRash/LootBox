@@ -993,6 +993,7 @@ function Jobs:recoveryStep()
         self.view.state = saved and "paused" or "finished"
         self.view.reason = saved and "Personal gear recovered. Choose Resume job to continue the paused job." or "Personal gear recovered to its original places."
         self:diagnostic("recovered", self.view.reason)
+        if not saved then self.reviewed, self.plan, self.carry, self.hauled = nil, nil, nil, nil end
     else execution.recovery, execution.phase = nil, work.after or "source" end
 end
 
@@ -1742,7 +1743,12 @@ function Jobs:complete(state, reason)
     if state == "cancelled" then
         -- Keep the personal-gear receipt separate from discarded scheduler state.
         -- Cancellation is terminal; only Pause retains execution callbacks.
-        self.suspended, self.reviewed, self.plan, self.carry, self.hauled = nil, nil, nil, nil, nil
+        self.suspended = nil
+    end
+    if not self.suspended then
+        -- Terminal status is a display snapshot, not an owner of planning graphs.
+        -- A failed recovery may still own a paused checkpoint and must retain it.
+        self.reviewed, self.plan, self.carry, self.hauled = nil, nil, nil, nil
     end
 end
 

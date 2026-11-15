@@ -2938,11 +2938,35 @@ test("Cancel drops recovery continuation but preserves the personal gear receipt
     assert(f.jobs:recoverPersonalGear())
     local recovered = finish(f)
     assert(recovered.state == "finished" and not recovered.canResume and not recovered.hasJob)
+    assert(f.jobs.plan == nil and f.jobs.carry == nil and f.jobs.hauled == nil)
     assert(f.inventory:contains(personal) and f.source:contains(selected) and not recovery.pending)
     start(f, request("inventory"))
     awaitOperation(f, function(op) return op.kind == "approach" end)
     assert(f.jobs:pause()); awaitState(f, "paused")
     assert(f.jobs:resume() and finish(f).done == 1)
+end)
+
+test("terminal jobs release planning graphs but retain display summaries", function()
+    local f = condenseFixture()
+    f:addBag("Strong", 10, 0.1)
+    item(f.inventory, "Test.Loose", 2)
+    f:startCondense()
+    local references = setmetatable({f.jobs.plan, f.jobs.execution, f.jobs.execution.condense}, {__mode = "v"})
+    local result = finish(f)
+    assert(result.state == "finished" and result.condense and not result.hasJob)
+    assert(f.jobs.plan == nil and f.jobs.carry == nil and f.jobs.hauled == nil and f.jobs.reviewed == nil)
+    if type(collectgarbage) == "function" then
+        collectgarbage("collect"); collectgarbage("collect")
+        assert(next(references) == nil, "Finished planning graph must be collectible")
+    end
+    -- Terminal failure has the same lifecycle, but failed recovery checkpoints
+    -- remain covered by the recovery scenarios above.
+    local g = fixture(3)
+    item(g.source)
+    start(g)
+    g.jobs:finishWhenSettled("failed", "Injected terminal failure")
+    assert(finish(g).state == "failed" and not g.jobs:status().hasJob)
+    assert(g.jobs.plan == nil and g.jobs.carry == nil and g.jobs.hauled == nil)
 end)
 
 print("PASS " .. tests .. " Jobs integration scenarios")
