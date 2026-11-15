@@ -1171,6 +1171,7 @@ test("Til Full extends native callback submenus without changing native options"
         local parent, child = Menu:new(), Menu:new()
         local root = parent:addOption("Localized native label", nil, nil)
         root.subOption = 37
+        if kind == "fluid" then root.itemForTexture = f.bandage end
         parent.getSubMenu = function(_, id) assert(id == 37); return child end
         local callback = kind == "food" and ISInventoryPaneContextMenu.onEatItems or ISInventoryPaneContextMenu.onDrinkFluid
         local original = child:addOption("Localized fraction", {}, callback)
@@ -1178,12 +1179,40 @@ test("Til Full extends native callback submenus without changing native options"
         assert(#child.options == 2 and child.options[1] == original and original.onSelect == callback)
         local added = child.options[2]
         assert(added.name == "Til Full")
+        assert(added.itemForTexture == (kind == "fluid" and f.bandage or f.apple))
+        assert(added.iconTexture == nil and original.itemForTexture == nil)
+        assert(root.itemForTexture == (kind == "fluid" and f.bandage or nil))
+        assert(added.child == nil and added.subOption == nil)
         added.onSelect(added.target)
+        assert(f.progressPlayer == nil, "Til Full must start directly without opening Current job")
         assert(f.consumeKind == kind and #f.consumed == 2 and f.consumed[1] == f.apple and f.consumed[2] == f.bandage)
         Menus.inventoryMenu(0, parent, {f.apple})
         assert(#child.options == 2)
     end
     ISInventoryPane = oldPane
+end)
+
+test("Til Full refusal uses compact native feedback without another window", function(f)
+    local oldPane, oldHalo = ISInventoryPane, HaloTextHelper
+    ISInventoryPane = {getActualItems = function() return {f.apple} end}
+    ISInventoryPaneContextMenu.onEatItems = function() end
+    f.preferences.tillFullEnabled = true
+    f.app.tillFull = function() return nil, "Keep" end
+    local message, recipient
+    HaloTextHelper = {addBadText = function(player, text) recipient, message = player, text end}
+    local parent, child = Menu:new(), Menu:new()
+    local root = parent:addOption("Eat", nil, nil); root.subOption = 1
+    parent.getSubMenu = function() return child end
+    child:addOption("All", {}, ISInventoryPaneContextMenu.onEatItems)
+    Menus.inventoryMenu(0, parent, {f.apple})
+    local added = child.options[2]
+    local ok, err = added.onSelect(added.target)
+    assert(not ok and err == "Keep" and message == "Til Full: Keep" and recipient == getSpecificPlayer(0))
+    assert(f.progressPlayer == nil and f.opened == nil and added.child == nil)
+    HaloTextHelper = nil
+    assert(not added.onSelect(added.target))
+    assert(f.progressPlayer == nil and f.opened == nil)
+    ISInventoryPane, HaloTextHelper = oldPane, oldHalo
 end)
 
 test("Til Full respects disabled, unavailable and opening-recipe native actions", function(f)

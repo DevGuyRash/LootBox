@@ -1157,6 +1157,38 @@ case("Matching uses native clothing alias equivalence and deduplicates repeated 
     equal(targets[1].types["Native.HolsterAlias"], nil)
 end)
 
+case("Explicit consumption favorite permission preserves every other protection", function(f)
+    local selected = f.item(f.inventory, "Beans")
+    function selected:isFavorite() return true end
+    local allowed = {allowFavorite = true}
+    local protected, reason = f.world:protected(selected)
+    assert(protected and reason == "Favorite")
+    assert(f.world:protected(selected, {}) and f.world:protected(selected, {allowFavorite = "true"}))
+    assert(not f.world:protected(selected, allowed))
+    f.state.keep[tostring(selected.id)] = true
+    protected, reason = f.world:protected(selected, allowed)
+    assert(protected and reason == "Keep")
+    f.state.keep[tostring(selected.id)] = nil
+    f.world.recovery = {isProtected = function() return true end}
+    protected, reason = f.world:protected(selected, allowed)
+    assert(protected and reason == "Personal gear reserved for recovery")
+    f.world.recovery = nil
+    function f.player:isEquipped(item) return item == selected end
+    protected, reason = f.world:protected(selected, allowed)
+    assert(protected and reason == "Equipped")
+    function f.player:isEquipped() return false end
+    function f.player:getPrimaryHandItem() return selected end
+    protected, reason = f.world:protected(selected, allowed)
+    assert(protected and reason == "Held")
+    function f.player:getPrimaryHandItem() return nil end
+    function selected:getAttachedSlot() return 0 end
+    protected, reason = f.world:protected(selected, allowed)
+    assert(protected and reason == "Attached")
+    function selected:getAttachedSlot() return -1 end
+    assert(not f.world:protected(selected, allowed))
+    assert(f.world:protected(selected), "Default transfer/trash favorite policy must remain unchanged")
+end)
+
 case("All-carried matching retains Keep favorite worn attached and whole-bag protection", function(f)
     local maps = matchingFixture(f)
     local normal = f.item(f.inventory, "Beans")
