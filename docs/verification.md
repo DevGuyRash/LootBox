@@ -250,3 +250,15 @@ The fixed native client used no NeatUI, LuaBuddy, debug flag, or executable Loot
 The installed native ISBaseObject, ISButton and ISInventoryWindowControlHandler sources also drove all seven LootBox toolbar controls through real single- and double-click dispatch with explicit framework, App and world adapters. The 0.9.6 consumer failed because a double-click opened a window. The fixed consumer passed in Lua 5.1 and installed Kahlua, including paused/cancelled checkpoint precedence, blocked checkpoint preservation and fresh work after completion. `native-button-report.json` records this boundary scope separately from gameplay.
 
 The complete production build preceded new contracts. `verify-final/report.json` passes 680 contracts in each of Lua 5.1 and installed Kahlua, plus native Store file I/O, with stable source. Matching has 33 cases, UI 102, and Jobs 136. Coverage includes every toolbar variant before fresh scans, empty or changed displayed sources, rejected resumes, game pause, running and settling jobs, bin review, and recovery-blocked checkpoints even when new previews are allowed. Direct context-menu quick-action semantics and fresh-start review/progress preferences remain covered. A click during true pausing or cancelling cleanup stays quiet; a stopped checkpoint can resume once cleanup settles. Ordinary walking continues through the existing yield-and-retry path. The disposable Linux display launcher now uses Xvfb `-noreset`, after the old invocation reproduced a display reset that prevented GLFW initialization.
+
+### Til Full portable lane
+
+`tests/integration/till-full.lua` exercises the actual finite controller with
+explicit Java-item/stat and native-action doubles: partial food units, selected
+stack identity, pure and mixed needs, configurable first/both targets, negative
+hunger bounds, cancellation, preparation failure, no-progress timeout, protected
+and unsafe items, live contamination, and fluid depletion. `till-full-native.lua`
+exercises the actual adapter with a modeled timed-action queue, including foreign
+work and native restoration. Menu, settings and App tests cover callback matching,
+persistence and mutual exclusion with the existing job scheduler. These are not
+native gameplay or multiplayer acceptance, nor proof of exact consumption timing.

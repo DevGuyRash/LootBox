@@ -103,3 +103,26 @@ python3 tools/play.py --game /path/to/ProjectZomboid/projectzomboid --evidence /
 ```
 
 Portable verification builds the full package before running contracts. The optional native lane needs JDK 25 and repeats contracts in the installed game's Kahlua interpreter. Boundary doubles are explicitly separate from actual gameplay. `tools/play.py` starts an owned Xvfb display and an isolated game cache using the stock game JRE, without reading launcher overrides or touching personal saves. Stop its owning process to terminate and reap its client/display. `--resume` restarts a stopped owned cache for persistence checks. See [verification](docs/verification.md), [design](docs/design.md), [reference findings](docs/research.md), and the [user's own requirements](docs/request.md).
+
+## Eat or drink Til Full
+
+**Til Full** appears alongside vanilla amounts in eligible Eat and Drink submenus.
+It uses only the clicked selection/stack, one native consumption action at a time,
+and stops when no positive hunger or thirst remains for the item's restorative
+needs. It does not aim for maximum stuffed moodles or find extra items elsewhere.
+Open sealed items normally first; food requiring another item uses the normal Eat action instead. Protected, unsafe, changed, or unavailable items
+stop the request; normal native admission rules still apply.
+
+In LootBox Settings, **Show Til Full in Eat and Drink** controls the menu entry.
+**Til Full: satisfy both needs** is off by default: mixed food/drink stops at the
+first satisfied restorative need. Turn it on to continue until both are satisfied,
+which may consume beyond one already satisfied need. Pure food/drink considers
+only the need it restores. The normal context-menu setting also controls this entry.
+
+Current job can cancel consumption. Movement/action interruption or another queued
+player action prevents further stack consumption. Native mask/item restoration is
+preserved, so cancellation can remain pending during cleanup. No-progress or
+unavailable native actions stop safely rather than repeatedly queuing items.
+“Til Full” requests a stop at the observed target; native partial consumption and
+multiplayer latency mean it cannot promise exact quantities or instantaneous
+stopping. This feature has portable Lua boundary tests, not live-game acceptance.

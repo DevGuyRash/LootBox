@@ -1159,5 +1159,52 @@ test("workflow help explains optional reviews and the paired all-source transfer
     assert(steps:find("every carried", 1, true) and steps:find("optional", 1, true))
 end)
 
+test("Til Full extends native callback submenus without changing native options", function(f)
+    local oldPane = ISInventoryPane
+    f.bandage = item(f.inventory)
+    ISInventoryPane = {getActualItems = function(items) return {f.apple, f.apple, f.bandage} end}
+    ISInventoryPaneContextMenu.onEatItems = function() end
+    ISInventoryPaneContextMenu.onDrinkFluid = function() end
+    f.preferences.tillFullEnabled = true
+    f.app.tillFull = function(_, items, kind) f.consumed, f.consumeKind = items, kind; return true end
+    for _, kind in ipairs({"food", "fluid"}) do
+        local parent, child = Menu:new(), Menu:new()
+        local root = parent:addOption("Localized native label", nil, nil)
+        root.subOption = 37
+        parent.getSubMenu = function(_, id) assert(id == 37); return child end
+        local callback = kind == "food" and ISInventoryPaneContextMenu.onEatItems or ISInventoryPaneContextMenu.onDrinkFluid
+        local original = child:addOption("Localized fraction", {}, callback)
+        Menus.inventoryMenu(0, parent, {f.apple})
+        assert(#child.options == 2 and child.options[1] == original and original.onSelect == callback)
+        local added = child.options[2]
+        assert(added.name == "Til Full")
+        added.onSelect(added.target)
+        assert(f.consumeKind == kind and #f.consumed == 2 and f.consumed[1] == f.apple and f.consumed[2] == f.bandage)
+        Menus.inventoryMenu(0, parent, {f.apple})
+        assert(#child.options == 2)
+    end
+    ISInventoryPane = oldPane
+end)
+
+test("Til Full respects disabled, unavailable and opening-recipe native actions", function(f)
+    local oldPane = ISInventoryPane
+    ISInventoryPane = {getActualItems = function() return {f.apple} end}
+    ISInventoryPaneContextMenu.onEatItems = function() end
+    for _, mode in ipairs({"disabled", "parent", "child", "recipe", "foreign"}) do
+        local parent, child = Menu:new(), Menu:new()
+        local root = parent:addOption("Eat", nil, nil)
+        root.subOption = 1
+        parent.getSubMenu = function() return child end
+        local original = child:addOption("All", {}, mode == "foreign" and function() end or ISInventoryPaneContextMenu.onEatItems)
+        f.preferences.tillFullEnabled = mode ~= "disabled"
+        root.notAvailable = mode == "parent"
+        original.notAvailable = mode == "child"
+        original.param3 = mode == "recipe" and {} or nil
+        Menus.inventoryMenu(0, parent, {f.apple})
+        assert(#child.options == 1, mode)
+    end
+    ISInventoryPane = oldPane
+end)
+
 assert(#failures == 0, table.concat(failures, "\n"))
 print(passed .. " menu and guide integration cases passed (native rendering and App boundaries are doubles)")
