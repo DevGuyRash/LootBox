@@ -78,7 +78,7 @@ function TillFull:inspect(record)
     local item, source = record.item, record.item:getContainer()
     if item:getID() ~= record.id or tostring(item:getFullType()) ~= record.fullType or not source
         or (source ~= record.source and source ~= self.player:getInventory()) then return nil, "The selected item moved or changed" end
-    local protected, reason = self.world:protected(item)
+    local protected, reason = self.world:protected(item, {allowFavorite = true})
     if protected then return nil, "Protected: " .. tostring(reason or "selected item") end
     if item:isSealed() then return nil, "Open this item normally before using Til Full" end
     local hunger, thirst
@@ -164,7 +164,7 @@ function TillFull:step()
     self.inflight = {hunger = hunger, thirst = thirst, hrelief = effects.hunger, trelief = effects.thirst}
     local ok, failure = self.native:begin(record.item, self.kind, portion, function()
         local item = record.item
-        local protected = self.world:protected(item)
+        local protected = self.world:protected(item, {allowFavorite = true})
         local source = item:getContainer()
         local changed = item:getID() ~= record.id or tostring(item:getFullType()) ~= record.fullType
             or (source and source ~= record.source and source ~= self.player:getInventory())
