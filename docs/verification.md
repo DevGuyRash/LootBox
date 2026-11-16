@@ -262,3 +262,30 @@ exercises the actual adapter with a modeled timed-action queue, including foreig
 work and native restoration. Menu, settings and App tests cover callback matching,
 persistence and mutual exclusion with the existing job scheduler. These are not
 native gameplay or multiplayer acceptance, nor proof of exact consumption timing.
+
+
+## Delayed consumption and exact-stack regression (November 16, 2026)
+
+A reported gameplay incident described consuming beyond fullness and then taking
+unrelated food. The installed checkout was confirmed at `01d6cf9`. No matching
+log entry established the entire reported sequence. Source inspection and
+regressions independently identified two unsafe boundaries:
+
+- The menu attached the entire inventory multi-selection to each native Eat/Drink
+  submenu. It now freezes only the row/stack containing that submenu's native
+  item, matching its source container and full type. Separate selected rows and
+  unrelated containers cannot become implicit continuation candidates.
+- Native `perform()` retires the client action, while `complete()` applies food
+  nutrition, and multiplayer item/stat updates can arrive separately. A small
+  need improvement alone previously allowed another action. The controller now
+  requires the requested portion of the same item's raw food quantity or fluid
+  filled ratio to be observed as consumed as well as the intended need improving.
+  Missing confirmation stops without dispatching more items.
+
+The new controller delayed-food regression and menu mixed-selection regression
+fail against the original modules and pass with the fixes. Five controller
+regressions cover delayed completion, partial progress, reversed item/stat packet
+order, unrelated need improvement, and delayed fluid progress. All 17 portable
+Lua suites pass in an isolated Lua 5.1 runtime (Lupa's Lua 5.1), including 31
+controller scenarios. This is source testing with explicit game-boundary doubles,
+not a real inventory, multiplayer server, or live in-game acceptance claim.

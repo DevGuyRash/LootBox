@@ -118,6 +118,17 @@ function TillFull:cancel()
     return true
 end
 
+-- Native perform() only retires the client action. In multiplayer, complete()
+-- applies nutrition and item changes later. A stat fluctuation alone is not an
+-- acknowledgement of our requested portion; wait for that exact item quantity.
+local function remaining(item, kind)
+    if not item:getContainer() then return 0 end
+    if kind == "food" then return math.max(0, -item:getHungChange()) end
+    local fluid = item:getFluidContainer()
+    if not fluid or fluid:isEmpty() then return 0 end
+    return fluid:getFilledRatio()
+end
+
 function TillFull:step()
     if not self:isBusy() then return end
     self.total = self.total or #self.records
@@ -139,9 +150,13 @@ function TillFull:step()
         local thirstImproved = before.trelief > 0 and thirst < before.thirst
         local improved = self.kind == "food" and hungerImproved or self.kind == "fluid" and thirstImproved
         if self.both then improved = hungerImproved or thirstImproved end
-        if not improved then
+        local quantity = remaining(before.item, self.kind)
+        local consumed = finite(quantity) and quantity <= before.expectedRemaining + 0.000001
+        -- Need and item packets may arrive in either order. Never advance from
+        -- an intermediate progress update or an unrelated need improvement.
+        if not improved or not consumed then
             if getTimestampMs() < self.confirmation then return end
-            self:finish("failed", "No need improvement was observed; no more items were queued"); return
+            self:finish("failed", "Consumption was not fully confirmed; no more items were queued"); return
         end
         self.count = self.count + 1
         self.confirmation, self.inflight = nil, nil
@@ -159,6 +174,9 @@ function TillFull:step()
     if portion == nil then self:finish("cancelled", "This item cannot restore the need selected by Eat or Drink"); return end
     if portion <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
     if self.attempts >= 256 then self:finish("cancelled", "Til Full reached its bounded action limit"); return end
+    local quantity = remaining(record.item, self.kind)
+    if not finite(quantity) or quantity <= 0 then self:finish("cancelled", "The selected quantity is unavailable"); return end
+    local expectedRemaining = quantity * (1 - portion)
     if self.kind == "food" then
         local base, remaining = record.item:getBaseHunger(), record.item:getHungChange()
         if not finite(base) or not finite(remaining) or base >= 0 or remaining >= 0 then
@@ -167,7 +185,8 @@ function TillFull:step()
         portion = math.min(1, portion * remaining / base)
     end
     if not finite(portion) or portion <= 0 then self:finish("cancelled", "The native portion is invalid"); return end
-    self.inflight = {hunger = hunger, thirst = thirst, hrelief = effects.hunger, trelief = effects.thirst}
+    self.inflight = {hunger = hunger, thirst = thirst, hrelief = effects.hunger, trelief = effects.thirst,
+        item = record.item, expectedRemaining = expectedRemaining}
     local ok, failure = self.native:begin(record.item, self.kind, portion, function()
         local item = record.item
         local protected = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
@@ -211,3 +230,4 @@ function TillFull:tick()
 end
 
 return TillFull
+

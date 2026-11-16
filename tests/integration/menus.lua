@@ -1159,10 +1159,19 @@ test("workflow help explains optional reviews and the paired all-source transfer
     assert(steps:find("every carried", 1, true) and steps:find("optional", 1, true))
 end)
 
-test("Til Full extends native callback submenus without changing native options", function(f)
+test("Til Full binds native intent to one exact selected stack", function(f)
     local oldPane = ISInventoryPane
-    f.bandage = item(f.inventory)
-    ISInventoryPane = {getActualItems = function(items) return {f.apple, f.apple, f.bandage} end}
+    local second, foreign, otherRow = item(f.inventory), item(f.crate), item(f.inventory)
+    f.bandage = item(f.inventory, "Base.Bandage")
+    local stack = {items = {f.apple, f.apple, second, foreign, f.bandage}}
+    local selected = {stack, otherRow, f.bandage}
+    ISInventoryPane = {getActualItems = function(items)
+        local result = {}
+        for _, row in ipairs(items or {}) do
+            for _, actual in ipairs(row.items or {row}) do result[#result + 1] = actual end
+        end
+        return result
+    end}
     ISInventoryPaneContextMenu.onEatItems = function() end
     ISInventoryPaneContextMenu.onDrinkFluid = function() end
     f.preferences.tillFullEnabled = true
@@ -1171,24 +1180,31 @@ test("Til Full extends native callback submenus without changing native options"
         local parent, child = Menu:new(), Menu:new()
         local root = parent:addOption("Localized native label", nil, nil)
         root.subOption = 37
-        if kind == "fluid" then root.itemForTexture = f.bandage end
+        root.itemForTexture = f.apple
         parent.getSubMenu = function(_, id) assert(id == 37); return child end
         local callback = kind == "food" and ISInventoryPaneContextMenu.onEatItems or ISInventoryPaneContextMenu.onDrinkFluid
-        local original = child:addOption("Localized fraction", {}, callback)
-        Menus.inventoryMenu(0, parent, {f.apple})
+        local original = child:addOption("Localized fraction", kind == "food" and selected or f.apple, callback)
+        Menus.inventoryMenu(0, parent, selected)
         assert(#child.options == 2 and child.options[1] == original and original.onSelect == callback)
         local added = child.options[2]
-        assert(added.name == "Til Full")
-        assert(added.itemForTexture == (kind == "fluid" and f.bandage or f.apple))
-        assert(added.iconTexture == nil and original.itemForTexture == nil)
-        assert(root.itemForTexture == (kind == "fluid" and f.bandage or nil))
+        assert(added.name == "Til Full" and added.itemForTexture == f.apple)
         assert(added.child == nil and added.subOption == nil)
+        -- Later selection mutation cannot widen the captured stack.
+        stack.items[#stack.items + 1] = otherRow
         added.onSelect(added.target)
         assert(f.progressPlayer == nil, "Til Full must start directly without opening Current job")
-        assert(f.consumeKind == kind and #f.consumed == 2 and f.consumed[1] == f.apple and f.consumed[2] == f.bandage)
-        Menus.inventoryMenu(0, parent, {f.apple})
+        assert(f.consumeKind == kind and #f.consumed == 2 and f.consumed[1] == f.apple and f.consumed[2] == second)
+        table.remove(stack.items)
+        Menus.inventoryMenu(0, parent, selected)
         assert(#child.options == 2)
     end
+    -- A foreign native submenu cannot authorize an unselected item.
+    local parent, child = Menu:new(), Menu:new()
+    local root = parent:addOption("Drink", foreign, nil); root.subOption = 1
+    parent.getSubMenu = function() return child end
+    child:addOption("All", foreign, ISInventoryPaneContextMenu.onDrinkFluid)
+    Menus.inventoryMenu(0, parent, {f.apple})
+    assert(#child.options == 1)
     ISInventoryPane = oldPane
 end)
 
@@ -1237,3 +1253,4 @@ end)
 
 assert(#failures == 0, table.concat(failures, "\n"))
 print(passed .. " menu and guide integration cases passed (native rendering and App boundaries are doubles)")
+

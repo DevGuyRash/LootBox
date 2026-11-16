@@ -130,8 +130,9 @@ local function bottle(id,relief)
  local properties={getPoison=function() return 0 end,getAlcohol=function() return 0 end,getFoodSicknessChange=function() return 0 end,
   getHungerChange=function() return 0 end,getThirstChange=function() return -relief end}
  local part={getProperties=function() return properties end,isCategory=function(_,c) return c=='water' end,isPoisonous=function() return false end}
- local fluid={empty=false,releases=0}
+ local fluid={empty=false,releases=0,ratio=1}
  function fluid:getProperties() return properties end
+ function fluid:getFilledRatio() return self.empty and 0 or self.ratio end
  function fluid:isEmpty() return self.empty end
  function fluid:canPlayerEmpty() return true end
  function fluid:isPoisonous() return self.poison end
@@ -223,4 +224,38 @@ test('already satisfied Drink does not eat for secondary hunger',function()
   getFoodSicknessChange=function() return 0 end,getHungerChange=function() return -.5 end,getThirstChange=function() return -.5 end} end
  local c=assert(Full.new(p,world,{f},'fluid')); c:tick(); assert(c.state=='finished' and #created.calls==0)
 end)
+test('delayed food completion does not consume the rest of the stack',function()
+ local p=player(.1,0); local a,b=food(1,.2),food(2,.2)
+ local c=assert(Full.new(p,world,{a,b},'food')); c:tick()
+ close(created.calls[1].portion,.5)
+ c:tick(); assert(c:isBusy() and #created.calls==1)
+ -- A small need update can arrive before the completion packet.
+ p.h=.09; c:tick(); assert(#created.calls==1)
+ a.h=.1; p.h=0; c:tick()
+ assert(c.state=='finished' and #created.calls==1 and b.h==.2)
+end)
+test('partial item progress cannot acknowledge an entire requested food',function()
+ local p=player(.5,0); local a,b=food(1,.2),food(2,.2)
+ local c=assert(Full.new(p,world,{a,b},'food')); c:tick()
+ a.h=.1; p.h=.4; c:tick(); assert(#created.calls==1)
+ a.h=0; p.h=.3; c:tick(); assert(#created.calls==2 and created.calls[2].item==b)
+end)
+test('item packet before needs waits without dispatching',function()
+ local p=player(.5,0); local a,b=food(1,.2),food(2,.2)
+ local c=assert(Full.new(p,world,{a,b},'food')); c:tick()
+ a.source=nil; c:tick(); assert(#created.calls==1)
+ p.h=.3; c:tick(); assert(#created.calls==2)
+end)
+test('unconfirmed completion times out even with unrelated need improvement',function()
+ local p=player(.5,0); local a=food(1,.2)
+ local c=assert(Full.new(p,world,{a},'food')); c:tick(); p.h=.49; c:tick()
+ now=now+2001; c:tick(); assert(c.state=='failed' and #created.calls==1)
+end)
+test('fluid partial progress waits for the requested quantity',function()
+ local p=player(0,.5); local a,fa=bottle(1,.2); local b=bottle(2,.2)
+ local c=assert(Full.new(p,world,{a,b},'fluid')); c:tick()
+ p.t=.49; fa.ratio=.9; c:tick(); assert(#created.calls==1)
+ fa.empty=true; p.t=.3; c:tick(); assert(#created.calls==2)
+end)
 print('Til Full controller: '..count..' scenarios passed')
+
