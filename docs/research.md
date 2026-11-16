@@ -77,3 +77,17 @@ even for mixed food/drink. The optional both-needs policy may exceed one already
 satisfied need. A harmful effect is not a restorative need. Portable tests use
 actual controller/menu/adapter Lua with explicit game-boundary doubles; they are
 not proof of in-game timing, traits, modded nutrition, or multiplayer behavior.
+
+
+### Deferred completion follow-up
+
+The installed game's action sources were checked again November 16. Food
+`perform()` handles UI/queue cleanup; `complete()` calls `character:Eat`.
+Drink `complete()` calls `updateEat(1)`, while server animation progress can
+apply partial fluid changes. Consequently observing any need improvement after
+client action removal does not prove the requested portion completed. Food
+confirmation uses remaining raw `getHungChange()` (the same base-portion units
+used by the native action); fluid confirmation uses `getFilledRatio()` and the
+requested fraction. Both must reach the planned remaining quantity before another
+item can be queued. These are conservative observed-state checks, not a server
+transaction receipt; latency or unavailable state stops continuation safely.

@@ -507,27 +507,49 @@ end
 local function consumptionMenu(playerIndex, parent, items)
     local nativeMenu = ISInventoryPaneContextMenu
     if not nativeMenu or not ISInventoryPane or not ISInventoryPane.getActualItems or not parent.getSubMenu then return end
-    local snapshot, seen = {}, {}
-    for _, item in ipairs(ISInventoryPane.getActualItems(items) or {}) do
-        if native(item, "InventoryItem") and not seen[item] then
-            seen[item] = true
-            snapshot[#snapshot + 1] = item
+    -- A native submenu names one item. Multi-selection is not permission to
+    -- consume every selected row or find replacement items in other containers.
+    local function selectedStack(anchor)
+        if not native(anchor, "InventoryItem") then return nil end
+        local source, fullType = call(anchor, "getContainer"), call(anchor, "getFullType")
+        if not source or not fullType then return nil end
+        for _, row in ipairs(items or {}) do
+            local candidates = native(row, "InventoryItem") and {row} or (type(row) == "table" and row.items)
+            if candidates then
+                local contains = false
+                for _, item in ipairs(candidates) do if item == anchor then contains = true end end
+                if contains then
+                    local snapshot, seen = {}, {}
+                    for _, item in ipairs(candidates) do
+                        if native(item, "InventoryItem") and not seen[item]
+                            and call(item, "getContainer") == source and call(item, "getFullType") == fullType then
+                            seen[item] = true
+                            snapshot[#snapshot + 1] = item
+                        end
+                    end
+                    return snapshot
+                end
+            end
         end
     end
-    if #snapshot == 0 then return end
     -- Match native callback identities, never translated labels or invented eligibility.
     for _, root in ipairs(parent.options or {}) do
         local child = root.subOption and parent:getSubMenu(root.subOption)
         if child and not root.notAvailable then
-            local kind, already
+            local kind, anchor, already
             for _, option in ipairs(child.options or {}) do
                 if option.onSelect == runTillFull then already = true end
                 if not option.notAvailable and option.param3 == nil then
-                    if nativeMenu.onEatItems and option.onSelect == nativeMenu.onEatItems then kind = "food"
-                    elseif nativeMenu.onDrinkFluid and option.onSelect == nativeMenu.onDrinkFluid then kind = "fluid" end
+                    if nativeMenu.onEatItems and option.onSelect == nativeMenu.onEatItems then
+                        kind = "food"
+                        anchor = (ISInventoryPane.getActualItems(option.target) or {})[1]
+                    elseif nativeMenu.onDrinkFluid and option.onSelect == nativeMenu.onDrinkFluid then
+                        kind, anchor = "fluid", option.target
+                    end
                 end
             end
-            if kind and not already then
+            local snapshot = kind and selectedStack(anchor)
+            if snapshot and #snapshot > 0 and not already then
                 local added = child:addOption("Til Full", {playerIndex = playerIndex, items = snapshot, kind = kind}, runTillFull)
                 -- Use vanilla item-icon rendering, including modded food/drink textures.
                 if added then added.itemForTexture = root.itemForTexture or snapshot[1] end
@@ -673,3 +695,4 @@ function Menus.install(ui)
 end
 
 return Menus
+
