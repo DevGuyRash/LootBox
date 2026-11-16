@@ -479,11 +479,16 @@ function Instance:tillFull(items, kind)
     if not options.tillFullEnabled then return nil, "Til Full is disabled in settings" end
     if self.recovery:status().pending then return nil, "Recover personal gear before consuming" end
     if self.consumption and self.consumption:isBusy() then return nil, "Til Full is already active; use Current job to cancel" end
-    if self.jobs:status().hasJob then self.jobs:cancel() end
-    if not self.jobs:status().canPreview then return nil, "Wait for native job cleanup, then try Til Full again" end
     local controller
     controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds)
     if not controller then return nil, err end
+    -- A full player choosing this convenience action must not even cancel
+    -- unrelated work. Both-needs preference retains its explicit meaning.
+    local ok, satisfied = pcall(controller.alreadySatisfied, controller)
+    if not ok then return nil, "Current fullness is unavailable" end
+    if satisfied then return true end
+    if self.jobs:status().hasJob then self.jobs:cancel() end
+    if not self.jobs:status().canPreview then return nil, "Wait for native job cleanup, then try Til Full again" end
     self.consumption = controller
     controller:tick()
     if not controller:isBusy() and controller.state ~= "finished" then return nil, controller.reason end
@@ -547,3 +552,4 @@ if Events then
 end
 
 return App
+

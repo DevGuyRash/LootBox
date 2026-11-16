@@ -513,24 +513,33 @@ local function consumptionMenu(playerIndex, parent, items)
         if not native(anchor, "InventoryItem") then return nil end
         local source, fullType = call(anchor, "getContainer"), call(anchor, "getFullType")
         if not source or not fullType then return nil end
+        local candidates = {}
+        -- Collapsed stacks carry a group row; expanded selected stack children
+        -- arrive as individual references. Never discover peers from a container.
         for _, row in ipairs(items or {}) do
-            local candidates = native(row, "InventoryItem") and {row} or (type(row) == "table" and row.items)
-            if candidates then
-                local contains = false
-                for _, item in ipairs(candidates) do if item == anchor then contains = true end end
-                if contains then
-                    local snapshot, seen = {}, {}
-                    for _, item in ipairs(candidates) do
-                        if native(item, "InventoryItem") and not seen[item]
-                            and call(item, "getContainer") == source and call(item, "getFullType") == fullType then
-                            seen[item] = true
-                            snapshot[#snapshot + 1] = item
-                        end
-                    end
-                    return snapshot
+            if not native(row, "InventoryItem") and type(row) == "table" and row.items then
+                local group = ISInventoryPane.getActualItems({row}) or {}
+                for _, item in ipairs(group) do
+                    if item == anchor then candidates = group; break end
                 end
+                if #candidates > 0 then break end
             end
         end
+        if #candidates == 0 then
+            for _, row in ipairs(items or {}) do
+                if native(row, "InventoryItem") then candidates[#candidates + 1] = row end
+            end
+        end
+        local snapshot, seen, contains = {}, {}, false
+        for _, item in ipairs(candidates) do
+            if native(item, "InventoryItem") and not seen[item]
+                and call(item, "getContainer") == source and call(item, "getFullType") == fullType then
+                seen[item] = true
+                snapshot[#snapshot + 1] = item
+                contains = contains or item == anchor
+            end
+        end
+        return contains and snapshot or nil
     end
     -- Match native callback identities, never translated labels or invented eligibility.
     for _, root in ipairs(parent.options or {}) do

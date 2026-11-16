@@ -89,6 +89,14 @@ client action removal does not prove the requested portion completed. Food
 confirmation uses remaining raw `getHungChange()` (the same base-portion units
 used by the native action); fluid confirmation uses `getFilledRatio()` and the
 requested fraction. Both must reach the planned remaining quantity and planned need reduction before another
-item can be queued. These are conservative observed-state checks, not a server
-transaction receipt; latency, metabolism, traits that reduce the predicted benefit, or unavailable
-state can stop continuation early rather than risk consuming an extra item.
+item can be queued. Confirmation allows only positive need drift actually observed
+during the action, plus a floating-point epsilon; the full target itself remains
+zero. These remain conservative observed-state checks, not a server transaction
+receipt; latency, unobserved drift, traits that reduce predicted benefit, or
+unavailable state can still stop continuation early rather than risk an extra item.
+
+Native `ISInventoryPane:onRightMouseUp` omits expanded group headers, passing
+selected children as individual item references. Collapsed rows carry groups.
+Till Full snapshots the anchor group when supplied, otherwise the explicitly
+selected same-source/type references. It never enumerates unselected peers or
+other containers. Already-full activation does not cancel unrelated LootBox jobs.
