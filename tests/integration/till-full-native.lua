@@ -179,4 +179,36 @@ test("carried worn held and attached consumption does not mutate equipment",func
     end
     end
 end)
+test("real controller and adapter wait for deferred item and nutrition completion",function(f)
+    CharacterStat={HUNGER={getMinimumValue=function() return 0 end},THIRST={getMinimumValue=function() return 0 end}}
+    function instanceof(item,name) return name=='Food' end
+    local Full=require 'LootBox/TillFull'
+    local inv={}
+    f.player.h=.1;f.player.t=0
+    function f.player:getStats() return {get=function(_,k) return k==CharacterStat.HUNGER and f.player.h or f.player.t end} end
+    function f.player:getInventory() return inv end
+    function f.player:isDead() return false end
+    function f.player:isAsleep() return false end
+    local item={h=.2,base=.2}
+    f.item=item
+    function item:getID() return 1 end
+    function item:getFullType() return 'Base.Candy' end
+    function item:getContainer() return inv end
+    function item:getHungerChange() return -self.h end
+    function item:getHungChange() return -self.h end
+    function item:getBaseHunger() return -self.base end
+    function item:getThirstChange() return 0 end
+    function item:getScriptItem() return {isCantEat=function() return false end} end
+    for _,k in ipairs({'isSealed','isRotten','isBurnt','isFrozen','isTainted','isPoison','isAlcoholic','isbDangerousUncooked'}) do item[k]=function() return false end end
+    function item:getPoisonPower() return 0 end
+    function item:getFoodSicknessChange() return 0 end
+    local c=assert(Full.new(f.player,{protected=function() return false end},{item},'food'))
+    c:tick();assert(#f.calls==1)
+    f:finish() -- Actual adapter hooks perform(), no nutrition applied yet.
+    c:tick();assert(#f.calls==1 and c:isBusy())
+    f.time=100;item.h=.1;f.player.h=0 -- Deferred completion from game boundary.
+    c:tick();assert(#f.calls==1 and c.state=='finished')
+end)
+
 print("PASS "..tests.." Till Full native boundary scenarios")
+

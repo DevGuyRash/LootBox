@@ -146,10 +146,12 @@ function TillFull:step()
     local hunger, thirst = needs(self.player)
     if self.confirmation then
         local before = self.inflight
-        local hungerImproved = before.hrelief > 0 and hunger < before.hunger
-        local thirstImproved = before.trelief > 0 and thirst < before.thirst
-        local improved = self.kind == "food" and hungerImproved or self.kind == "fluid" and thirstImproved
-        if self.both then improved = hungerImproved or thirstImproved end
+        local hungerConfirmed = hunger <= before.expectedHunger + (before.expectedHunger > 0 and 0.000001 or 0)
+        local thirstConfirmed = thirst <= before.expectedThirst + (before.expectedThirst > 0 and 0.000001 or 0)
+        local improved = self.kind == "food" and hungerConfirmed or self.kind == "fluid" and thirstConfirmed
+        if self.both then
+            improved = (before.hrelief <= 0 or hungerConfirmed) and (before.trelief <= 0 or thirstConfirmed)
+        end
         local quantity = remaining(before.item, self.kind)
         local consumed = finite(quantity) and quantity <= before.expectedRemaining + 0.000001
         -- Need and item packets may arrive in either order. Never advance from
@@ -177,6 +179,8 @@ function TillFull:step()
     local quantity = remaining(record.item, self.kind)
     if not finite(quantity) or quantity <= 0 then self:finish("cancelled", "The selected quantity is unavailable"); return end
     local expectedRemaining = quantity * (1 - portion)
+    local expectedHunger = math.max(0, hunger - math.max(0, effects.hunger) * portion)
+    local expectedThirst = math.max(0, thirst - math.max(0, effects.thirst) * portion)
     if self.kind == "food" then
         local base, remaining = record.item:getBaseHunger(), record.item:getHungChange()
         if not finite(base) or not finite(remaining) or base >= 0 or remaining >= 0 then
@@ -186,7 +190,8 @@ function TillFull:step()
     end
     if not finite(portion) or portion <= 0 then self:finish("cancelled", "The native portion is invalid"); return end
     self.inflight = {hunger = hunger, thirst = thirst, hrelief = effects.hunger, trelief = effects.thirst,
-        item = record.item, expectedRemaining = expectedRemaining}
+        item = record.item, expectedRemaining = expectedRemaining,
+        expectedHunger = expectedHunger, expectedThirst = expectedThirst}
     local ok, failure = self.native:begin(record.item, self.kind, portion, function()
         local item = record.item
         local protected = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})

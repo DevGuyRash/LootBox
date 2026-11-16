@@ -279,13 +279,13 @@ regressions independently identified two unsafe boundaries:
   nutrition, and multiplayer item/stat updates can arrive separately. A small
   need improvement alone previously allowed another action. The controller now
   requires the requested portion of the same item's raw food quantity or fluid
-  filled ratio to be observed as consumed as well as the intended need improving.
+  filled ratio to be observed as consumed as well as the planned need reduction.
   Missing confirmation stops without dispatching more items.
 
 The new controller delayed-food regression and menu mixed-selection regression
-fail against the original modules and pass with the fixes. Five controller
+fail against the original modules and pass with the fixes. Seven controller
 regressions cover delayed completion, partial progress, reversed item/stat packet
-order, unrelated need improvement, and delayed fluid progress. All 17 portable
-Lua suites pass in an isolated Lua 5.1 runtime (Lupa's Lua 5.1), including 31
+order, unrelated need improvement, delayed fluid progress, and intermediate stat updates. All 17 portable
+Lua suites pass in an isolated Lua 5.1 runtime (Lupa's Lua 5.1), including 33
 controller scenarios. This is source testing with explicit game-boundary doubles,
 not a real inventory, multiplayer server, or live in-game acceptance claim.
