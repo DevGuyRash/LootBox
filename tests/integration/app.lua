@@ -259,6 +259,7 @@ test("Til Full owns the App action boundary until cancellation settles", functio
     local app = assert(App.get(0))
     local controller = {busy = true, state = "running"}
     function controller:isBusy() return self.busy end
+    function controller:alreadySatisfied() return self.full end
     function controller:status() return {state = self.state, hasJob = self.busy, canPreview = not self.busy} end
     function controller:tick() self.ticks = (self.ticks or 0) + 1 end
     function controller:cancel() self.cancelled = true; self.state = "cancelling"; return true end
@@ -271,6 +272,9 @@ test("Til Full owns the App action boundary until cancellation settles", functio
     local pending = true
     app.jobs.status = function() return {hasJob = pending, canPreview = not pending, state = "paused"} end
     app.jobs.cancel = function() calls.consumeJobCancel = true; return true end
+    controller.full = true
+    assert(app:tillFull({item}, "food") and not calls.consumeJobCancel and not controller.ticks)
+    controller.full = false
     assert(not app:tillFull({item}, "food") and calls.consumeJobCancel)
     pending = false
     assert(app:tillFull({item}, "food") and controller.ticks == 1)
@@ -298,3 +302,4 @@ test("a validly encoded malformed category document remains read-only", function
     assert(assert(Store.load("LootBox/categories")).categories == false)
 end)
 print(passed .. " App integration cases passed (explicit world/action and file doubles)")
+
