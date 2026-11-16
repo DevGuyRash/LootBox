@@ -289,3 +289,8 @@ order, unrelated need improvement, delayed fluid progress, and intermediate stat
 Lua suites pass in an isolated Lua 5.1 runtime (Lupa's Lua 5.1), including 33
 controller scenarios. This is source testing with explicit game-boundary doubles,
 not a real inventory, multiplayer server, or live in-game acceptance claim.
+
+
+Expanded-stack follow-up: regression coverage includes native flat selected-child
+context shape, individual-only selection, same-source/type filtering, hunger and
+thirst growth while consuming, and already-full no-op preserving unrelated jobs.
