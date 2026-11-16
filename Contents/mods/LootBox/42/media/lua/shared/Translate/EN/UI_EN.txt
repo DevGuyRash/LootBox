@@ -1,4 +1,9 @@
 UI_EN = {
     UI_optionscreen_binding_LootBox = "LootBox",
     UI_optionscreen_binding_LootBoxCurrentJob = "Current job",
+    UI_optionscreen_binding_LootBoxScrollTop = "Hovered inventory: scroll to top",
+    UI_optionscreen_binding_LootBoxScrollBottom = "Hovered inventory: scroll to bottom",
+    UI_optionscreen_binding_LootBoxScrollPageUp = "Hovered inventory: previous page",
+    UI_optionscreen_binding_LootBoxScrollPageDown = "Hovered inventory: next page",
 }
+

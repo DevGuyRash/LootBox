@@ -1124,15 +1124,19 @@ test("install registers a native rebindable F7 action without duplicating existi
         OnKeyStartPressed = {Add = function(fn) registrations.key[#registrations.key + 1] = fn end}}
     package.loaded["LootBox/Menus"] = {install = function() menuInstalls = menuInstalls + 1 end}
     package.loaded.keyBinding = true
-    Keyboard, keyBinding = {KEY_F7 = 65}, {{value = "ForeignAction", key = 9}}
+    Keyboard, keyBinding = {KEY_F7 = 65, KEY_HOME = 199, KEY_END = 207, KEY_PRIOR = 201, KEY_NEXT = 209}, {{value = "ForeignAction", key = 9}}
     UI.installed = nil
     UI.install(); UI.install()
-    assert(#keyBinding == 3 and keyBinding[1].key == 9 and keyBinding[3].value == "LootBoxCurrentJob" and keyBinding[3].key == 65)
-    assert(#registrations.tick == 1 and #registrations.key == 1 and menuInstalls == 1)
+    assert(#keyBinding == 7 and keyBinding[1].key == 9 and keyBinding[3].value == "LootBoxCurrentJob" and keyBinding[3].key == 65)
+    assert(#registrations.tick == 1 and #registrations.key == 2 and menuInstalls == 1)
+    assert(keyBinding[4].value == "LootBoxScrollTop" and keyBinding[4].key == 199)
+    assert(keyBinding[5].value == "LootBoxScrollBottom" and keyBinding[5].key == 207)
+    assert(keyBinding[6].value == "LootBoxScrollPageUp" and keyBinding[6].key == 201)
+    assert(keyBinding[7].value == "LootBoxScrollPageDown" and keyBinding[7].key == 209)
     keyBinding[3].key = 211
     UI.installed = nil
     UI.install()
-    assert(#keyBinding == 3 and keyBinding[3].key == 211)
+    assert(#keyBinding == 7 and keyBinding[3].key == 211)
 end)
 
 test("capacity-dependent bag setup uses its own warning status in the job review", function(f)
@@ -1690,3 +1694,4 @@ test("empty label pools disable saving and a later available pool selects its fi
 end)
 
 print(passed .. " UI workflow cases passed (explicit native window and job boundary doubles)")
+

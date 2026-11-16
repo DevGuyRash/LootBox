@@ -2043,6 +2043,7 @@ function UI.install()
         keyBinding[#keyBinding + 1] = {value = "[LootBox]"}
         keyBinding[#keyBinding + 1] = {value = "LootBoxCurrentJob", key = Keyboard.KEY_F7}
     end
+    require("LootBox/Navigation").install()
     Events.OnTick.Add(UI.tick)
     Events.OnKeyStartPressed.Add(UI.onKeyStartPressed)
     if Events.OnDisconnect then Events.OnDisconnect.Add(UI.closeAll) end
@@ -2058,3 +2059,4 @@ end
 
 UI.Window, UI.Progress, UI.QuickReview, UI.AreaPicker = Window, Progress, QuickReview, AreaPicker
 return UI
+
