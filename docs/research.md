@@ -88,6 +88,7 @@ apply partial fluid changes. Consequently observing any need improvement after
 client action removal does not prove the requested portion completed. Food
 confirmation uses remaining raw `getHungChange()` (the same base-portion units
 used by the native action); fluid confirmation uses `getFilledRatio()` and the
-requested fraction. Both must reach the planned remaining quantity before another
+requested fraction. Both must reach the planned remaining quantity and planned need reduction before another
 item can be queued. These are conservative observed-state checks, not a server
-transaction receipt; latency or unavailable state stops continuation safely.
+transaction receipt; latency, metabolism, traits that reduce the predicted benefit, or unavailable
+state can stop continuation early rather than risk consuming an extra item.
