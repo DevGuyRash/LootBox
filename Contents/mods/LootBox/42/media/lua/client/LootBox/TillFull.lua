@@ -100,6 +100,15 @@ function TillFull:inspect(record)
     return {hunger = hunger, thirst = thirst}
 end
 
+function TillFull:alreadySatisfied()
+    local hunger, thirst = needs(self.player)
+    if not self.both then return (self.kind == "food" and hunger <= 0) or (self.kind == "fluid" and thirst <= 0) end
+    local effects = self:inspect(self.records[self.index])
+    if not effects then return false end
+    local portion = TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, true, self.kind)
+    return portion ~= nil and portion <= 0
+end
+
 function TillFull:finish(state, reason)
     self.state, self.reason = state, reason
     self.records, self.inflight, self.confirmation = nil, nil, nil
@@ -132,6 +141,15 @@ end
 function TillFull:step()
     if not self:isBusy() then return end
     self.total = self.total or #self.records
+    local hunger, thirst = needs(self.player)
+    if self.inflight then
+        local before = self.inflight
+        -- Native metabolism continues while an action is running. Account only
+        -- for increases actually observed, not a guessed nutrition allowance.
+        before.hungerDrift = before.hungerDrift + math.max(0, hunger - before.lastHunger)
+        before.thirstDrift = before.thirstDrift + math.max(0, thirst - before.lastThirst)
+        before.lastHunger, before.lastThirst = hunger, thirst
+    end
     if self.native:isBusy() then
         local done, reason = self.native:poll()
         if done == nil then return end
@@ -143,11 +161,10 @@ function TillFull:step()
     end
     if self.state == "cancelling" then self:finish("cancelled", self.reason); return end
     if self.player:isDead() or self.player:isAsleep() then self:finish("cancelled", "The player cannot consume now"); return end
-    local hunger, thirst = needs(self.player)
     if self.confirmation then
         local before = self.inflight
-        local hungerConfirmed = hunger <= before.expectedHunger + (before.expectedHunger > 0 and 0.000001 or 0)
-        local thirstConfirmed = thirst <= before.expectedThirst + (before.expectedThirst > 0 and 0.000001 or 0)
+        local hungerConfirmed = hunger <= before.expectedHunger + before.hungerDrift + 0.000001
+        local thirstConfirmed = thirst <= before.expectedThirst + before.thirstDrift + 0.000001
         local improved = self.kind == "food" and hungerConfirmed or self.kind == "fluid" and thirstConfirmed
         if self.both then
             improved = (before.hrelief <= 0 or hungerConfirmed) and (before.trelief <= 0 or thirstConfirmed)
@@ -191,6 +208,7 @@ function TillFull:step()
     if not finite(portion) or portion <= 0 then self:finish("cancelled", "The native portion is invalid"); return end
     self.inflight = {hunger = hunger, thirst = thirst, hrelief = effects.hunger, trelief = effects.thirst,
         item = record.item, expectedRemaining = expectedRemaining,
+        lastHunger = hunger, lastThirst = thirst, hungerDrift = 0, thirstDrift = 0,
         expectedHunger = expectedHunger, expectedThirst = expectedThirst}
     local ok, failure = self.native:begin(record.item, self.kind, portion, function()
         local item = record.item

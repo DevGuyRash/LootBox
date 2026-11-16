@@ -1208,6 +1208,28 @@ test("Til Full binds native intent to one exact selected stack", function(f)
     ISInventoryPane = oldPane
 end)
 
+test("Til Full captures expanded selected children but never unselected peers", function(f)
+    local oldPane = ISInventoryPane
+    ISInventoryPane = {getActualItems = function(items) return items end}
+    ISInventoryPaneContextMenu.onEatItems = function() end
+    f.preferences.tillFullEnabled = true
+    f.app.tillFull = function(_, items) f.consumed = items; return true end
+    local second, foreign, different = item(f.inventory), item(f.crate), item(f.inventory, "Base.Other")
+    for _, selected in ipairs({{f.apple,second,foreign,different}, {f.apple}}) do
+        local parent, child = Menu:new(), Menu:new()
+        local root = parent:addOption("Eat", nil, nil); root.subOption = 1
+        parent.getSubMenu = function() return child end
+        child:addOption("All", selected, ISInventoryPaneContextMenu.onEatItems)
+        Menus.inventoryMenu(0,parent,selected)
+        local added = child.options[2]; assert(added)
+        added.onSelect(added.target)
+        local expected = #selected > 1 and 2 or 1
+        assert(#f.consumed == expected and f.consumed[1] == f.apple)
+        if expected == 2 then assert(f.consumed[2] == second) end
+    end
+    ISInventoryPane = oldPane
+end)
+
 test("Til Full refusal uses compact native feedback without another window", function(f)
     local oldPane, oldHalo = ISInventoryPane, HaloTextHelper
     ISInventoryPane = {getActualItems = function() return {f.apple} end}
