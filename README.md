@@ -123,3 +123,13 @@ unavailable native actions stop safely rather than repeatedly queuing items.
 “Til Full” requests a stop at the observed target; native partial consumption and
 multiplayer latency mean it cannot promise exact quantities or instantaneous
 stopping. This feature has portable Lua boundary tests, not live-game acceptance.
+
+
+### Inventory navigation shortcuts
+
+Hover the item list in your inventory or the loot window, then use **Home** or
+**End** to reach its top or bottom. **Page Up** and **Page Down** move one viewport
+with a row of overlap so partially visible rows are not skipped. These shortcuts
+only scroll the hovered list; they do not select, transfer, or consume items.
+Change or unbind all four under **Options > Key bindings > LootBox**. Text entry,
+context menus, modal dialogs, and item dragging leave the shortcuts inactive.
