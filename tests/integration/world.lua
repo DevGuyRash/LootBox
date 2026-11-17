@@ -1415,6 +1415,86 @@ case("Unavailable native matching rules or failed maps cannot broaden the select
     equal(targets, nil); assert(err:find("could not read", 1, true))
 end)
 
+case("Smart Take all-pane snapshots deduplicate visible eligible containers without widening to hidden storage", function(f)
+    matchingFixture(f)
+    f.loot.backpacks = {{inventory = f.junk}, {inventory = f.tools}, {inventory = f.tools}, {inventory = f.inventory}}
+    local records, err, sources = f.world:smartLootRecords("all", f.junk, true)
+    assert(not err); equal(#sources, 2); equal(#records, 3)
+    equal(f.names({items = records}), "Beans,Scrap,Soup")
+    equal(#assert(f.world:smartLootRecords("all", f.junk, false)), 2)
+    f.junk.items = {}
+    records = assert(f.world:smartLootRecords("all", f.junk, true))
+    equal(#records, 1); equal(records[1].source, f.tools)
+    f.loot.inventoryPane.inventory = f.tools
+    f.loot.backpacks = {{inventory = f.tools}, {inventory = f.unlabeled}}
+    local scan = assert(f.world:scan({scope = "lootPane", sourceContainers = sources, includeInventory = true, includeBags = true}))
+    equal(f.names(scan), "Soup"); equal(#scan.warnings, 1)
+    local nextSources = assert(f.world:smartLootSources(nil, true))
+    equal(f.names(assert(f.world:scan({scope = "lootPane", sourceContainers = nextSources}))), "Cake,Soup")
+end)
+
+case("Smart Take all-pane excludes invalid locked recovery owned and permission-denied containers", function(f)
+    matchingFixture(f)
+    f.loot.backpacks = {{inventory = f.junk}, {inventory = f.tools}, {inventory = f.unlabeled}, {inventory = f.remote}, {inventory = f.inventory}}
+    f.tools.isLockedToCharacter = function() return true end
+    f.world.recovery = {isReservedContainer = function(_, container) return container == f.junk end,
+        isProtected = function() return false end}
+    f.unlabeled:getParent().getObjectIndex = function() return -1 end
+    isClient = function() return true end
+    SafeHouse = {isSafehouseAllowLoot = function(square) return square ~= f.far end}
+    equal(#assert(f.world:smartLootSources(nil, true)), 0)
+    equal(#assert(f.world:smartLootRecords("all", nil, true)), 0)
+end)
+
+case("Smart Take Matching preserves per-container native aliases across visible sources", function(f)
+    local maps = matchingFixture(f)
+    maps[f.inventory] = {["Shared.Alias"] = {f.inventory.items[1]}}
+    maps[f.junk] = {["Shared.Alias"] = {f.junk.items[1]}}
+    maps[f.tools] = {["Shared.Alias"] = {f.tools.items[1]}}
+    local records = assert(f.world:smartLootRecords("matching", f.junk, true))
+    equal(#records, 2); equal(f.names({items = records}), "Beans,Soup")
+    f.state.keep[tostring(f.junk.items[1].id)] = true
+    f.tools.items[1].isUnwanted = function() return true end
+    equal(#assert(f.world:smartLootRecords("matching", f.junk, true)), 0)
+end)
+
+case("Loot-pane floor and crate scanning uses actual floor permissions and never widens a stale floor reference", function(f)
+    matchingFixture(f)
+    local floor = f.container("floor")
+    local allowed, denied = f.item(floor, "AllowedFloor"), f.item(floor, "DeniedFloor")
+    allowed.world = {getSquare = function() return f.origin end}
+    denied.world = {getSquare = function() return f.far end}
+    ISInventoryPage = {GetFloorContainer = function() return floor end}
+    f.loot.inventoryPane.inventory = floor
+    f.loot.backpacks = {{inventory = floor}, {inventory = f.junk}}
+    isClient = function() return true end
+    SafeHouse = {isSafehouseAllowLoot = function(square) assert(square, "Floor permission requires a square"); return square == f.origin end}
+    equal(f.names({items = assert(f.world:smartLootRecords("all", floor, true))}), "AllowedFloor,Beans,Scrap")
+    local sources = assert(f.world:smartLootSources(nil, true))
+    local scan = assert(f.world:scan({scope = "lootPane", sourceContainers = sources}))
+    equal(f.names(scan), "AllowedFloor,Beans,Scrap")
+    equal(#scan.warnings, 1)
+    local replacement = f.container("floor")
+    f.item(replacement, "NewFloor")
+    ISInventoryPage.GetFloorContainer = function() return replacement end
+    f.loot.inventoryPane.inventory = replacement
+    f.loot.backpacks = {{inventory = replacement}, {inventory = f.junk}}
+    scan = assert(f.world:scan({scope = "lootPane", sourceContainers = sources}))
+    equal(f.names(scan), "Beans,Scrap")
+    equal(#scan.warnings, 1)
+    ISInventoryPage = nil
+end)
+
+case("Loot-pane scans reject malformed snapshots and never recurse into source bags", function(f)
+    matchingFixture(f)
+    local _, nested = weightedBag(f, f.junk, "Source bag", 80)
+    f.item(nested, "Hidden")
+    local sources = assert(f.world:smartLootSources(nil, true))
+    local scan = assert(f.world:scan({scope = "lootPane", sourceContainers = sources, includeBags = true, includeInventory = true}))
+    for _, record in ipairs(scan.items) do assert(record.source ~= nested and record.source ~= f.inventory) end
+    assert(not f.world:scan({scope = "lootPane", sourceContainers = {["bad"] = f.junk}}))
+end)
+
 case("Smart Take Matching finds native alias matches in every nested carried bag", function(f)
     local maps = matchingFixture(f)
     local outer, storage = weightedBag(f, f.inventory, "Outer", 80)

@@ -400,6 +400,10 @@ function Instance:resolveSetup(setup, context)
         end
     end
     context = context or {}
+    if request.scope == "lootPane" then
+        request.sourceContainers, err = self.world:smartLootSources(nil, true)
+        if not request.sourceContainers then return nil, err end
+    end
     if request.scope == "container" then
         request.sourceContainer = context.sourceContainer or context.container
         if not request.sourceContainer then return nil, "Right-click a source container to use this saved setup" end
@@ -460,6 +464,7 @@ function Instance:previewCondense()
         useUnequipped = preferences.condenseUseUnequipped, nested = preferences.condenseNested})
 end
 function Instance:start(plan, options)
+    self.replacement, self.replacementProblem = nil, nil
     if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before starting another job" end
     local recovery = self.recovery:status()
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
@@ -487,6 +492,7 @@ function Instance:tillFull(items, kind)
     local ok, satisfied = pcall(controller.alreadySatisfied, controller)
     if not ok then return nil, "Current fullness is unavailable" end
     if satisfied then return true end
+    self.replacement, self.replacementProblem = nil, nil
     if self.jobs:status().hasJob then self.jobs:cancel() end
     if not self.jobs:status().canPreview then return nil, "Wait for native job cleanup, then try Til Full again" end
     self.consumption = controller
@@ -494,15 +500,60 @@ function Instance:tillFull(items, kind)
     if not controller:isBusy() and controller.state ~= "finished" then return nil, controller.reason end
     return true
 end
+-- A shortcut is a new request, not an implicit Resume. Hold only the latest
+-- request until owned native cleanup releases the previous job.
+function Instance:replaceJob(callback)
+    if type(callback) ~= "function" then return nil, "A new job needs a request" end
+    if self.error or loadError then return nil, self.error or loadError end
+    if self.recovery:status().pending then return nil, "Recover personal gear before starting another job" end
+    if self.consumption and self.consumption:isBusy() then
+        return nil, "Finish or cancel Til Full before starting another job"
+    end
+    self.replacementProblem = nil
+    local status = self.jobs:status()
+    if not status.hasJob and status.canPreview ~= false then
+        self.replacement = nil
+        return callback()
+    end
+    local ok, err = self.jobs:cancel()
+    if not ok then return nil, err end
+    self.replacement = callback
+    return true
+end
+
+function Instance:runReplacement()
+    if not self.replacement then return end
+    if self.consumption and self.consumption:isBusy() then
+        self.replacement = nil
+        self.replacementProblem = "Finish or cancel Til Full before starting another job"
+        return
+    end
+    local status = self.jobs:status()
+    if status.hasJob or status.canPreview == false then return end
+    local callback = self.replacement
+    self.replacement = nil
+    local recovery = self.recovery:status()
+    if self.error or loadError or recovery.pending then
+        self.replacementProblem = self.error or loadError or "Recover personal gear before starting another job"
+        return
+    end
+    local ok, result, problem = pcall(callback)
+    if not ok then self.replacementProblem = "The new request could not start: " .. tostring(result)
+    elseif not result and problem then self.replacementProblem = tostring(problem) end
+end
+
 function Instance:cancel()
+    self.replacement = nil
     if self.consumption and self.consumption:isBusy() then return self.consumption:cancel() end
     return self.jobs:cancel()
 end
 function Instance:pause()
+    self.replacement = nil
     if self.consumption and self.consumption:isBusy() then return nil, "Til Full cannot be paused; cancel it instead" end
     return self.jobs:pause()
 end
 function Instance:resume()
+    self.replacement, self.replacementProblem = nil, nil
     if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before resuming another job" end
     local ok, err = self.jobs:resume()
     if ok then self.consumption = nil end
@@ -510,6 +561,7 @@ function Instance:resume()
 end
 function Instance:status()
     local status = self.consumption and self.consumption:status() or self.jobs:status()
+    if self.replacementProblem then status.reason = self.replacementProblem end
     status.recovery = self:recoveryStatus()
     return status
 end
@@ -541,6 +593,7 @@ function App.tick()
     for _, instance in pairs(sessions) do
         if instance.consumption then instance.consumption:tick() end
         instance.jobs:tick()
+        instance:runReplacement()
         if not instance.lastObserve or stamp - instance.lastObserve >= 1000 then
             instance.lastObserve = stamp
             if instance.world:observeNearby() and not instance.error then

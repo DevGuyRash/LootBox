@@ -2331,6 +2331,21 @@ test("bag preparation keeps capacity-dependent selected items in the preview ins
     assert(#normal.moves == 1 and #normal.skipped == 1, "Without useful bag preparation the live capacity exclusion remains truthful")
 end)
 
+test("loot-pane previews own their captured source list rather than a mutable caller list", function()
+    local f = fixture(20)
+    local selected = item(f.source)
+    local input = request("inventory")
+    input.scope, input.sourceContainers = "lootPane", {f.source}
+    local plan = assert(f.jobs:preview(input))
+    assert(plan.request.sourceContainers ~= input.sourceContainers)
+    input.sourceContainers[1] = f.destination
+    assert(f.jobs.reviewed.request.sourceContainers[1] == f.source)
+    plan.request.sourceContainers[1] = f.destination
+    assert(f.jobs.reviewed.request.sourceContainers[1] == f.source)
+    assert(f.jobs:start(plan))
+    assert(finish(f).done == 1 and f.inventory:contains(selected))
+end)
+
 local function matchingFixture(capacity)
     local f = fixture(capacity or 20)
     f.sources = {f.inventory}
@@ -2380,6 +2395,40 @@ local function matchingRequest(mode)
     return {scope = "inventory", includeBags = true, filter = {all = true, ids = {}, types = {}},
         destination = {kind = "matching", mode = mode or "nearby"}}
 end
+
+test("a full first matching crate leaves its item carried and moves later distinct types", function()
+    local f = matchingFixture(20)
+    local full, available = f.destination, container("available matching crate", 20)
+    full.capacity = 1
+    item(full, "Base.Nails", 1)
+    f.nearbyTargets = {full, available}
+    f.targetTypes[available] = {["Base.Plank"] = true}
+    local blocked = item(f.inventory, "Base.Nails", 1)
+    local movable = item(f.inventory, "Base.Plank", 1)
+    local plan = assert(f.jobs:preview(matchingRequest()))
+    assert(#plan.moves == 1 and #plan.skipped == 1)
+    assert(f.jobs:start(plan))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.moved == 1)
+    assert(f.inventory:contains(blocked) and available:contains(movable))
+    assert(not status.hasJob and status.canPreview)
+end)
+
+test("matching crate filling after preview still skips only that type and continues", function()
+    local f = matchingFixture(20)
+    local full, available = f.destination, container("later available crate", 20)
+    full.capacity = 1
+    f.nearbyTargets = {full, available}
+    f.targetTypes[available] = {["Base.Plank"] = true}
+    local blocked, movable = item(f.inventory, "Base.Nails", 1), item(f.inventory, "Base.Plank", 1)
+    local plan = assert(f.jobs:preview(matchingRequest()))
+    assert(#plan.moves == 2)
+    item(full, "Base.Nails", 1)
+    assert(f.jobs:start(plan))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.moved == 1)
+    assert(f.inventory:contains(blocked) and available:contains(movable))
+end)
 
 test("matching transfers move main, outer bag and nested bag items directly to the captured target", function()
     local f = matchingFixture(20)

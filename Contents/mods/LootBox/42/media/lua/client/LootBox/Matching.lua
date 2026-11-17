@@ -98,14 +98,12 @@ end
 
 function Handler:perform()
     if isGamePaused() then return end
-    local handled, result, problem = Matching.UI.continueJob(self.playerNum, "matching:" .. self.mode)
-    if handled then return result, problem end
     local app, err = App.get(self.playerNum)
     if not app then return end
-    local records, _
-    records, _, err = app.world:matchingRecords(self.mode)
+    local records, targets
+    records, targets, err = app.world:matchingRecords(self.mode)
     if not records then Matching.UI.showProgress(self.playerNum, err); return end
-    if #records == 0 then return end
+    if #records == 0 then return Matching.UI.replaceAction(self.playerNum, function() return true end) end
     local types, seen = {}, {}
     for _, record in ipairs(records) do
         local fullType = tostring(record.item:getFullType())
@@ -114,7 +112,26 @@ function Handler:perform()
     local request = {shortcutIntent = "matching:" .. self.mode, scope = "inventory", includeInventory = false, includeBags = true,
         filter = {all = false, ids = {}, types = types},
         destination = {kind = "matching", mode = self.mode}}
-    Matching.UI.quickAction(self.playerNum, {kind = "matching", scope = "inventory"}, request)
+    local playerNum, mode = self.playerNum, self.mode
+    return Matching.UI.replaceAction(playerNum, function()
+        local _, current, problem = app.world:matchingRecords(mode)
+        if not current then Matching.UI.showProgress(playerNum, problem); return nil, problem end
+        local changed = #current ~= #targets
+        for index, target in ipairs(targets) do
+            local other = current[index]
+            if not other or target.ref ~= other.ref then changed = true
+            elseif target.point or other.point then
+                local left, right = target.point or {}, other.point or {}
+                if left.x ~= right.x or left.y ~= right.y or left.z ~= right.z then changed = true end
+            end
+        end
+        if changed then
+            problem = "The matching destinations changed while the previous job stopped. Click again to use the current destinations."
+            Matching.UI.showProgress(playerNum, problem)
+            return nil, problem
+        end
+        return Matching.UI.quickAction(playerNum, {kind = "matching", scope = "inventory"}, request)
+    end)
 end
 
 function Handler:new()
@@ -172,7 +189,9 @@ function SmartTake:shouldBeVisible()
     local present = false
     for _, class in ipairs(list or {}) do if class.Type == self.peer then present = true; break end end
     if not present or not self.playerObj or not self.playerObj:getCurrentSquare()
-        or not self.container or self.container:isEmpty() then return hidden(self) end
+        or not self.container then return hidden(self) end
+    if preferences.smartTakeAllContainers ~= false then return true end
+    if self.container:isEmpty() then return hidden(self) end
     if self.mode == "all" and self.container.isEmptyOrUnwanted and self.container:isEmptyOrUnwanted(self.playerObj) then return hidden(self) end
     if self.mode == "matching" and self.playerObj:getInventory():isEmpty() then return hidden(self) end
     return true
@@ -184,9 +203,10 @@ function SmartTake:getControl()
     local height = getTextManager():getFontHeight(UIFont.Small)
     button:setHeight(height + 4)
     button.textColor = {r = 0.68, g = 0.86, b = 0.75, a = 1}
-    button:setTooltip((self.mode == "all" and "Smart Take All from the displayed container."
+    button:setTooltip((self.mode == "all" and "Smart Take All from eligible loot containers."
         or "Smart Take Matching: take types already present anywhere in your carried storage, including nested bags.")
         .. "\nFill bags with similar items first, then other carried bags by useful reduction, then main inventory."
+        .. "\nSettings: all visible loot containers (default), or active container only."
         .. "\nProtected and unwanted items stay in place. Native capacity and your optional quick-review settings apply.")
     button:setOnMouseOverFunction(self.onMouseOverButton)
     button:setOnMouseOutFunction(self.onMouseOutButton)
@@ -197,7 +217,7 @@ end
 function SmartTake:getItemsToTransfer()
     local app = App.get(self.playerNum)
     if not app then return {}, {} end
-    local records = app.world:smartLootRecords(self.mode, self.container)
+    local records = app.world:smartLootRecords(self.mode, self.container, App.getPreferences().smartTakeAllContainers ~= false)
     local items, selected = {}, {}
     for _, record in ipairs(records or {}) do
         items[#items + 1], selected[record.item] = record.item, true
@@ -223,21 +243,24 @@ end
 
 function SmartTake:perform()
     if isGamePaused() then return end
-    local handled, result, problem = Matching.UI.continueJob(self.playerNum, "smart:" .. self.mode, self.container)
-    if handled then return result, problem end
     local app = App.get(self.playerNum)
     if not app then return end
-    local records, err = app.world:smartLootRecords(self.mode, self.container)
+    local allContainers = App.getPreferences().smartTakeAllContainers ~= false
+    local records, err, sources = app.world:smartLootRecords(self.mode, self.container, allContainers)
     if not records then Matching.UI.showProgress(self.playerNum, err); return end
-    if #records == 0 then return end
+    if #records == 0 then return Matching.UI.replaceAction(self.playerNum, function() return true end) end
     local types, seen = {}, {}
     for _, record in ipairs(records) do
         local fullType = tostring(record.item:getFullType())
         if not seen[fullType] then types[#types + 1], seen[fullType] = fullType, true end
     end
-    local request = {shortcutIntent = "smart:" .. self.mode, scope = "container", sourceContainer = self.container, includeInventory = false, includeBags = false,
+    local request = {shortcutIntent = "smart:" .. self.mode, scope = allContainers and "lootPane" or "container", sourceContainer = not allContainers and self.container or nil,
+        sourceContainers = allContainers and sources or nil, includeInventory = false, includeBags = false,
         excludeUnwanted = true, filter = {all = self.mode == "all", ids = {}, types = types}, destination = {kind = "inventory"}}
-    Matching.UI.quickAction(self.playerNum, {kind = "container", container = self.container}, request)
+    local playerNum, context = self.playerNum, {kind = "container", container = self.container}
+    return Matching.UI.replaceAction(playerNum, function()
+        return Matching.UI.quickAction(playerNum, context, request)
+    end)
 end
 
 function SmartTake:new() return ISInventoryWindowControlHandler.new(self) end
