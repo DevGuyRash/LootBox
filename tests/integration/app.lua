@@ -294,6 +294,28 @@ test("Til Full owns the App action boundary until cancellation settles", functio
     app.jobs.status, app.jobs.cancel, module.new = oldStatus, oldCancel, oldNew
 end)
 
+test("Escape pauses active work via event or consumed-key polling without restarting it", function()
+    local app = assert(App.get(0))
+    Keyboard = {KEY_ESCAPE = 1}
+    local down = false
+    isKeyDown = function() return down end
+    local before, resumed = calls.pauses, resumeCalls
+    App.onKeyStartPressed(2)
+    assert(calls.pauses == before)
+    App.onKeyStartPressed(1)
+    assert(calls.pauses == before + 1)
+    down = true; App.tick(); App.tick()
+    assert(calls.pauses == before + 2, "Held Escape must not repeatedly call Pause")
+    down = false; App.tick()
+    assert(resumeCalls == resumed, "Esc never resumes stopped work")
+    local consumed = false
+    app.consumption = {isBusy = function() return true end, cancel = function() consumed = true; return true end}
+    App.onKeyStartPressed(1)
+    assert(consumed, "Non-pausable Til Full cancels through its owned action boundary")
+    app.consumption = nil
+    Keyboard, isKeyDown = nil, nil
+end)
+
 test("a validly encoded malformed category document remains read-only", function()
     assert(Store.save("LootBox/categories", { categories = false }))
     App.reset()
