@@ -524,7 +524,19 @@ function Instance:reviewBin() return self.jobs:reviewBin() end
 function Instance:approveBin(review, options) return self.jobs:approveBin(review, options) end
 function Instance:rejectBin(review) return self.jobs:rejectBin(review) end
 
+function App.onKeyStartPressed(key)
+    if not Keyboard or key ~= Keyboard.KEY_ESCAPE then return end
+    local instance = sessions[0]
+    if not instance then return end
+    if instance.consumption and instance.consumption:isBusy() then instance:cancel()
+    else instance:pause() end
+end
+
 function App.tick()
+    -- Poll as well as subscribing: native UI may consume the key event first.
+    local escapeDown = Keyboard and isKeyDown and isKeyDown(Keyboard.KEY_ESCAPE) or false
+    if escapeDown and not App.escapeDown then App.onKeyStartPressed(Keyboard.KEY_ESCAPE) end
+    App.escapeDown = escapeDown
     local stamp = getTimestampMs()
     for _, instance in pairs(sessions) do
         if instance.consumption then instance.consumption:tick() end
@@ -543,10 +555,12 @@ function App.reset()
     for _, instance in pairs(sessions) do instance:cancel() end
     sessions, definitions, graph, loadError = {}, nil, nil, nil
     preferences, preferencesError = nil, nil
+    App.escapeDown = false
 end
 
 if Events then
     Events.OnTick.Add(App.tick)
+    if Events.OnKeyStartPressed then Events.OnKeyStartPressed.Add(App.onKeyStartPressed) end
     if Events.OnDisconnect then Events.OnDisconnect.Add(App.reset) end
     if Events.OnMainMenuEnter then Events.OnMainMenuEnter.Add(App.reset) end
 end
