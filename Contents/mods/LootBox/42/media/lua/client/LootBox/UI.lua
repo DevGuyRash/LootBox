@@ -18,7 +18,7 @@ local states = { idle = "Ready for a job", running = "Working", cancelling = "St
     needs_review = "Review bin before continuing", paused = "Paused - ready to resume",
     cancelled = "Cancelled", failed = "Stopped after an error", complete = "Finished",
     finished = "Finished", finished_with_skips = "Finished with notes" }
-local sourceNames = { inventory = "my carried items", reach = "within reach", room = "the current room",
+local sourceNames = { lootPane = "the captured loot-pane containers", inventory = "my carried items", reach = "within reach", room = "the current room",
     building = "the current building", area = "the selected area", labeled = "labeled containers", container = "the selected container" }
 local destinationNames = { inventory = "my inventory with Smart Load (bags first)", floor = "the floor", container = "the selected container",
     vehicle = "my vehicle", labels = "matching labeled storage", matching = "containers holding matching item types", trash = "trash cans" }
@@ -124,6 +124,10 @@ local function copyRequest(request)
         destination = { kind = destination.kind or "inventory", ref = destination.ref, mode = destination.mode } }
     for _, id in ipairs(filter.ids or {}) do result.filter.ids[#result.filter.ids + 1] = id end
     for _, id in ipairs(filter.types or {}) do result.filter.types[#result.filter.types + 1] = id end
+    if request.sourceContainers then
+        result.sourceContainers = {}
+        for _, source in ipairs(request.sourceContainers) do result.sourceContainers[#result.sourceContainers + 1] = source end
+    end
     if request.sourceLabels then
         result.sourceLabels = {}
         for _, id in ipairs(request.sourceLabels) do result.sourceLabels[#result.sourceLabels + 1] = id end
@@ -534,6 +538,7 @@ function Window:buildComposer()
     }
     for _, pair in ipairs(scopes) do self.scope:addOptionWithData(pair[1], pair[2], pair[3]) end
     if self.context.container or self.context.sourceContainer then self.scope:addOptionWithData("Container you clicked", "container", "Only the actual selected container supplies items.") end
+    if self.request.scope == "lootPane" then self.scope:addOptionWithData("Captured loot-pane containers", "lootPane", "Only the sources captured for this request, still visible and accessible.") end
     self.scope:selectData(self.request.scope)
     self.destination = combo(body, 2 * (col + GAP), rowY, col, self, function(s) s:onDestinationChanged() end)
     self.destination:addOptionWithData("My inventory (Smart Load)", "inventory", "Fill eligible carried bags first, preferring useful weight reduction, then use main inventory. Existing contents and native capacity still matter.")
@@ -776,6 +781,10 @@ function Window:readRequest(validate)
     if kind == "matching" then
         scope = "inventory"
         request.scope, request.includeInventory, request.includeBags = scope, false, true
+    end
+    if scope == "lootPane" then
+        request.sourceContainers = copyRequest(self.request).sourceContainers
+        request.includeInventory, request.includeBags = false, false
     end
     if scope == "labeled" then
         local id = value(self.sourceLabel)
@@ -1325,6 +1334,7 @@ local preferenceRows = {
     { key = "confirmQuickCleanup", title = "Review quick cleanup first", description = "Optional deletion preview for quick cleanup and Start cleanup. Off lets those actions delete eligible items directly. Bin review has its own setting." },
     { key = "confirmBinReviews", title = "Review bins on arrival", description = "Optional contents approval at each newly inspected bin. Off approves eligible bins automatically. Protected items, permissions and native deletion rules still apply." },
     { key = "matchingTransferButtons", title = "Smart Take and all-container transfer buttons", description = "Add Smart Take All and Smart Take Matching beside native loot controls, plus Match Displayed and Match Nearby for matching transfers from all carried containers. Smart Take checks all carried bags and fills similar bags before other bags and main inventory." },
+    { key = "smartTakeAllContainers", title = "Smart Take: all visible loot containers", description = "On by default. Smart Take All and Matching search eligible containers shown in the loot pane, including when the active container is empty. Off searches only the active container. Hidden containers and nested contents are not added." },
     { key = "showQuickProgress", title = "Open Current job for quick actions", description = "Show Progress after a direct quick action starts. Off keeps quick actions quiet; F7 and Current job still show their result. Important startup notices remain visible." },
     { key = "rememberLastSetup", title = "Remember my last action setup", description = "Restore the last source, destination, selection and bag options when continuing a setup." },
     { key = "showTips", title = "Show workflow tips", description = "Show additional guidance in the Home view. Tooltips and the Help field guide stay available." },
@@ -1896,7 +1906,7 @@ function UI.quickAction(playerIndex, context, request, pickArea)
     local plan
     plan, err = app:preview(request)
     if not plan then
-        if app:status().canPreview == false then
+        if request.shortcutIntent or app:status().canPreview == false then
             UI.showProgress(playerIndex, "This shortcut did not start. " .. tostring(err))
             return nil, err
         end
@@ -1907,6 +1917,8 @@ function UI.quickAction(playerIndex, context, request, pickArea)
         window:messageText(err)
         return nil, err
     end
+    if request.shortcutIntent and request.shortcutIntent:match("^smart:")
+        and #(plan.moves or {}) == 0 and (plan.pending or 0) == 0 then return true end
     local saved, saveError = app:rememberSetup(request)
     local notice = not saved and ("The job can run, but its setup could not be remembered: " .. tostring(saveError)) or nil
     local required, _, preferenceError = App.reviewPreference(request)
@@ -1929,49 +1941,21 @@ function UI.quickAction(playerIndex, context, request, pickArea)
     return review
 end
 
-function UI.continueJob(playerIndex, intent, sourceContainer)
+function UI.replaceAction(playerIndex, callback)
     playerIndex = playerIndex or 0
     if UI.windows[playerIndex] then W.unfocus(UI.windows[playerIndex].body) end
     local app, err = App.get(playerIndex)
-    if not app then return true, nil, err end
-    local status = app:status()
-    if status.recoveryRequired then
-        local problem = "Recover personal gear in Current job before starting another job."
-        UI.showProgress(playerIndex, problem)
-        return true, nil, problem
-    end
-    local same = not intent or (status.intent == intent and status.sourceContainer == sourceContainer)
-    if status.hasJob and not same then
-        local cancelled
-        cancelled, err = app:cancel()
-        if not cancelled then
-            UI.showProgress(playerIndex, err)
-            return true, nil, err
-        end
-        status = app:status()
-        if status.recoveryRequired then
-            local problem = "Recover personal gear in Current job before starting another job."
-            UI.showProgress(playerIndex, problem)
-            return true, nil, problem
-        end
-        if not status.hasJob and status.canPreview ~= false then return false end
-        local problem = "Cancelling the previous job safely. Retry this shortcut when cleanup finishes."
-        UI.showProgress(playerIndex, problem)
-        return true, nil, problem
-    end
-    if status.canResume then
-        local result
-        result, err = app:resume()
-        return true, result, err
-    end
-    if status.hasJob or status.canPreview == false then return true, true end
-    return false
+    if not app then return nil, err end
+    if UI.quickWindows[playerIndex] then UI.quickWindows[playerIndex]:close() end
+    local result
+    result, err = app:replaceJob(callback)
+    if not result and err then UI.showProgress(playerIndex, err) end
+    return result, err
 end
 
-function UI.condense(playerIndex)
+function UI.condense(playerIndex, ready)
     playerIndex = playerIndex or 0
-    local handled, result, problem = UI.continueJob(playerIndex, "condense")
-    if handled then return result, problem end
+    if not ready then return UI.replaceAction(playerIndex, function() return UI.condense(playerIndex, true) end) end
     local app, err = App.get(playerIndex)
     if not app then return nil, err end
     local plan

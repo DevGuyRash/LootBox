@@ -61,6 +61,21 @@ local function test(name, run)
     print("PASS " .. name)
 end
 
+test("Smart Take all visible containers defaults on and stores only scope not native references", function(app)
+    local preferences = assert(App.getPreferences())
+    assert(preferences.smartTakeAllContainers == true)
+    preferences.smartTakeAllContainers = false
+    assert(App.setPreferences(preferences))
+    assert(App.getPreferences().smartTakeAllContainers == false)
+    local Setups = require "LootBox/Setups"
+    local saved = assert(Setups.request({scope = "lootPane", includeBags = true, includeInventory = true,
+        sourceContainers = {{native = true}}, filter = {all = true}, destination = {kind = "inventory"}}))
+    assert(saved.scope == "lootPane" and saved.sourceContainers == nil and not saved.includeBags and not saved.includeInventory)
+    local visible = {{id = "a"}, {id = "b"}}
+    app.world.smartLootSources = function(_, container, all) assert(container == nil and all); return visible end
+    assert(app:resolveSetup(saved).sourceContainers == visible)
+end)
+
 test("quick reviews default off while interface features stay on and copies remain independent", function()
     local preferences, err = App.getPreferences()
     assert(not err)

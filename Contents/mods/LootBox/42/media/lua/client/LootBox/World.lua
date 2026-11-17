@@ -485,7 +485,7 @@ function World:_scope(request)
     local current = call(self.player, "getCurrentSquare") or call(self.player, "getSquare")
     if not current then return nil, "Player is not in a loaded world" end
     local scope = request.scope or "inventory"
-    if scope == "inventory" or scope == "container" or scope == "labeled" then return {} end
+    if scope == "inventory" or scope == "container" or scope == "lootPane" or scope == "labeled" then return {} end
     local squares, seen = {}, {}
     local function add(square)
         local key = squareId(square)
@@ -577,6 +577,17 @@ function World:scan(request)
         end
         if count ~= #request.sourceLabels then return nil, "Source labels must be a dense list of category IDs" end
     end
+    if request.scope == "lootPane" then
+        if type(request.sourceContainers) ~= "table" then return nil, "Choose the visible loot containers" end
+        local count = 0
+        for index in pairs(request.sourceContainers) do
+            if not nativeInteger(index) or index < 1 or index > #request.sourceContainers then
+                return nil, "Visible loot containers must form a dense list"
+            end
+            count = count + 1
+        end
+        if count ~= #request.sourceContainers then return nil, "Visible loot containers must form a dense list" end
+    end
     if request.scope == "building" then
         local current = call(self.player, "getCurrentSquare")
         local definition = call(call(current, "getBuilding"), "getDef")
@@ -598,7 +609,8 @@ function World:_scan(request, squares)
     local function source(container)
         if not container or seen[container] or not self:valid(container) or not self:sourceMatches(container, request) then return end
         if self.recovery and self.recovery:isReservedContainer(container) then return end
-        if not self:owns(container) and not permitted(self.player, self:square(container)) then
+        local accessSquare = call(container, "getType") == "floor" and call(self.player, "getCurrentSquare") or self:square(container)
+        if not self:owns(container) and not permitted(self.player, accessSquare) then
             result.warnings[#result.warnings + 1] = "Safehouse permissions do not allow this source: " .. self:name(container)
             return
         end
@@ -608,16 +620,31 @@ function World:_scan(request, squares)
             result.warnings[#result.warnings + 1] = self:name(container) .. " needs native exploration after approach"
             return
         end
-        for _, record in ipairs(self:records(container, request.includeBags == true)) do
+        for _, record in ipairs(self:records(container, request.includeBags == true and request.scope ~= "lootPane")) do
             local key = self:itemId(record.item) or record.item
-            if not itemSeen[key] then itemSeen[key] = true; result.items[#result.items + 1] = record end
+            if not itemSeen[key] then
+                itemSeen[key] = true
+                if record.groundSquare and not permitted(self.player, record.groundSquare) then
+                    result.warnings[#result.warnings + 1] = "Safehouse permissions do not allow this floor item: " .. record.itemName
+                else result.items[#result.items + 1] = record end
+            end
         end
     end
-    if request.scope == "inventory" or request.scope == nil or request.includeInventory then source(call(self.player, "getInventory")) end
+    if request.scope == "inventory" or request.scope == nil or (request.includeInventory and request.scope ~= "lootPane") then source(call(self.player, "getInventory")) end
     if request.scope == "container" then
         if not request.sourceContainer then return nil, "Choose a source container" end
         if not self:valid(request.sourceContainer) then return nil, "Source container is no longer available" end
         source(request.sourceContainer)
+    elseif request.scope == "lootPane" then
+        if type(request.sourceContainers) ~= "table" then return nil, "Choose the visible loot containers" end
+        local visible, err = self:smartLootSources(nil, true)
+        if not visible then return nil, err end
+        local eligible = {}
+        for _, container in ipairs(visible) do eligible[container] = true end
+        for _, container in ipairs(request.sourceContainers) do
+            if eligible[container] then source(container)
+            else result.warnings[#result.warnings + 1] = "A selected loot-pane source is no longer visible or eligible; it was left untouched" end
+        end
     elseif request.scope == "reach" then
         local list = ISInventoryPaneContextMenu and ISInventoryPaneContextMenu.getContainers(self.player)
         for index = 0, size(list) - 1 do
@@ -1201,13 +1228,40 @@ function World:matchingRecords(mode)
     return records, targets
 end
 
-function World:smartLootRecords(mode, container)
-    if mode ~= "all" and mode ~= "matching" then return nil, "Choose Smart Take All or Smart Take Matching" end
-    if not container or self:owns(container) or not self:valid(container) or not self:canAccess(container) then
-        return nil, "The displayed loot container is no longer accessible"
+function World:smartLootSources(container, allContainers)
+    if not allContainers then
+        if not container or self:owns(container) or not self:valid(container) or not self:canAccess(container) then
+            return nil, "The displayed loot container is no longer accessible"
+        end
+        if self.recovery and self.recovery:isReservedContainer(container) then
+            return nil, "Recover staged personal gear before looting this container"
+        end
+        return {container}
     end
-    if self.recovery and self.recovery:isReservedContainer(container) then return nil, "Recover staged personal gear before looting this container" end
-    local records = self:records(container, false)
+    local loot = getPlayerLoot and getPlayerLoot(call(self.player, "getPlayerNum"))
+    if not loot or not loot.inventoryPane then return nil, "The loot pane is unavailable" end
+    local result, seen = {}, {}
+    local function add(source)
+        if not source or seen[source] or self:owns(source) or not self:canAccess(source) then return end
+        if self.recovery and self.recovery:isReservedContainer(source) then return end
+        seen[source], result[#result + 1] = true, source
+    end
+    add(loot.inventoryPane.inventory)
+    for _, button in ipairs(loot.backpacks or {}) do add(button.inventory) end
+    return result
+end
+
+function World:smartLootRecords(mode, container, allContainers)
+    if mode ~= "all" and mode ~= "matching" then return nil, "Choose Smart Take All or Smart Take Matching" end
+    local sources, err = self:smartLootSources(container, allContainers == true)
+    if not sources then return nil, err end
+    local records, seenItems = {}, {}
+    for _, source in ipairs(sources) do
+        for _, record in ipairs(self:records(source, false)) do
+            local id = self:itemId(record.item) or record.item
+            if not seenItems[id] then seenItems[id] = true; records[#records + 1] = record end
+        end
+    end
     if mode == "matching" then
         local rules = ISInventoryWindowControlHandler_TransferSameType
         if not rules or type(rules.getItemsTable) ~= "function" then return nil, "The game's matching-transfer rules are unavailable" end
@@ -1225,10 +1279,12 @@ function World:smartLootRecords(mode, container)
                 for fullType in pairs(map) do carried[fullType] = true end
             end
         end
-        local ok, map = pcall(rules.getItemsTable, rules, container)
-        if not ok or type(map) ~= "table" then return nil, "The game's matching-transfer rules could not read this container" end
-        for fullType, items in pairs(map) do
-            if carried[fullType] then for _, item in ipairs(items) do selected[item] = true end end
+        for _, source in ipairs(sources) do
+            local ok, map = pcall(rules.getItemsTable, rules, source)
+            if not ok or type(map) ~= "table" then return nil, "The game's matching-transfer rules could not read this container" end
+            for fullType, items in pairs(map) do
+                if carried[fullType] then for _, item in ipairs(items) do selected[item] = true end end
+            end
         end
         local matching = {}
         for _, record in ipairs(records) do if selected[record.item] then matching[#matching + 1] = record end end
@@ -1236,9 +1292,11 @@ function World:smartLootRecords(mode, container)
     end
     local eligible = {}
     for _, record in ipairs(records) do
-        if not self:protected(record.item) and call(record.item, "isUnwanted", self.player) ~= true then eligible[#eligible + 1] = record end
+        if not self:protected(record.item) and call(record.item, "isUnwanted", self.player) ~= true
+            and (not record.groundSquare or permitted(self.player, record.groundSquare)) then eligible[#eligible + 1] = record end
     end
-    return self:matchingOrder(eligible)
+    local ordered, problem = self:matchingOrder(eligible)
+    return ordered, problem, sources
 end
 
 function World:matchingPoint(request, container)
