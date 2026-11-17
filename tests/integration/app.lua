@@ -294,26 +294,75 @@ test("Til Full owns the App action boundary until cancellation settles", functio
     app.jobs.status, app.jobs.cancel, module.new = oldStatus, oldCancel, oldNew
 end)
 
-test("Escape pauses active work via event or consumed-key polling without restarting it", function()
+test("new requests replace active or paused jobs only after cleanup; latest request wins", function()
     local app = assert(App.get(0))
+    local oldStatus, oldCancel = app.jobs.status, app.jobs.cancel
+    local status = {hasJob = true, canPreview = false, state = "running"}
+    local cancels, first, second = 0, 0, 0
+    app.jobs.status = function() return status end
+    app.jobs.cancel = function() cancels = cancels + 1; return true end
+    assert(app:replaceJob(function() first = first + 1 end))
+    assert(app:replaceJob(function() second = second + 1; return true end))
+    app:runReplacement()
+    assert(cancels == 2 and first == 0 and second == 0)
+    status = {hasJob = false, canPreview = true, state = "cancelled"}
+    app:runReplacement(); app:runReplacement()
+    assert(first == 0 and second == 1)
+    assert(app:replaceJob(function() second = second + 1; return true end))
+    assert(second == 2, "Idle request executes immediately")
+    status = {hasJob = true, canPreview = true, state = "paused"}
+    assert(app:replaceJob(function() first = first + 1 end))
+    assert(first == 0, "Paused checkpoint must be cancelled, never implicitly resumed")
+    app:cancel()
+    status = {hasJob = false, canPreview = true}
+    app:runReplacement()
+    assert(first == 0 and app.replacement == nil)
+    app.jobs.status, app.jobs.cancel = oldStatus, oldCancel
+end)
+
+test("deferred replacement fails safely when recovery appears or callback fails", function()
+    local app = assert(App.get(0))
+    local oldStatus, oldCancel, oldRecovery = app.jobs.status, app.jobs.cancel, app.recovery.status
+    local status, pending, ran = {hasJob = true, canPreview = false}, false, false
+    app.jobs.status = function() return status end
+    app.jobs.cancel = function() return true end
+    app.recovery.status = function() return {pending = pending} end
+    assert(app:replaceJob(function() ran = true end))
+    status, pending = {hasJob = false, canPreview = true}, true
+    app:runReplacement()
+    assert(not ran and app:status().reason:find("Recover personal gear", 1, true))
+    pending, status = false, {hasJob = true, canPreview = false}
+    assert(app:replaceJob(function() error("injected replacement error") end))
+    status = {hasJob = false, canPreview = true}
+    app:runReplacement()
+    assert(app.replacement == nil and app:status().reason:find("injected replacement error", 1, true))
+    app.replacementProblem = nil
+    app.jobs.status, app.jobs.cancel, app.recovery.status = oldStatus, oldCancel, oldRecovery
+end)
+
+test("Escape pauses work and clears queued replacements even when native UI consumed its event", function()
+    local app = assert(App.get(0))
+    local oldStatus, oldCancel = app.jobs.status, app.jobs.cancel
+    local status, ran = {hasJob = true, canPreview = false}, false
+    app.jobs.status = function() return status end
+    app.jobs.cancel = function() return true end
     Keyboard = {KEY_ESCAPE = 1}
     local down = false
     isKeyDown = function() return down end
-    local before, resumed = calls.pauses, resumeCalls
+    assert(app:replaceJob(function() ran = true end))
+    local before = calls.pauses
     App.onKeyStartPressed(2)
     assert(calls.pauses == before)
     App.onKeyStartPressed(1)
-    assert(calls.pauses == before + 1)
+    assert(calls.pauses == before + 1 and app.replacement == nil)
+    assert(app:replaceJob(function() ran = true end))
     down = true; App.tick(); App.tick()
-    assert(calls.pauses == before + 2, "Held Escape must not repeatedly call Pause")
+    assert(calls.pauses == before + 2 and app.replacement == nil)
+    status = {hasJob = false, canPreview = true}
     down = false; App.tick()
-    assert(resumeCalls == resumed, "Esc never resumes stopped work")
-    local consumed = false
-    app.consumption = {isBusy = function() return true end, cancel = function() consumed = true; return true end}
-    App.onKeyStartPressed(1)
-    assert(consumed, "Non-pausable Til Full cancels through its owned action boundary")
-    app.consumption = nil
+    assert(not ran)
     Keyboard, isKeyDown = nil, nil
+    app.jobs.status, app.jobs.cancel = oldStatus, oldCancel
 end)
 
 test("a validly encoded malformed category document remains read-only", function()

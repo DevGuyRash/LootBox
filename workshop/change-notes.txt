@@ -1,3 +1,5 @@
-LootBox 0.9.7
+LootBox 0.9.8
 
-Repeated clicks on Smart Take All, Smart Take Matching, Match Displayed, Match Nearby, and Condense now continue the current job quietly or resume its stopped checkpoint. They start a new job when there is none to continue. F7 and Current job still open progress, and new jobs keep your review preferences.
+Smart Take All and Smart Take Matching now search all eligible containers visible in the loot pane by default, even when the active container is empty. Turn off "Smart Take: all visible loot containers" in LootBox Settings for active-container-only behavior. Hidden, protected, unwanted, inaccessible and recovery-reserved sources stay excluded.
+
+Footer clicks now request fresh work, safely replacing old jobs after native cleanup. Repeated clicks keep only the latest request and never silently resume old jobs. Resume job remains explicit. Empty Smart Take requests do not open a menu. Escape pauses owned work, including when native UI consumes the key event.

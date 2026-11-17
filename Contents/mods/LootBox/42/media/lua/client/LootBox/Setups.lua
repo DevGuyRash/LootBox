@@ -3,10 +3,10 @@ local Setups = {}
 Setups.defaults = { tillFullEnabled = true, tillFullBothNeeds = false, contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
     vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true,
     confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
-    matchingTransferButtons = true, showQuickProgress = false, rememberLastSetup = true, showTips = true,
+    smartTakeAllContainers = true, matchingTransferButtons = true, showQuickProgress = false, rememberLastSetup = true, showTips = true,
     condenseButton = true, condenseRebalance = false, condenseUseUnequipped = false, condenseNested = false }
 
-local scopes = { inventory = true, container = true, reach = true, room = true,
+local scopes = { inventory = true, container = true, lootPane = true, reach = true, room = true,
     building = true, area = true, labeled = true }
 local destinations = { inventory = true, floor = true, container = true,
     vehicle = true, labels = true, trash = true, matching = true }
@@ -75,6 +75,7 @@ function Setups.request(value)
     local labels
     labels, err = strings(destination.labels == nil and {} or destination.labels, true)
     if not labels then return nil, err end
+    if scope == "lootPane" then includeInventory, includeBags = false, false end
     if destination.kind == "matching" then scope, includeInventory, includeBags = "inventory", false, true end
     local result = { scope = scope, includeInventory = includeInventory, includeBags = includeBags, excludeUnwanted = excludeUnwanted,
         filter = { ids = ids, types = types, all = all }, sourceLabels = sourceLabels,

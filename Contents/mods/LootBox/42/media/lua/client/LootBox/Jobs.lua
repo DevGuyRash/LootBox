@@ -37,6 +37,7 @@ local function cloneRequest(request)
     result.destination = {}
     for key, value in pairs(request.destination) do result.destination[key] = value end
     result.sourceLabels = copyList(request.sourceLabels)
+    if request.sourceContainers then result.sourceContainers = copyList(request.sourceContainers) end
     if request.destination.labels then result.destination.labels = copyList(request.destination.labels) end
     if type(request.area) == "table" then
         result.area = {}
@@ -157,11 +158,12 @@ local function validate(request)
     if not request.filter.all and #(request.filter.ids or {}) == 0 and #(request.filter.types or {}) == 0 then
         return nil, "Select at least one category or item type"
     end
-    local scopes = { inventory = true, reach = true, room = true, building = true, area = true, container = true, labeled = true }
+    local scopes = { inventory = true, reach = true, room = true, building = true, area = true, container = true, lootPane = true, labeled = true }
     local destinations = { inventory = true, floor = true, container = true, vehicle = true, labels = true, trash = true, matching = true }
     if not scopes[request.scope] then return nil, "Choose a source scope" end
     if not destinations[request.destination.kind] then return nil, "Choose a destination" end
     if request.scope == "container" and not request.sourceContainer then return nil, "Choose a source container" end
+    if request.scope == "lootPane" and type(request.sourceContainers) ~= "table" then return nil, "Choose the visible loot containers" end
     if request.scope == "labeled" and #(request.sourceLabels or {}) == 0 then return nil, "Choose a source label" end
     if request.destination.kind == "container" and not request.destination.ref then return nil, "Choose a destination container" end
     if request.destination.kind == "matching" and request.destination.mode ~= nil
