@@ -272,10 +272,22 @@ local function openingFixture(f)
     f.player.getInventory = function() return inventory end
     f.item = {id=1, sealed=true, container=source, kind="food"}
     function f.item:getID() return self.id end
+    function f.item:getFullType() return "Base.TestVessel" end
     function f.item:getContainer() return self.container end
     function f.item:isSealed() return self.sealed end
     function f.item:getOpeningRecipe() return "OpenTest" end
     function f.item:getFluidContainer() return self.kind=="fluid" and {} or nil end
+    f.extraItems={}
+    for _,container in ipairs({inventory,source}) do
+        container.getItems=function()
+            local items={}
+            if f.item:getContainer()==container then items[#items+1]=f.item end
+            for _,item in ipairs(f.extraItems) do
+                if item:getContainer()==container then items[#items+1]=item end
+            end
+            return {size=function() return #items end,get=function(_,i) return items[i+1] end}
+        end
+    end
     f.outputs={}
     isClient=function() return f.client==true end
     instanceof=function(item,name) return name=="Food" and item.kind=="food" end
@@ -322,6 +334,31 @@ local function openingFixture(f)
     end
 end
 
+test("MP opening adopts only unique direct same-ID same-type fluid vessel",function()
+    for _,mode in ipairs({"clone","source","wrongID","wrongType","collision","absent","sealed"}) do
+        local f=fixture();openingFixture(f);f.client=true;f.item.kind="fluid"
+        assert(f:open("fluid"));f:finish()
+        local clone={id=1,kind="fluid",container=mode=="source" and f.source or f.inventory}
+        function clone:getID() return self.id end
+        function clone:getFullType() return mode=="wrongType" and "Base.Decoy" or "Base.TestVessel" end
+        function clone:getContainer() return self.container end
+        function clone:isSealed() return mode=="sealed" end
+        function clone:getFluidContainer() return {} end
+        f.item.container=nil
+        if mode=="wrongID" then clone.id=2 end
+        if mode~="absent" then f.extraItems={clone} end
+        if mode=="collision" then f.item.container=f.source end
+        local done,reason,item=f.native:poll()
+        if mode=="clone" or mode=="source" then
+            assert(done and reason=="opened" and item==clone)
+        elseif mode=="wrongType" or mode=="collision" then
+            assert(done==false and not item and not f.native:isBusy())
+        else
+            assert(done==nil)
+            f.time=2001;assert(f.native:poll()==false)
+        end
+    end
+end)
 test("nil ground opening requires native floor association without queueing",function(f)
     openingFixture(f);f.item.container=nil
     local ground={getItem=function() return f.item end,getSquare=function() return {} end}

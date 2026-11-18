@@ -231,7 +231,7 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     if not ok then return nil, "Could not read current fullness" end
     if target then return nil, "Already at the requested limit" end
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget,
-        opening = true, kind = kind, item = item, itemId = item:getID(), source = item:getContainer(),
+        opening = true, kind = kind, item = item, itemId = item:getID(), fullType = item:getFullType(), source = item:getContainer(),
         wasSealed = item:isSealed(), chooseOpened = kind == "food" and isClient()}
     self.active = state
     -- Zero means opening only. Native Open-and-Eat percentages enqueue a
@@ -277,6 +277,27 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     return true
 end
 
+-- Network pickup can reconstruct a vessel. Match only the original network ID
+-- among direct source/main-inventory members, never by type or food output.
+local function openedNetworkVessel(self, state)
+    local found, seen = nil, {}
+    for _, container in ipairs({state.source, self.player:getInventory()}) do
+        if not seen[container] then
+            seen[container] = true
+            local items = container:getItems()
+            for index = 0, items:size() - 1 do
+                local item = items:get(index)
+                if item:getContainer() == container and item:getID() == state.itemId then
+                    if found and found ~= item then return nil, "Ambiguous opened vessel identity" end
+                    if item:getFullType() ~= state.fullType then return nil, "Opened vessel identity changed" end
+                    found = item
+                end
+            end
+        end
+    end
+    if found and not found:isSealed() and found:getFluidContainer() then return found end
+end
+
 function Native:poll()
     local state = self.active
     if not state then return false, "No consumption action is active" end
@@ -306,7 +327,12 @@ function Native:poll()
             return true, "chooseOpened"
         end
         local item = state.output or state.item
-        local source = item:getContainer()
+        if isClient() and state.kind == "fluid" then
+            local problem
+            item, problem = openedNetworkVessel(self, state)
+            if problem then self.active = nil; return false, problem end
+        end
+        local source = item and item:getContainer()
         if source and not item:isSealed()
             and (state.output or (state.wasSealed and item:getID() == state.itemId))
             and (source == state.source or source == self.player:getInventory()) then

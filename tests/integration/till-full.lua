@@ -13,8 +13,8 @@ package.loaded['LootBox/TillFullNative'] = {new=function()
   if self.refuse then return nil,'refused after preparation' end
   return true
  end
- function n:beginOpen(item,kind,recipe,target,source)
-  self.busy=true;self.opening=true;self.opens[#self.opens+1]={item=item,kind=kind,recipe=recipe,source=source};self.target=target
+ function n:beginOpen(item,kind,recipe,target)
+  self.busy=true;self.opening=true;self.opens[#self.opens+1]={item=item,kind=kind,recipe=recipe};self.target=target
   if self.refuse then return nil,'opening refused after preparation' end
   return true
  end
@@ -498,7 +498,7 @@ function sourceWorld:consumptionSource(item,source)
  if source.denied then return nil,'Access denied' end
  if source.far then return nil,'Out of reach' end
  if item:getContainer()==source then return true end
- if source.floor and not item:getContainer() and item.ground==source and source.members[item] then return true end
+ if source.floor and not item:getContainer() then return nil,'Open the nearby Floor pane and try again' end
  return nil,'Exact source membership changed'
 end
 local function groundItem(id,source)
@@ -534,19 +534,21 @@ test('packaged external food and fluid retain exact source checks during opening
   local source={};local a=kind=='food' and can(1) or bottle(1,.5);a.source=source
   if kind=='fluid' then a.sealed=true end
   local c=assert(Full.new(player(.1,.1),sourceWorld,{a},kind,false,recipe,source));c:tick()
-  assert(#created.opens==1 and created.opens[1].item==a and created.opens[1].source==source)
+  assert(#created.opens==1 and created.opens[1].item==a)
   source.far=true;assert(created.target());c:tick();assert(c.state=='cancelled' and #created.calls==0)
  end
 end)
-test('exact nil-container floor item is recognized only through live floor membership',function()
+test('floor consumption requires native synthetic container association',function()
  local floor={floor=true,members={}};local a=groundItem(1,floor)
- local c=assert(Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,floor));c:tick()
+ local c,reason=Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,floor)
+ assert(c==nil and reason=='Open the nearby Floor pane and try again')
+ a.source=floor
+ c=assert(Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,floor));c:tick()
  assert(#created.calls==1 and created.calls[1].item==a);close(created.calls[1].portion,.5)
  a.source=inventory;a.ground=nil;assert(not created.target())
- local b=groundItem(2,floor)
- c=assert(Full.new(player(.1,0),sourceWorld,{b},'food',false,nil,floor));floor.members[b]=nil;c:tick()
+ local b=groundItem(2,floor);b.source=floor
+ c=assert(Full.new(player(.1,0),sourceWorld,{b},'food',false,nil,floor));b.source=nil;c:tick()
  assert(c.state=='cancelled' and #created.calls==0)
- assert(Full.new(player(.1,0),sourceWorld,{food(3,.2)},'food',false,nil,floor)==nil)
 end)
 test('original own bag permits native restoration but not stale main or another bag',function()
  local bag={};local a=bottle(1,.5);a.sealed=true;a.source=bag
@@ -554,6 +556,141 @@ test('original own bag permits native restoration but not stale main or another 
  a.source=inventory;assert(not created.target());a.sealed=false;created.opened=a;a.source=bag;c:tick()
  assert(#created.calls==1 and created.calls[1].item==a)
  a.source={};assert(created.target());c:tick();assert(c.state=='cancelled')
+end)
+local function endpoint(container)
+ container.members={}
+ function container:getItemWithID(id) return self.members[id] end
+ function container:containsID(id) return self.members[id]~=nil end
+ return container
+end
+function sourceWorld:canAccess(source) return not source.denied and not source.far and not source.foreign end
+local function mpTransferFixture(amount)
+ multiplayer=true;endpoint(inventory)
+ local crate=endpoint({});local item=food(71,.2);item.source=crate;crate.members[71]=item
+ local p=player(amount,0);local c=assert(Full.new(p,sourceWorld,{item},'food',false,nil,crate));c:tick()
+ return c,p,item,crate
+end
+local function endMP()
+ multiplayer=false;inventory.members=nil;inventory.getItemWithID=nil;inventory.containsID=nil
+end
+test('MP partial transfer resolves exact immutable ID in main before confirming quantity',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ local actual=food(71,.2);crate.members[71]=nil;inventory.members[71]=actual;old.source=nil
+ p.h=0;c:tick();assert(c:isBusy() and #created.calls==1 and c.records[1].item==actual)
+ actual.h=.1;c:tick();assert(c.state=='finished' and #created.calls==1)
+ endMP()
+end)
+test('MP detached original is never interpreted as an acknowledged partial portion',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ crate.members[71]=nil;old.source=nil;p.h=0;c:tick()
+ assert(c:isBusy());now=now+2001;c:tick();assert(c.state=='failed' and #created.calls==1)
+ endMP()
+end)
+test('MP conflicting source-main identities and mismatched types fail closed',function()
+ for _,mode in ipairs({'duplicate','type','container'}) do
+  local c,p,old,crate=mpTransferFixture(.1);local actual=food(71,.1);inventory.members[71]=actual
+  if mode~='duplicate' then crate.members[71]=nil;old.source=nil end
+  if mode=='type' then function actual:getFullType() return 'Base.OtherFood' end end
+  if mode=='container' then actual.source={} end
+  p.h=0;c:tick();assert(c.state=='failed' and #created.calls==1,mode)
+  endMP()
+ end
+end)
+test('MP source-main alias to identical object is safe and does not select a peer',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ old.source=inventory;inventory.members[71]=old;old.h=.1;p.h=0;c:tick()
+ assert(c.state=='finished' and #created.calls==1)
+ endMP()
+end)
+test('MP full depletion requires observed main identity, native completion and accessible endpoint absence',function()
+ for _,mode in ipairs({'seen','unseen','inaccessible','native-failed'}) do
+  local c,p,old,crate=mpTransferFixture(.3);local actual=food(71,.2)
+  if mode~='unseen' then
+   crate.members[71]=nil;inventory.members[71]=actual;old.source=nil
+   assert(not created.target())
+  end
+  crate.members[71]=nil;inventory.members[71]=nil;old.source=nil;actual.source=nil;p.h=.1
+  if mode=='inaccessible' then crate.denied=true end
+  if mode=='native-failed' then created.result=false end
+  c:tick()
+  if mode=='seen' then assert(c.state=='finished' and c.count==1)
+  elseif mode=='native-failed' then assert(c.state=='cancelled' and c.count==0)
+  else assert(c:isBusy());now=now+2001;c:tick();assert(c.state=='failed' and c.count==0,mode) end
+  assert(#created.calls==1);endMP()
+ end
+end)
+test('MP transferred fluid identity preserves requested remaining-ratio confirmation',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({})
+ local old=bottle(73,.2);old.source=crate;crate.members[73]=old
+ local p=player(0,.1);local c=assert(Full.new(p,sourceWorld,{old},'fluid',false,nil,crate));c:tick()
+ local actual,fluid=bottle(73,.2);old.source=nil;crate.members[73]=nil;inventory.members[73]=actual
+ p.t=0;c:tick();assert(c:isBusy() and c.records[1].item==actual)
+ fluid.ratio=.5;c:tick();assert(c.state=='finished' and #created.calls==1)
+ endMP()
+end)
+test('MP restored partial same-ID item is confirmed at original source not replaced by type',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ local carried=food(71,.2);crate.members[71]=nil;inventory.members[71]=carried;old.source=nil
+ assert(not created.target())
+ local restored=food(71,.1);restored.source=crate;carried.source=nil;inventory.members[71]=nil;crate.members[71]=restored
+ p.h=0;c:tick();assert(c.state=='finished' and #created.calls==1)
+ endMP()
+end)
+test('MP unsealed fluid authoritative clone retains original source for native restoration',function()
+ multiplayer=true;endpoint(inventory);local bag=endpoint({})
+ local old=bottle(75,.2);old.source=bag;old.sealed=true;bag.members[75]=old
+ local p=player(0,.1);local c=assert(Full.new(p,sourceWorld,{old},'fluid',false,recipe,bag));c:tick()
+ local opened,fluid=bottle(75,.2);opened.source=bag;bag.members[75]=opened;old.source=nil;created.opened=opened
+ c:tick();assert(#created.calls==1 and created.calls[1].item==opened and c.records[1].source==bag)
+ endMP()
+end)
+test('MP duplicate ID objects in one direct endpoint are not silently chosen',function()
+ local c,p,old,crate=mpTransferFixture(.1);crate.members[71]=nil;old.source=nil
+ local a,b=food(71,.1),food(71,.1)
+ function inventory:getItems() return {size=function() return 2 end,get=function(_,i) return i==0 and a or b end} end
+ inventory.members[71]=a;p.h=0;c:tick()
+ assert(c.state=='failed' and #created.calls==1)
+ inventory.getItems=nil;endMP()
+end)
+test('MP opening may follow the same closed input ID transfer but never an edible replacement ID',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({});local old=can(77);old.source=crate;crate.members[77]=old
+ local c=assert(Full.new(player(.1,0),sourceWorld,{old},'food',false,recipe,crate));c:tick()
+ local transferred=can(77);inventory.members[77]=transferred;crate.members[77]=nil;old.source=nil
+ assert(not created.target() and c.records[1].item==transferred)
+ local opened=food(78,.2);inventory.members[77]=nil;inventory.members[78]=opened;transferred.source=nil
+ created.reason='chooseOpened';c:tick()
+ assert(c.state=='finished' and c.openedFoodPrompt and #created.calls==0 and #created.opens==1)
+ endMP()
+end)
+test('MP coherent action uses cheap lookups and audits each endpoint only once at confirmation',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ local scans=0
+ function crate:getItems()
+  scans=scans+1
+  return {size=function() return 1 end,get=function() return old end}
+ end
+ function inventory:getItems()
+  scans=scans+1
+  return {size=function() return 0 end}
+ end
+ for i=1,100 do assert(not created.target()) end
+ assert(scans==0)
+ c:tick();assert(scans==2 and c:isBusy())
+ for i=1,100 do c:tick() end
+ assert(scans==2)
+ inventory.getItems=nil;endMP()
+end)
+test('MP own-main final audit never walks the same endpoint twice',function()
+ multiplayer=true;endpoint(inventory)
+ local old=food(79,.2);inventory.members[79]=old
+ local c=assert(Full.new(player(.1,0),sourceWorld,{old},'food',false,nil,inventory));c:tick()
+ local scans=0
+ function inventory:getItems()
+  scans=scans+1
+  return {size=function() return 1 end,get=function() return old end}
+ end
+ c:tick();assert(scans==1)
+ inventory.getItems=nil;endMP()
 end)
 print('Til Full controller: '..count..' scenarios passed')
 
