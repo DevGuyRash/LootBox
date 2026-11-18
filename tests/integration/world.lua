@@ -1547,6 +1547,102 @@ case("Smart Load groups native alias matches across bags then orders remaining s
     equal(destinations[3], strongStorage); equal(destinations[4], f.inventory)
 end)
 
+case("consumption requires exact membership and current displayed nearby loot", function(f)
+    getPlayerLoot = function() return {inventoryPane = {inventory = f.junk}, backpacks = {{inventory = f.tools}}} end
+    equal(f.world:consumptionSource(f.inventory.items[1], f.inventory), true)
+    equal(f.world:consumptionSource(f.junk.items[1], f.junk), true)
+    equal(f.world:consumptionSource(f.tools.items[1], f.tools), true)
+    equal(f.world:consumptionSource(f.unlabeled.items[1], f.unlabeled), nil)
+    equal(f.world:consumptionSource(f.junk.items[1], f.tools), nil)
+    local removed = table.remove(f.junk.items)
+    equal(f.world:consumptionSource(removed, f.junk), nil)
+    f.junk.isLockedToCharacter = function() return true end
+    equal(f.world:consumptionSource(f.junk.items[1], f.junk), nil)
+    getPlayerLoot = function() return {inventoryPane = {inventory = f.remote}} end
+    equal(f.world:consumptionSource(f.remote.items[1], f.remote), nil)
+end)
+
+case("consumption validates carried bag membership rather than outermost claims", function(f)
+    local bag = f.item(f.inventory, "Bag", "Container")
+    local inside = f.container("bag"); bag.inventory = inside; inside.bag = bag
+    local snack = f.item(inside, "Snack")
+    equal(f.world:consumptionSource(snack, inside), true)
+    table.remove(f.inventory.items)
+    equal(f.world:consumptionSource(snack, inside), nil)
+    local foreign = f.container("inventory")
+    local food = f.item(foreign, "ForeignFood")
+    getPlayerLoot = function() return {inventoryPane = {inventory = foreign}} end
+    equal(f.world:consumptionSource(food, foreign), nil)
+end)
+
+case("consumption uses direct list membership and validates own-character bag ancestry", function(f)
+    local bag = f.item(f.inventory, "Bag", "Container")
+    local inside = f.container("bag", f.player); bag.inventory = inside; inside.bag = bag
+    local snack = f.item(inside, "Snack")
+    local queries = 0
+    inside.getItems = function() return {
+        contains = function(_, value) queries = queries + 1; return value == snack end,
+        size = function() error("Direct native membership must avoid Lua iteration") end,
+    } end
+    local oldInstance = instanceof
+    instanceof = function(object, class)
+        if object == f.player then return class == "IsoGameCharacter" or class == "IsoPlayer" end
+        return oldInstance(object, class)
+    end
+    equal(f.world:consumptionSource(snack, inside), true)
+    equal(queries, 1)
+    inside.bag = nil
+    equal(f.world:consumptionSource(snack, inside), nil)
+    instanceof = oldInstance
+end)
+
+case("consumption ground items require exact live registration and native adjacent reach", function(f)
+    local food = f.item(nil, "GroundFood")
+    local square = f.square(1, 0)
+    local object = {getItem = function() return food end, getSquare = function() return square end,
+        getWorldObjectIndex = function() return 0 end}
+    food.world = object; square.ground[1] = object
+    equal(f.world:consumptionSource(food, nil), nil)
+    local floor = f.container("floor")
+    ISInventoryPage = {GetFloorContainer = function() return floor end}
+    food.source = floor; floor.items[1] = food
+    equal(f.world:consumptionSource(food, floor), true)
+    square.ground[1] = {}
+    equal(f.world:consumptionSource(food, floor), nil)
+    square.ground[1] = object
+    f.origin.canReachTo = function() return false end
+    equal(f.world:consumptionSource(food, floor), nil)
+    f.origin.canReachTo = function() return true end
+    isClient = function() return true end
+    SafeHouse = {isSafehouseAllowLoot = function() return false end}
+    equal(f.world:consumptionSource(food, floor), nil)
+    isClient = function() return false end
+    equal(f.world:consumptionSource(food, floor), true)
+    floor.items = {}
+    equal(f.world:consumptionSource(food, floor), nil)
+    floor.items[1] = food
+    ISInventoryPage.GetFloorContainer = function() return {} end
+    equal(f.world:consumptionSource(food, floor), nil)
+end)
+
+case("consumption vehicle storage uses the exact native part access gate", function(f)
+    local vehicle, storage = car(f)
+    local food = f.item(storage, "VehicleFood")
+    getPlayerLoot = function() return {inventoryPane = {inventory = storage}} end
+    vehicle.canAccessContainer = function(_, index, player)
+        equal(index, 0); equal(player, f.player); return true
+    end
+    -- Fixture vehicle is distant: native part access, not its center, governs.
+    equal(f.world:consumptionSource(food, storage), true)
+    vehicle.canAccessContainer = function() return false end
+    equal(f.world:consumptionSource(food, storage), nil)
+    vehicle.canAccessContainer = nil
+    equal(f.world:consumptionSource(food, storage), nil)
+    vehicle.canAccessContainer = function() return true end
+    vehicle.removed = true
+    equal(f.world:consumptionSource(food, storage), nil)
+end)
+
 ISInventoryWindowControlHandler_TransferSameType = matchingGlobals.rules
 getPlayerLoot, ISInventoryPage, SafeHouse = matchingGlobals.loot, matchingGlobals.inventoryPage, matchingGlobals.safeHouse
 getCell, instanceof, isClient = saved.getCell, saved.instanceof, saved.isClient

@@ -265,8 +265,10 @@ test("Til Full owns the App action boundary until cancellation settles", functio
     function controller:cancel() self.cancelled = true; self.state = "cancelling"; return true end
     local module = package.loaded["LootBox/TillFull"]
     local oldNew, oldStatus, oldCancel = module.new, app.jobs.status, app.jobs.cancel
-    module.new = function(_, _, items, kind, both)
+    local canRecipe, expectedRecipe, expectedSource = {}, nil, nil
+    module.new = function(_, _, items, kind, both, recipe, source)
         assert(items[1] == item and kind == "food" and both == false)
+        assert(recipe == expectedRecipe and source == expectedSource)
         return controller
     end
     local pending = true
@@ -274,6 +276,9 @@ test("Til Full owns the App action boundary until cancellation settles", functio
     app.jobs.cancel = function() calls.consumeJobCancel = true; return true end
     controller.full = true
     assert(app:tillFull({item}, "food") and not calls.consumeJobCancel and not controller.ticks)
+    expectedRecipe, expectedSource = canRecipe, {}
+    assert(app:tillFull({item}, "food",canRecipe,expectedSource) and not calls.consumeJobCancel and not controller.ticks)
+    expectedRecipe, expectedSource = nil, nil
     controller.full = false
     assert(not app:tillFull({item}, "food") and calls.consumeJobCancel)
     pending = false

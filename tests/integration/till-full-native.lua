@@ -7,8 +7,11 @@ local tests = 0
 local function fixture()
     local f = {time = 0, target = false, actions = {}, calls = {}}
     getTimestampMs = function() return f.time end
+    isClient = function() return f.client == true end
+    isServer = function() return f.server == true end
     f.player = {getPlayerNum = function() return 2 end}
-    f.item = {isSealed = function() return false end, getOpeningRecipe = function() return nil end}
+    f.item = {container = {}, getID = function() return 481 end, isSealed = function() return false end, getOpeningRecipe = function() return nil end,
+        getContainer = function(self) return self.container end}
     local q = {queue = {}}
     function q:removeFromQueue(a) for i,v in ipairs(self.queue) do if v == a then table.remove(self.queue,i); return end end end
     function q:addToQueue(a)
@@ -27,7 +30,7 @@ local function fixture()
         f.actions[#f.actions+1] = a
         return a
     end
-    ISTimedActionQueue = {getTimedActionQueue = function() return q end}
+    ISTimedActionQueue = {getTimedActionQueue = function() return q end,add=function(a) return q:addToQueue(a) end}
     function f:dispatch(kind, portion)
         f.calls[#f.calls+1] = {kind,portion}
         if not f.noPrep then q:addToQueue(f:action("Transfer")) end
@@ -51,6 +54,98 @@ test("wrapper portions and complete restoration for both native kinds",function(
         assert(f:begin(kind,.4)); assert(f.native:poll()==nil)
         f:finish(); assert(f.native:poll()==true and not f.native:isBusy())
         assert(f.calls[#f.calls][1]==kind and f.calls[#f.calls][2]==.4)
+    end
+end)
+test("native wrappers own exact external pickup and their original return behavior",function()
+    for _,kind in ipairs({"food","fluid"}) do
+        for _,sourceType in ipairs({"crate","floor"}) do
+            local f=fixture()
+            local inventory,source={}, {getType=function() return sourceType end}
+            f.item.container=source;f.item.id=481
+            f.item.getContainer=function(self) return self.container end
+            f.item.getID=function(self) return self.id end
+            f.player.getInventory=function() return inventory end
+            local originalDispatch=f.dispatch
+            function f:dispatch(k,p)
+                assert(self.item:getContainer()==source and self.item:getID()==481)
+                originalDispatch(self,k,p)
+                local transfer,consume,restore=self.actions[1],self.actions[2],self.actions[4]
+                local pickup=transfer.perform
+                function transfer:perform()
+                    f.item.container=inventory
+                    return pickup(self)
+                end
+                local eat=consume.perform
+                function consume:perform()
+                    assert(f.item:getContainer()==inventory and f.item:getID()==481)
+                    return eat(self)
+                end
+                local putBack=restore.perform
+                function restore:perform()
+                    f.item.container=source
+                    return putBack(self)
+                end
+            end
+            assert(f:begin(kind,.4))
+            assert(#f.calls==1 and #f.actions==4) -- no adapter-created duplicate pickup
+            f:finish();assert(f.native:poll()==true)
+            assert(f.item:getContainer()==source and f.item:getID()==481)
+        end
+    end
+end)
+test("nil ground consumption requires native floor association without queueing",function(f)
+    f.item.container=nil
+    local ground={getItem=function() return f.item end,getSquare=function() return {} end}
+    f.item.getWorldItem=function() return ground end
+    for _,kind in ipairs({"food","fluid"}) do
+        local ok,reason=f:begin(kind)
+        assert(not ok and reason=="Open the nearby Floor pane and try again")
+        assert(#f.calls==0 and #f.queue.queue==0 and not f.native:isBusy())
+    end
+    ground.getItem=function() return {} end
+    local ok,reason=f:begin()
+    assert(not ok and reason=="The selected item is no longer in an available container")
+    ground.getItem=function() return f.item end;ground.getSquare=function() return nil end
+    ok,reason=f:begin()
+    assert(not ok and reason=="The selected item is no longer in an available container")
+end)
+test("Floor fluid passes exact world wrapper to stock drink while retaining canonical item",function(f)
+    local fluid,inventory={},{}
+    f.item.container={getType=function() return "floor" end}
+    f.item.getFluidContainer=function(self) return self.fluid end
+    local ground={getItem=function() return f.item end,getSquare=function() return {} end,
+        getFluidContainer=function() return fluid end}
+    f.item.getWorldItem=function() return ground end
+    ISInventoryPaneContextMenu.onDrinkFluid=function(target,portion,player)
+        assert(target==ground and target:getItem()==f.item and player==f.player)
+        assert(f.item:getFluidContainer()==nil and target:getFluidContainer()==fluid)
+        f:dispatch("fluid",portion)
+        local transfer,consume=f.actions[1],f.actions[2]
+        consume.item=target:getItem();consume.fluidContainer=target:getFluidContainer()
+        local pickup=transfer.perform
+        function transfer:perform()
+            f.item.container=inventory;f.item.fluid=fluid
+            return pickup(self)
+        end
+    end
+    assert(f:begin("fluid",.2));assert(f.native.active.item==f.item)
+    f.actions[1]:perform()
+    assert(f.item:getContainer()==inventory and f.item:getFluidContainer()==fluid)
+    assert(f.actions[2].item==f.item and f.actions[2].fluidContainer==fluid)
+    f.actions[2]:perform();f.target=true -- restoration may change source/fullness
+    assert(f.native:poll()==nil)
+    f:finish();assert(f.native:poll()==true)
+end)
+test("stale or non-Floor world wrappers never replace ordinary drink targets",function()
+    for _,mode in ipairs({"crate","wrongItem","noSquare","noFluid"}) do
+        local f=fixture()
+        f.item.container={getType=function() return mode=="crate" and "crate" or "floor" end}
+        local ground={getItem=function() return mode=="wrongItem" and {} or f.item end,
+            getSquare=function() if mode~="noSquare" then return {} end end,
+            getFluidContainer=function() if mode~="noFluid" then return {} end end}
+        f.item.getWorldItem=function() return ground end
+        assert(f:begin("fluid"));assert(#f.calls==1)
+        f.native:cancel();f:finish();assert(f.native:poll()==false)
     end
 end)
 test("reject invalid admission before wrapper dispatch",function(f)
@@ -208,6 +303,453 @@ test("real controller and adapter wait for deferred item and nutrition completio
     c:tick();assert(#f.calls==1 and c:isBusy())
     f.time=100;item.h=.1;f.player.h=0 -- Deferred completion from game boundary.
     c:tick();assert(#f.calls==1 and c.state=='finished')
+end)
+
+local function openingFixture(f)
+    local inventory, source, recipe = {}, {}, {}
+    f.inventory, f.source, f.recipe = inventory, source, recipe
+    f.player.getInventory = function() return inventory end
+    f.item = {id=1, sealed=true, container=source, kind="food"}
+    function f.item:getID() return self.id end
+    function f.item:getFullType() return "Base.TestVessel" end
+    function f.item:getContainer() return self.container end
+    function f.item:isSealed() return self.sealed end
+    function f.item:getOpeningRecipe() return "OpenTest" end
+    function f.item:getFluidContainer() return self.kind=="fluid" and {} or nil end
+    f.extraItems={}
+    for _,container in ipairs({inventory,source}) do
+        container.getItems=function()
+            local items={}
+            if f.item:getContainer()==container then items[#items+1]=f.item end
+            for _,item in ipairs(f.extraItems) do
+                if item:getContainer()==container then items[#items+1]=item end
+            end
+            return {size=function() return #items end,get=function(_,i) return items[i+1] end}
+        end
+    end
+    f.outputs={}
+    isClient=function() return f.client==true end
+    instanceof=function(item,name) return name=="Food" and item.kind=="food" end
+    ArrayList={new=function()
+        return {values={},size=function(self) return #self.values end,get=function(self,i) return self.values[i+1] end}
+    end}
+    getScriptManager=function() return {getCraftRecipe=function(_,name) return name=="OpenTest" and recipe end} end
+    ISEntityUI={HandcraftStart=function(player,logic,force,addToQueue,eat)
+        assert(player==f.player and not force and eat==0)
+        if f.noCraft then return end
+        local a=f:action("ISHandcraftAction")
+        a.character=f.player;a.craftRecipe=recipe;a.eatPercentage=eat
+        a.manualInputs={[1]={size=function() return 1 end,get=function() return f.wrongInput or f.item end}}
+        if f.autoInputs then a.manualInputs=false end
+        a.logic={getRecipeData=function()
+            return {getAllCreatedItems=function()
+                return {size=function() return #f.outputs end,get=function(_,i) return f.outputs[i+1] end}
+            end}
+        end}
+        local perform=a.perform
+        function a:perform()
+            if f.unseal then f.item.sealed=false;f.item.container=inventory end
+            return perform(self)
+        end
+        if addToQueue then f.queue:addToQueue(a) end
+        return a
+    end}
+    f.originalHandcraftStart=ISEntityUI.HandcraftStart
+    ISInventoryPaneContextMenu.OnNewCraft=function(item,r,p,all,eat)
+        assert(item==f.item and r==recipe and p==2 and all==false and eat==0)
+        f.calls[#f.calls+1]={"opening",eat}
+        f.queue:addToQueue(f:action("Transfer"))
+        ISEntityUI.HandcraftStart(f.player,{},false,true,eat)
+        f.queue:addToQueue(f:action("ReturnOpener"))
+    end
+    function f:open(kind) return self.native:beginOpen(self.item,kind or "food",recipe,function() return self.target end) end
+    function f:output(kind)
+        local result={kind=kind or "food",container=inventory}
+        function result:getContainer() return self.container end
+        function result:isSealed() return false end
+        function result:getFluidContainer() return self.kind=="fluid" and {} or nil end
+        f.outputs[#f.outputs+1]=result
+        return result
+    end
+end
+
+test("MP opening adopts only unique direct same-ID same-type fluid vessel",function()
+    for _,mode in ipairs({"clone","source","wrongID","wrongType","collision","absent","sealed"}) do
+        local f=fixture();openingFixture(f);f.client=true;f.item.kind="fluid"
+        assert(f:open("fluid"));f:finish()
+        local clone={id=1,kind="fluid",container=mode=="source" and f.source or f.inventory}
+        function clone:getID() return self.id end
+        function clone:getFullType() return mode=="wrongType" and "Base.Decoy" or "Base.TestVessel" end
+        function clone:getContainer() return self.container end
+        function clone:isSealed() return mode=="sealed" end
+        function clone:getFluidContainer() return {} end
+        f.item.container=nil
+        if mode=="wrongID" then clone.id=2 end
+        if mode~="absent" then f.extraItems={clone} end
+        if mode=="collision" then f.item.container=f.source end
+        local done,reason,item=f.native:poll()
+        if mode=="clone" or mode=="source" then
+            assert(done and reason=="opened" and item==clone)
+        elseif mode=="wrongType" or mode=="collision" then
+            assert(done==false and not item and not f.native:isBusy())
+        else
+            assert(done==nil)
+            f.time=2001;assert(f.native:poll()==false)
+        end
+    end
+end)
+test("Floor opening uses stock world pickup prefix and exact canonical craft input",function(f)
+    openingFixture(f);f.item.kind="fluid"
+    f.source.getType=function() return "floor" end
+    local ground={getItem=function() return f.item end,getSquare=function() return {} end,
+        getFluidContainer=function() return {} end}
+    f.item.getWorldItem=function() return ground end
+    local pickup
+    ISInventoryPaneContextMenu.transferIfNeeded=function(player,target)
+        assert(player==f.player and target==ground)
+        pickup=f:action("WorldPickup");f.queue:addToQueue(pickup)
+    end
+    assert(f:open("fluid"));assert(f.queue.queue[1]==pickup and f.native.active.owned[pickup])
+    f.native:cancel("cancel floor pickup")
+    f:finish();assert(f.native:poll()==false)
+    assert(f.item.sealed)
+    for _,action in ipairs(f.actions) do
+        if action.Type=="ISHandcraftAction" then assert(not action.performed) end
+        if action.Type=="ReturnOpener" then assert(action.performed) end
+    end
+end)
+test("nil ground opening requires native floor association without queueing",function(f)
+    openingFixture(f);f.item.container=nil
+    local ground={getItem=function() return f.item end,getSquare=function() return {} end}
+    f.item.getWorldItem=function() return ground end
+    for _,kind in ipairs({"food","fluid"}) do
+        local ok,reason=f:open(kind)
+        assert(not ok and reason=="Open the nearby Floor pane and try again")
+        assert(#f.calls==0 and #f.queue.queue==0 and not f.native:isBusy())
+        assert(ISEntityUI.HandcraftStart==f.originalHandcraftStart)
+    end
+    f.item.getWorldItem=function() return nil end
+    local ok,reason=f:open()
+    assert(not ok and reason=="The selected item is no longer in an available container")
+end)
+test("opening dispatch never requests native auto-eat and returns exact craft result",function(f)
+    openingFixture(f)
+    local result=f:output()
+    assert(f:open());assert(f.native:poll()==nil);f:finish()
+    local done,reason,item=f.native:poll()
+    assert(done and reason=="opened" and item==result and #f.calls==1 and f.calls[1][2]==0)
+end)
+test("MP fluid opening waits for exact item unseal not client perform",function(f)
+    openingFixture(f);f.client=true;f.item.kind="fluid"
+    assert(f:open("fluid"));f:finish();assert(f.native:poll()==nil)
+    f.time=500;assert(f.native:poll()==nil)
+    f.item.sealed=false;f.item.container=f.inventory
+    local done,reason,item=f.native:poll()
+    assert(done and reason=="opened" and item==f.item)
+end)
+test("MP food opens only and asks the user to choose the actual result",function(f)
+    openingFixture(f);f.client=true
+    assert(f:open());assert(f.native:poll()==nil);f:finish()
+    local done,reason,item=f.native:poll()
+    assert(done and reason=="chooseOpened" and item==nil and #f.calls==1 and f.calls[1][2]==0)
+    assert(not f.native:isBusy() and #f.queue.queue==0)
+    assert(f.item.sealed) -- client perform is not an acknowledgement of server output.
+end)
+test("MP food fallback never reports a choice after target or cancellation stops opening",function()
+    for _,mode in ipairs({"target","cancel","timeout","missing"}) do
+        local f=fixture();openingFixture(f);f.client=true;assert(f:open())
+        if mode=="target" then f.target=true
+        elseif mode=="cancel" then f.native:cancel("User cancelled")
+        elseif mode=="timeout" then f.time=120001
+        else f.queue.queue={};f.queue.current=nil end
+        f.native:poll();f:finish()
+        local done,reason,item=f.native:poll()
+        assert(done==false and reason~="chooseOpened" and item==nil and #f.calls==1)
+    end
+end)
+test("opening requires current recipe and empty queue before native dispatch",function(f)
+    openingFixture(f)
+    assert(not f.native:beginOpen(f.item,"food",{},function() return false end))
+    f.target=true;assert(not f:open());f.target=false
+    f.queue:addToQueue(f:action("Foreign"));assert(not f:open() and #f.calls==0)
+end)
+test("missing or ambiguous opening output never guesses an inventory peer",function(f)
+    openingFixture(f);f.item.sealed=false
+    assert(f:open());f:finish();assert(f.native:poll()==nil)
+    f.time=2001;local done,reason=f.native:poll()
+    assert(done==false and reason:find("not confirmed") and #f.calls==1)
+    f.outputs={};f:output();f:output();assert(f:open());f:finish()
+    done,reason=f.native:poll();assert(done==false and reason:find("multiple"))
+end)
+test("MP unseal requires stable item identity and authorized source",function(f)
+    openingFixture(f);f.client=true;f.item.kind="fluid"
+    assert(f:open("fluid"));f:finish()
+    f.item.sealed=false;f.item.id=2;assert(f.native:poll()==nil)
+    f.item.id=1;f.item.container={};assert(f.native:poll()==nil)
+    f.time=2001;assert(f.native:poll()==false and #f.calls==1)
+end)
+test("opening stop preserves returned opener and foreign work",function(f)
+    openingFixture(f)
+    assert(f:open());f.queue.current:perform()
+    local craft=f.queue.current;local foreign=f:action("Foreign");f.queue:addToQueue(foreign)
+    f.native:cancel("User cancelled")
+    assert(craft.stopped and f.queue.current.Type=="ReturnOpener")
+    f.queue.current:perform()
+    local done,reason=f.native:poll()
+    assert(done==false and reason=="User cancelled" and f.queue.current==foreign)
+    assert(not foreign.cancelled and not foreign.stopped and #f.calls==1)
+end)
+test("failed opening preparation cancels owned actions without consumption",function(f)
+    openingFixture(f);f.noCraft=true
+    assert(not f:open());f:finish();local done=f.native:poll()
+    assert(done==false and not f.native:isBusy() and #f.queue.queue==0)
+end)
+test("native manual input binding rejects a substituted peer before craft admission",function()
+    for _,mode in ipairs({"other","auto"}) do
+        local f=fixture();openingFixture(f)
+        if mode=="other" then f.wrongInput={} else f.autoInputs=true end
+        local ok,reason=f:open()
+        assert(not ok and reason:find("bind") and f.queue.current.Type=="ReturnOpener")
+        assert(ISEntityUI.HandcraftStart==f.originalHandcraftStart)
+        for _,action in ipairs(f.queue.queue) do assert(action.Type~="ISHandcraftAction") end
+        f:finish();assert(f.native:poll()==false)
+    end
+end)
+test("scoped craft guard restores the original factory after native exceptions",function(f)
+    openingFixture(f)
+    ISInventoryPaneContextMenu.OnNewCraft=function() error("native dispatch failure") end
+    assert(not f:open())
+    assert(ISEntityUI.HandcraftStart==f.originalHandcraftStart)
+    assert(f.native:poll()==false)
+end)
+
+local function receiptFixture(f,kind)
+    f.hunger,f.thirst=.2,.3
+    local make=f.action
+    function f:action(name)
+        local a=make(self,name)
+        if name==(kind=="food" and "ISEatFoodAction" or "ISDrinkFluidAction") then
+            f.consume=a;a.item=f.item
+            a.complete=function()
+                f.hunger=f.hunger-.1;f.thirst=f.thirst-.05
+                return "completed",nil,7
+            end
+            a.updateEat=function(_,delta)
+                local amount=math.max(0,delta-(f.drunk or 0));f.drunk=delta
+                f.hunger=f.hunger-.04*amount;f.thirst=f.thirst-.1*amount
+                return delta,nil,"increment"
+            end
+        end
+        return a
+    end
+    function f:sample() return self.hunger,self.thirst end
+    function f:withReceipt()
+        return self.native:begin(self.item,kind,.5,function() return false end,
+            function() return self:sample() end)
+    end
+end
+test("SP food receipt observes exact native complete and preserves all return values",function(f)
+    receiptFixture(f,"food");assert(f:withReceipt())
+    f.hunger=f.hunger+.000008 -- metabolism outside authoritative callback
+    local a,b,c=f.consume:complete()
+    assert(a=="completed" and b==nil and c==7)
+    f:finish();local done,reason,opened,receipt=f.native:poll()
+    assert(done and reason=="complete" and opened==nil and receipt.item==f.item)
+    assert(math.abs(receipt.hunger-.1)<1e-12 and math.abs(receipt.thirst-.05)<1e-12)
+end)
+test("SP fluid receipt sums only native updateEat increments not intervening metabolism",function(f)
+    receiptFixture(f,"fluid");assert(f:withReceipt())
+    f.consume.complete=function(a) return a:updateEat(1) end
+    for _,delta in ipairs({.1,.4,.4,.8}) do
+        f.hunger=f.hunger+.000002;f.thirst=f.thirst+.000003
+        local a,b,c=f.consume:updateEat(delta)
+        assert(a==delta and b==nil and c=="increment")
+    end
+    f.consume:complete();f:finish()
+    local done,_,_,receipt=f.native:poll()
+    assert(done and receipt.item==f.item)
+    assert(math.abs(receipt.hunger-.04)<1e-12 and math.abs(receipt.thirst-.1)<1e-12)
+end)
+test("MP callbacks remain unwrapped and provide no local authoritative receipt",function(f)
+    receiptFixture(f,"food");f.client=true;assert(f:withReceipt())
+    f:finish();local done,_,_,receipt=f.native:poll()
+    assert(done and receipt==nil)
+    assert(f.consume:complete()=="completed")
+end)
+test("server callbacks never produce a singleplayer receipt",function(f)
+    receiptFixture(f,"food");f.server=true;assert(f:withReceipt())
+    assert(f.consume:complete()=="completed")
+    f:finish();local done,_,_,receipt=f.native:poll()
+    assert(done and receipt==nil)
+end)
+test("missing invalid or wrong-item observation cannot provide a receipt",function()
+    for _,mode in ipairs({"missing","nan","error","wrong"}) do
+        local f=fixture();receiptFixture(f,"food")
+        if mode=="missing" then
+            local make=f.action
+            function f:action(name) local a=make(self,name);a.complete=nil;return a end
+        elseif mode=="nan" then function f:sample() return 0/0,.2 end
+        elseif mode=="error" then function f:sample() error("sampler failed") end end
+        assert(f:withReceipt())
+        if mode=="wrong" then f.consume.item={} end
+        if f.consume.complete then assert(f.consume:complete()=="completed") end
+        f:finish();local done,_,_,receipt=f.native:poll();assert(done and receipt==nil)
+    end
+end)
+test("native callback errors propagate unchanged and invalidate accumulated receipt",function(f)
+    receiptFixture(f,"fluid")
+    local make=f.action
+    function f:action(name)
+        local a=make(self,name);local previous=a.updateEat
+        if previous then
+            a.updateEat=function(self,...)
+                if f.failNative then error("native failed",0) end
+                return previous(self,...)
+            end
+        end
+        return a
+    end
+    assert(f:withReceipt());f.consume:updateEat(.2);f.failNative=true
+    local ok,err=pcall(f.consume.updateEat,f.consume,.4)
+    assert(not ok and err=="native failed")
+    f.failNative=false;f.consume:updateEat(.5);f:finish()
+    local done,_,_,receipt=f.native:poll();assert(done and receipt==nil)
+end)
+
+local function depletedReturnFixture(f)
+    receiptFixture(f,"food")
+    local source,inventory={members={f.item}},{members={}}
+    source.getType=function() return "floor" end
+    for _,container in ipairs({source,inventory}) do
+        container.getItems=function(self)
+            return {size=function() return #self.members end,get=function(_,i) return self.members[i+1] end}
+        end
+    end
+    f.source,f.inventory=source,inventory
+    f.player.getInventory=function() return inventory end
+    f.item.container=source;f.item.raw=-.07
+    f.item.getHungChange=function(self) return self.raw end
+    f.item.getBaseHunger=function() return -.14 end
+    f.item.getWorldItem=function() return f.worldItem end
+    local make=f.action
+    function f:action(name)
+        local a=make(self,name)
+        if name=="ISEatFoodAction" then
+            local complete,perform=a.complete,a.perform
+            a.complete=function(self,...)
+                if f.failComplete then error("complete error",0) end
+                local first,second,third=complete(self,...)
+                if not f.keepFood then f.item.container=nil;inventory.members={};f.item.raw=0/0 end
+                if f.duringComplete then f:duringComplete() end
+                return first,second,third
+            end
+            a.perform=function(self,...)
+                if f.failPerform then error("perform error",0) end
+                return perform(self,...)
+            end
+        elseif name=="ReturnContainer" then
+            f.restore=a;a.Type="ISInventoryTransferAction";a.item=f.item
+            a.srcContainer=inventory;a.destContainer=source;a.queueList={{items={f.item}}}
+            a.isStarted=function(self) return self.started==true end
+        end
+        return a
+    end
+    function f:dispatch(kind,portion)
+        f.calls[#f.calls+1]={kind,portion}
+        f.queue:addToQueue(f:action("Transfer"))
+        f.queue:addToQueue(f:action("ISEatFoodAction"))
+        if f.mask then f.queue:addToQueue(f:action("WearMask")) end
+        f.queue:addToQueue(f:action("ReturnContainer"))
+    end
+    function f:prepare()
+        assert(self:withReceipt());self.actions[1]:perform()
+        self.item.container=inventory;source.members={};inventory.members={self.item}
+    end
+end
+
+test("native perform then complete retires exact depleted Floor return without starting it",function(f)
+    depletedReturnFixture(f);f:prepare()
+    assert(not f.native.active.receipt)
+    f.consume:perform()
+    assert(f.native.active.deferredReturn==f.restore and not f.queue.current and #f.queue.queue==0)
+    assert(not f.restore.action and not f.restore.cancelled)
+    local a,b,c=f.consume:complete()
+    assert(a=="completed" and b==nil and c==7)
+    assert(f.restore.cancelled and not f.restore.performed and not f.restore.stopped)
+    assert(not f.native.active.owned[f.restore] and not f.native.active.reason)
+    local done,_,_,receipt=f.native:poll()
+    assert(done and receipt.item==f.item and receipt.hunger>0)
+end)
+test("deferral rejects partial masks foreign MP cancellations and unsupported native shapes",function()
+    for _,mode in ipairs({"client","server","cancel","escape","interrupt","noObserver","partial",
+        "wrongItem","wrongID","wrongSource","wrongDestination","mask","tool","batch","noList",
+        "topItems","started","nativeAction","foreign","prep","reverseCallbacks"}) do
+        local f=fixture();depletedReturnFixture(f)
+        if mode=="partial" then f.item.raw=-.14 elseif mode=="mask" then f.mask=true end
+        f:prepare()
+        if mode=="client" then f.client=true
+        elseif mode=="server" then f.server=true
+        elseif mode=="cancel" then f.restore:forceCancel()
+        elseif mode=="escape" then Keyboard={KEY_ESCAPE=1};isKeyDown=function() return true end
+        elseif mode=="interrupt" then f.player.isRunning=function() return true end
+        elseif mode=="noObserver" then f.native.active.observesComplete=false
+        elseif mode=="wrongItem" then f.restore.item={}
+        elseif mode=="wrongID" then f.item.getID=function() return 999 end
+        elseif mode=="wrongSource" then f.restore.srcContainer={}
+        elseif mode=="wrongDestination" then f.restore.destContainer={}
+        elseif mode=="tool" then f.restore.queueList[1].items[1]={}
+        elseif mode=="batch" then f.restore.queueList[1].items[2]={}
+        elseif mode=="noList" then f.restore.queueList=nil
+        elseif mode=="topItems" then f.restore.items={f.item}
+        elseif mode=="started" then f.restore.started=true
+        elseif mode=="nativeAction" then f.restore.action={}
+        elseif mode=="foreign" then f.queue:addToQueue(f:action("Foreign"))
+        elseif mode=="prep" then f.native.active.reachedConsumption=false
+        elseif mode=="reverseCallbacks" then f.consume:complete() end
+        f.consume:perform()
+        assert(not f.native.active.deferredReturn and f.native.active.owned[f.restore],mode)
+        f.restore:stop();assert(f.native.active.reason,mode)
+        Keyboard=nil;isKeyDown=nil
+    end
+end)
+test("unproven completion restores original action unchanged and fails closed",function()
+    for _,mode in ipairs({"living","world","sourceID","mainID","noReceipt","escape","foreign","cancel","missingComplete"}) do
+        local f=fixture();depletedReturnFixture(f);f:prepare();f.consume:perform()
+        assert(f.native.active.deferredReturn==f.restore)
+        if mode=="living" then f.keepFood=true
+        elseif mode=="world" then f.worldItem={}
+        elseif mode=="sourceID" then f.source.members={{getID=function() return f.item:getID() end}}
+        elseif mode=="mainID" then f.duringComplete=function() f.inventory.members={{getID=function() return f.item:getID() end}} end
+        elseif mode=="noReceipt" then f.native.active.needSampler=function() return 0/0,0 end
+        elseif mode=="escape" then Keyboard={KEY_ESCAPE=1};isKeyDown=function() return true end
+        elseif mode=="foreign" then f.duringComplete=function() f.foreign=f:action("Foreign");f.queue:addToQueue(f.foreign) end
+        elseif mode=="cancel" then f.native:cancel("explicit cancel") end
+        if mode=="missingComplete" then f.native:poll() else f.consume:complete() end
+        assert(not f.native.active.deferredReturn and f.native.active.owned[f.restore],mode)
+        assert(f.native.active.reason and not f.restore.cancelled,mode)
+        assert(f.restore.item==f.item and f.restore.srcContainer==f.inventory and f.restore.destContainer==f.source,mode)
+        if f.foreign then assert(f.queue.current==f.foreign and not f.foreign.cancelled) end
+        Keyboard=nil;isKeyDown=nil
+        f:finish();assert(f.native:poll()==false,mode)
+    end
+end)
+test("perform complete and native return cleanup errors restore return without swallowing errors",function()
+    for _,mode in ipairs({"perform","complete","cleanup"}) do
+        local f=fixture();depletedReturnFixture(f);f:prepare()
+        if mode=="perform" then f.failPerform=true end
+        f.consume:perform()
+        if mode=="perform" then
+            assert(f.native.active.reason:find("perform error"));f.native:poll()
+        else
+            if mode=="complete" then f.failComplete=true
+            else f.native.active.nativeCancel[f.restore]=function() error("cleanup error",0) end end
+            local ok,problem=pcall(f.consume.complete,f.consume)
+            if mode=="complete" then assert(not ok and problem=="complete error")
+            else assert(ok and f.native.active.reason:find("cleanup error")) end
+        end
+        assert(not f.native.active.deferredReturn and f.native.active.owned[f.restore])
+        f:finish();assert(f.native:poll()==false)
+    end
 end)
 
 print("PASS "..tests.." Till Full native boundary scenarios")

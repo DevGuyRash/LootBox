@@ -6,14 +6,24 @@ CharacterStat = { HUNGER = {getMinimumValue=function() return 0 end}, THIRST = {
 function instanceof(item, name) return name == 'Food' and item.food end
 local created
 package.loaded['LootBox/TillFullNative'] = {new=function()
- local n = {busy=false, calls={}}
+ local n = {busy=false, calls={}, opens={}}
  function n:isBusy() return self.busy end
- function n:begin(item, kind, portion, target)
-  self.busy=true; self.calls[#self.calls+1]={item=item,kind=kind,portion=portion}; self.target=target
+ function n:begin(item, kind, portion, target, sampler)
+  self.busy=true; self.calls[#self.calls+1]={item=item,kind=kind,portion=portion}; self.target=target;self.sampler=sampler
   if self.refuse then return nil,'refused after preparation' end
   return true
  end
- function n:poll() if self.pending then return nil end; self.busy=false; return self.result ~= false, self.reason end
+ function n:beginOpen(item,kind,recipe,target)
+  self.busy=true;self.opening=true;self.opens[#self.opens+1]={item=item,kind=kind,recipe=recipe};self.target=target
+  if self.refuse then return nil,'opening refused after preparation' end
+  return true
+ end
+ function n:poll()
+  if self.pending then return nil end
+  self.busy=false
+  if self.opening then self.opening=false;return self.result ~= false,self.reason or 'opened',self.opened end
+  return self.result ~= false,self.reason,nil,self.receipt
+ end
  function n:cancel() self.result=false end
  created=n; return n
 end}
@@ -38,7 +48,7 @@ local function food(id,relief,base)
  function f:getThirstChange() return -self.t end
  function f:getHungChange() return -self.h end
  function f:getBaseHunger() return -self.base end
- function f:getScriptItem() return {isCantEat=function() return false end} end
+ function f:getScriptItem() return {isCantEat=function() return f.cantEat or false end} end
  for _,name in ipairs({'isRotten','isBurnt','isFrozen','isTainted','isPoison','isAlcoholic','isbDangerousUncooked'}) do f[name]=function(self) return self.unsafe or false end end
  function f:getPoisonPower() return 0 end
  function f:getFoodSicknessChange() return 0 end
@@ -297,6 +307,568 @@ test('initial full food and fluid never dispatch even from external containers',
  for _,case in ipairs({{a,'food',0,.5},{b,'fluid',.5,0}}) do
   local c=assert(Full.new(player(case[3],case[4]),world,{case[1]},case[2])); c:tick()
   assert(c.state=='finished' and #created.calls==0)
+ end
+end)
+local recipe={name='OpenCan'}
+local function can(id)
+ local f=food(id,0);f.cantEat=true;return f
+end
+test('sealed food opens exact selected can before sizing its replacement portion',function()
+ local p=player(.1,0);local a,output,outside=can(10),food(20,.4),food(21,.4)
+ local c=assert(Full.new(p,world,{a},'food',false,recipe));c:tick()
+ assert(#created.opens==1 and created.opens[1].item==a and #created.calls==0)
+ created.pending=true;c:tick();assert(#created.calls==0)
+ created.pending=false;created.opened=output;a.source=nil;c:tick()
+ assert(#created.calls==1 and created.calls[1].item==output and c.count==0)
+ close(created.calls[1].portion,.25);assert(outside.h==.4)
+end)
+test('opening a fluid preserves its exact identity and rechecks need before consuming',function()
+ local p=player(0,.3);local a,fluid=bottle(10,.5);a.sealed=true
+ function fluid:canPlayerEmpty() return not a.sealed end
+ local c=assert(Full.new(p,world,{a},'fluid',false,recipe));c:tick()
+ assert(#created.opens==1 and #created.calls==0)
+ a.sealed=false;created.opened=a;p.t=.1;c:tick()
+ assert(created.calls[1].item==a);close(created.calls[1].portion,.2)
+end)
+test('already satisfied packaged food never opens even without source relief',function()
+ local c=assert(Full.new(player(0,.5),world,{can(1)},'food',false,recipe))
+ assert(c:alreadySatisfied());c:tick();assert(c.state=='finished' and #created.opens==0 and #created.calls==0)
+end)
+test('unsafe and protected cans are not opened and unsafe output is not eaten',function()
+ for _,flag in ipairs({'unsafe','protected'}) do
+  local a=can(1);a[flag]=true;local c=assert(Full.new(player(.1,0),world,{a},'food',false,recipe));c:tick()
+  assert(c.state=='cancelled' and #created.opens==0)
+ end
+ local c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c:tick()
+ created.opened=food(2,.2);created.opened.unsafe=true;c:tick()
+ assert(c.state=='cancelled' and #created.calls==0)
+end)
+test('opening cannot guess missing output or accept one left outside main inventory',function()
+ for _,mode in ipairs({'missing','external','sealed'}) do
+  local c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c:tick()
+  if mode~='missing' then created.opened=food(2,.2)
+   if mode=='external' then created.opened.source={} else created.opened.sealed=true end
+  end
+  c:tick();assert(not c:isBusy() and #created.calls==0 and #created.opens==1,mode)
+ end
+end)
+test('cancel during opening waits cleanup and never consumes confirmed output',function()
+ local c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c:tick()
+ created.pending=true;c:cancel();c:tick();assert(c:isBusy())
+ created.pending=false;created.opened=food(2,.2);c:tick()
+ assert(c.state=='cancelled' and #created.calls==0 and #created.opens==1)
+end)
+test('target reached during opening does not consume the newly opened food',function()
+ local p=player(.1,0);local c=assert(Full.new(p,world,{can(1)},'food',false,recipe));c:tick()
+ p.h=0;created.opened=food(2,.2);c:tick()
+ assert(c.state=='finished' and #created.calls==0 and #created.opens==1)
+end)
+test('opening refusal after preparation retains cancellation cleanup',function()
+ local c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));created.refuse=true;created.pending=true
+ c:tick();assert(c.state=='cancelling' and #created.opens==1);c:tick();assert(c:isBusy())
+ created.pending=false;created.result=false;c:tick();assert(c.state=='cancelled' and #created.calls==0)
+end)
+test('selected packaged stack opens one can at a time only after exact consumption confirmation',function()
+ local p=player(.3,0);local a,b,outside=can(1),can(2),can(3)
+ local c=assert(Full.new(p,world,{a,b},'food',false,recipe));c:tick()
+ local out=food(10,.2);created.opened=out;c:tick();assert(#created.opens==1 and #created.calls==1)
+ c:tick();assert(#created.opens==1);out.source=nil;p.h=.1;c:tick()
+ assert(#created.opens==2 and created.opens[2].item==b and outside.cantEat)
+ created.opened=food(20,.2);c:tick();assert(#created.calls==2);close(created.calls[2].portion,.5)
+end)
+test('opening target and protection changes stop without consuming',function()
+ local p=player(.1,0);local a=can(1);local c=assert(Full.new(p,world,{a},'food',false,recipe));c:tick()
+ p.h=0;assert(created.target());created.result=false;c:tick();assert(c.state=='finished' and #created.calls==0)
+ a=can(2);c=assert(Full.new(player(.1,0),world,{a},'food',false,recipe));c:tick()
+ a.protected=true;assert(created.target());created.result=false;c:tick()
+ assert(c.state=='cancelled' and #created.calls==0)
+end)
+test('opening never bypasses unsafe fluid or bounded work limits',function()
+ local a,fluid=bottle(1,.5);a.sealed=true;fluid.poison=true
+ local c=assert(Full.new(player(0,.3),world,{a},'fluid',false,recipe));c:tick()
+ assert(c.state=='cancelled' and #created.opens==0)
+ c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c.attempts=256;c:tick()
+ assert(c.state=='cancelled' and #created.opens==0)
+end)
+local multiplayer=false
+function isClient() return multiplayer end
+test('multiplayer opening hands back exact choice without consuming or opening stack peers',function()
+ multiplayer=true
+ local first,second=can(1),can(2)
+ local c=assert(Full.new(player(.3,0),world,{first,first,second},'food',false,recipe));c:tick()
+ assert(#created.opens==1 and #c.records==2)
+ created.reason='chooseOpened';c:tick()
+ assert(c.state=='finished' and c.count==0 and c.records==nil and #created.calls==0 and #created.opens==1)
+ assert(c.openedFoodPrompt=='When the opened food appears, right-click it and choose Eat > Til Full.')
+ c.openedFoodPrompt=nil;c:tick();assert(c.openedFoodPrompt==nil and #created.opens==1)
+ multiplayer=false
+end)
+test('opening fallback never prompts after cancellation refusal or satisfied hunger',function()
+ multiplayer=true
+ for _,mode in ipairs({'cancel','refuse','full','dead'}) do
+  local p=player(.3,0);local c=assert(Full.new(p,world,{can(1),can(2)},'food',false,recipe));c:tick()
+  created.reason='chooseOpened'
+  if mode=='cancel' then c:cancel() elseif mode=='refuse' then created.result=false
+  elseif mode=='full' then p.h=0 else p.dead=true end
+  c:tick();assert(not c:isBusy() and c.openedFoodPrompt==nil and #created.calls==0 and #created.opens==1,mode)
+ end
+ multiplayer=false
+end)
+test('opening fallback is not accepted from single player or a fluid action',function()
+ local c=assert(Full.new(player(.3,0),world,{can(1)},'food',false,recipe));c:tick()
+ created.reason='chooseOpened';c:tick();assert(c.state=='failed' and c.openedFoodPrompt==nil)
+ multiplayer=true;local item=bottle(2,.5);item.sealed=true
+ c=assert(Full.new(player(0,.3),world,{item},'fluid',false,recipe));c:tick()
+ created.reason='chooseOpened';c:tick();assert(c.state=='failed' and c.openedFoodPrompt==nil)
+ multiplayer=false
+end)
+test('same exact opened fluid can return to its original bag but no unrelated bag',function()
+ for _,move in ipairs({'original','other','changed-id'}) do
+  local bag={};local item=bottle(1,.5);item.source=bag;item.sealed=true
+  local c=assert(Full.new(player(0,.3),world,{item},'fluid',false,recipe));c:tick()
+  item.source=inventory
+  item.sealed=false;created.opened=item
+  if move=='other' then item.source={} else item.source=bag end
+  if move=='changed-id' then item.id=99 end
+  c:tick()
+  if move=='original' then assert(#created.calls==1 and created.calls[1].item==item)
+  else assert(#created.calls==0 and c.state=='cancelled',move) end
+ end
+end)
+test('both-needs mode does not open an unknown can solely for thirst but preserves known food relief',function()
+ local c=assert(Full.new(player(0,.2),world,{can(1)},'food',true,recipe))
+ assert(c:alreadySatisfied());c:tick();assert(c.state=='finished' and #created.opens==0)
+ local known=food(2,.2);known.t=.4
+ c=assert(Full.new(player(0,.2),world,{known},'food',true,recipe));c:tick()
+ assert(#created.calls==1 and #created.opens==0);close(created.calls[1].portion,.5)
+end)
+test('direct food relief confirms exact partial amount despite hidden completion-frame metabolism',function()
+ local p=player(.07015461474657059,0);local f=food(1,.14)
+ local c=assert(Full.new(p,world,{f,food(2,.14)},'food'));c:tick()
+ local h,t=created.sampler();close(h,p.h);close(t,0)
+ created.receipt={item=f,hunger=p.h,thirst=0}
+ f.h=.06984538584947586;p.h=.0011784672969952226;c:tick()
+ assert(c.state=='finished' and c.count==1 and #created.calls==1)
+ assert(c.reason=='The requested portion satisfied the need measured before consumption')
+end)
+test('direct progressive fluid relief does not chase metabolism into more sips',function()
+ local p=player(0,.05);local f,fluid=bottle(1,.09)
+ local c=assert(Full.new(p,world,{f,(bottle(2,.09))},'fluid'));c:tick()
+ created.receipt={item=f,hunger=0,thirst=.05};fluid.ratio=.4444444477558136;p.t=.0010329603683203459;c:tick()
+ assert(c.state=='finished' and c.count==1 and #created.calls==1)
+end)
+test('receipt cannot override missing quantity packet or partial consumption',function()
+ local p=player(.1,0);local f=food(1,.2)
+ local c=assert(Full.new(p,world,{f},'food'));c:tick()
+ created.receipt={item=f,hunger=.1,thirst=0};p.h=.001;c:tick()
+ assert(c:isBusy() and #created.calls==1)
+ f.h=.15;c:tick();assert(c:isBusy())
+ f.h=.1;c:tick();assert(c.state=='finished' and #created.calls==1)
+end)
+test('weak wrong identity malformed and multiplayer receipts never confirm a requested portion',function()
+ for _,mode in ipairs({'weak','other','changed-id','nan','negative','mp'}) do
+  local p=player(.1,0);local f=food(1,.2)
+  local c=assert(Full.new(p,world,{f,food(2,.2)},'food'));c:tick()
+  created.receipt={item=f,hunger=.1,thirst=0};f.h=.1;p.h=0
+  if mode=='weak' then created.receipt.hunger=.099
+  elseif mode=='other' then created.receipt.item=food(3,.2)
+  elseif mode=='changed-id' then f.id=4
+  elseif mode=='nan' then created.receipt.hunger=0/0
+  elseif mode=='negative' then created.receipt.thirst=-.1
+  elseif mode=='mp' then multiplayer=true end
+  c:tick();assert(c:isBusy(),mode);now=now+2001;c:tick()
+  assert(c.state=='failed' and #created.calls==1,mode);multiplayer=false
+ end
+end)
+test('both targets require both directly measured relief amounts',function()
+ local p=player(.1,.1);local f=food(1,.2);f.t=.2
+ local c=assert(Full.new(p,world,{f},'food',true));c:tick()
+ created.receipt={item=f,hunger=.1,thirst=.01};f.h=.1;p.h=0;p.t=0;c:tick()
+ assert(c:isBusy());now=now+2001;c:tick();assert(c.state=='failed')
+end)
+test('full item receipt still permits bounded selected-peer continuation',function()
+ local p=player(.3,0);local a,b=food(1,.2),food(2,.2)
+ local c=assert(Full.new(p,world,{a,b},'food'));c:tick()
+ created.receipt={item=a,hunger=.2,thirst=0};a.source=nil;p.h=.101;c:tick()
+ assert(#created.calls==2 and created.calls[2].item==b);close(created.calls[2].portion,.505)
+end)
+local sourceWorld={protected=world.protected}
+function sourceWorld:consumptionSource(item,source)
+ if source.foreign then return nil,'Other player source' end
+ if source.denied then return nil,'Access denied' end
+ if source.far then return nil,'Out of reach' end
+ if item:getContainer()==source then return true end
+ if source.floor and not item:getContainer() then return nil,'Open the nearby Floor pane and try again' end
+ return nil,'Exact source membership changed'
+end
+local function groundItem(id,source)
+ local item=food(id,.2);item.source=nil;item.ground=source;source.members[item]=true
+ function item:getWorldItem() return self.ground end
+ return item
+end
+test('explicit menu source rejects stale and mixed selections before native dispatch',function()
+ local crate={};local a,b=food(1,.2),food(2,.2);a.source=crate
+ assert(Full.new(player(.1,0),sourceWorld,{a,b},'food',false,nil,crate)==nil)
+ local c=assert(Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,crate))
+ a.source=inventory;c:tick();assert(c.state=='cancelled' and #created.calls==0)
+ assert(Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,crate)==nil)
+end)
+test('exact selected crate food transfers to main while outside decoy remains untouched',function()
+ local crate={};local a,outside=food(1,.2),food(2,.2);a.source=crate;outside.source=crate
+ local c=assert(Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,crate));c:tick()
+ assert(#created.calls==1 and created.calls[1].item==a);close(created.calls[1].portion,.5)
+ a.source=inventory;crate.far=true;assert(not created.target())
+ assert(outside.source==crate and outside.h==.2)
+end)
+test('source access and reach are checked again while native preparation is pending',function()
+ for _,flag in ipairs({'far','denied','foreign'}) do
+  local source={};local a=food(1,.2);a.source=source
+  local c=assert(Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,source));source[flag]=true
+  c:tick();assert(c.state=='cancelled' and #created.calls==0,flag)
+  source[flag]=false;c=assert(Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,source));c:tick()
+  source[flag]=true;assert(created.target());c:tick();assert(c.state=='cancelled',flag)
+ end
+end)
+test('packaged external food and fluid retain exact source checks during opening',function()
+ for _,kind in ipairs({'food','fluid'}) do
+  local source={};local a=kind=='food' and can(1) or bottle(1,.5);a.source=source
+  if kind=='fluid' then a.sealed=true end
+  local c=assert(Full.new(player(.1,.1),sourceWorld,{a},kind,false,recipe,source));c:tick()
+  assert(#created.opens==1 and created.opens[1].item==a)
+  source.far=true;assert(created.target());c:tick();assert(c.state=='cancelled' and #created.calls==0)
+ end
+end)
+test('floor consumption requires native synthetic container association',function()
+ local floor={floor=true,members={}};local a=groundItem(1,floor)
+ local c,reason=Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,floor)
+ assert(c==nil and reason=='Open the nearby Floor pane and try again')
+ a.source=floor
+ c=assert(Full.new(player(.1,0),sourceWorld,{a},'food',false,nil,floor));c:tick()
+ assert(#created.calls==1 and created.calls[1].item==a);close(created.calls[1].portion,.5)
+ a.source=inventory;a.ground=nil;assert(not created.target())
+ local b=groundItem(2,floor);b.source=floor
+ c=assert(Full.new(player(.1,0),sourceWorld,{b},'food',false,nil,floor));b.source=nil;c:tick()
+ assert(c.state=='cancelled' and #created.calls==0)
+end)
+test('original own bag permits native restoration but not stale main or another bag',function()
+ local bag={};local a=bottle(1,.5);a.sealed=true;a.source=bag
+ local c=assert(Full.new(player(0,.1),sourceWorld,{a},'fluid',false,recipe,bag));c:tick()
+ a.source=inventory;assert(not created.target());a.sealed=false;created.opened=a;a.source=bag;c:tick()
+ assert(#created.calls==1 and created.calls[1].item==a)
+ a.source={};assert(created.target());c:tick();assert(c.state=='cancelled')
+end)
+local function endpoint(container)
+ container.members={}
+ function container:getItemWithID(id) return self.members[id] end
+ function container:containsID(id) return self.members[id]~=nil end
+ return container
+end
+function sourceWorld:canAccess(source) return not source.denied and not source.far and not source.foreign end
+local function mpTransferFixture(amount)
+ multiplayer=true;endpoint(inventory)
+ local crate=endpoint({});local item=food(71,.2);item.source=crate;crate.members[71]=item
+ local p=player(amount,0);local c=assert(Full.new(p,sourceWorld,{item},'food',false,nil,crate));c:tick()
+ return c,p,item,crate
+end
+local function endMP()
+ multiplayer=false;inventory.members=nil;inventory.getItemWithID=nil;inventory.containsID=nil
+end
+test('MP partial transfer resolves exact immutable ID in main before confirming quantity',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ local actual=food(71,.2);crate.members[71]=nil;inventory.members[71]=actual;old.source=nil
+ p.h=0;c:tick();assert(c:isBusy() and #created.calls==1 and c.records[1].item==actual)
+ actual.h=.1;c:tick();assert(c.state=='finished' and #created.calls==1)
+ endMP()
+end)
+test('MP detached original is never interpreted as an acknowledged partial portion',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ crate.members[71]=nil;old.source=nil;p.h=0;c:tick()
+ assert(c:isBusy());now=now+2001;c:tick();assert(c.state=='failed' and #created.calls==1)
+ endMP()
+end)
+test('MP conflicting source-main identities and mismatched types fail closed',function()
+ for _,mode in ipairs({'duplicate','type','container'}) do
+  local c,p,old,crate=mpTransferFixture(.1);local actual=food(71,.1);inventory.members[71]=actual
+  if mode~='duplicate' then crate.members[71]=nil;old.source=nil end
+  if mode=='type' then function actual:getFullType() return 'Base.OtherFood' end end
+  if mode=='container' then actual.source={} end
+  p.h=0;c:tick();assert(c.state=='failed' and #created.calls==1,mode)
+  endMP()
+ end
+end)
+test('MP source-main alias to identical object is safe and does not select a peer',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ old.source=inventory;inventory.members[71]=old;old.h=.1;p.h=0;c:tick()
+ assert(c.state=='finished' and #created.calls==1)
+ endMP()
+end)
+test('MP full depletion requires observed main identity, native completion and accessible endpoint absence',function()
+ for _,mode in ipairs({'seen','unseen','inaccessible','native-failed'}) do
+  local c,p,old,crate=mpTransferFixture(.3);local actual=food(71,.2)
+  if mode~='unseen' then
+   crate.members[71]=nil;inventory.members[71]=actual;old.source=nil
+   assert(not created.target())
+  end
+  crate.members[71]=nil;inventory.members[71]=nil;old.source=nil;actual.source=nil;p.h=.1
+  if mode=='inaccessible' then crate.denied=true end
+  if mode=='native-failed' then created.result=false end
+  c:tick()
+  if mode=='seen' then assert(c.state=='finished' and c.count==1)
+  elseif mode=='native-failed' then assert(c.state=='cancelled' and c.count==0)
+  else assert(c:isBusy());now=now+2001;c:tick();assert(c.state=='failed' and c.count==0,mode) end
+  assert(#created.calls==1);endMP()
+ end
+end)
+test('MP transferred fluid identity preserves requested remaining-ratio confirmation',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({})
+ local old=bottle(73,.2);old.source=crate;crate.members[73]=old
+ local p=player(0,.1);local c=assert(Full.new(p,sourceWorld,{old},'fluid',false,nil,crate));c:tick()
+ local actual,fluid=bottle(73,.2);old.source=nil;crate.members[73]=nil;inventory.members[73]=actual
+ p.t=0;c:tick();assert(c:isBusy() and c.records[1].item==actual)
+ fluid.ratio=.5;c:tick();assert(c.state=='finished' and #created.calls==1)
+ endMP()
+end)
+test('MP restored partial same-ID item is confirmed at original source not replaced by type',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ local carried=food(71,.2);crate.members[71]=nil;inventory.members[71]=carried;old.source=nil
+ assert(not created.target())
+ local restored=food(71,.1);restored.source=crate;carried.source=nil;inventory.members[71]=nil;crate.members[71]=restored
+ p.h=0;c:tick();assert(c.state=='finished' and #created.calls==1)
+ endMP()
+end)
+test('MP unsealed fluid authoritative clone retains original source for native restoration',function()
+ multiplayer=true;endpoint(inventory);local bag=endpoint({})
+ local old=bottle(75,.2);old.source=bag;old.sealed=true;bag.members[75]=old
+ local p=player(0,.1);local c=assert(Full.new(p,sourceWorld,{old},'fluid',false,recipe,bag));c:tick()
+ local opened,fluid=bottle(75,.2);opened.source=bag;bag.members[75]=opened;old.source=nil;created.opened=opened
+ c:tick();assert(#created.calls==1 and created.calls[1].item==opened and c.records[1].source==bag)
+ endMP()
+end)
+test('MP duplicate ID objects in one direct endpoint are not silently chosen',function()
+ local c,p,old,crate=mpTransferFixture(.1);crate.members[71]=nil;old.source=nil
+ local a,b=food(71,.1),food(71,.1)
+ function inventory:getItems() return {size=function() return 2 end,get=function(_,i) return i==0 and a or b end} end
+ inventory.members[71]=a;p.h=0;c:tick()
+ assert(c.state=='failed' and #created.calls==1)
+ inventory.getItems=nil;endMP()
+end)
+test('MP opening may follow the same closed input ID transfer but never an edible replacement ID',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({});local old=can(77);old.source=crate;crate.members[77]=old
+ local c=assert(Full.new(player(.1,0),sourceWorld,{old},'food',false,recipe,crate));c:tick()
+ local transferred=can(77);inventory.members[77]=transferred;crate.members[77]=nil;old.source=nil
+ assert(not created.target() and c.records[1].item==transferred)
+ local opened=food(78,.2);inventory.members[77]=nil;inventory.members[78]=opened;transferred.source=nil
+ created.reason='chooseOpened';c:tick()
+ assert(c.state=='finished' and c.openedFoodPrompt and #created.calls==0 and #created.opens==1)
+ endMP()
+end)
+test('MP coherent action uses cheap lookups and audits each endpoint only once at confirmation',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ local scans=0
+ function crate:getItems()
+  scans=scans+1
+  return {size=function() return 1 end,get=function() return old end}
+ end
+ function inventory:getItems()
+  scans=scans+1
+  return {size=function() return 0 end}
+ end
+ for i=1,100 do assert(not created.target()) end
+ assert(scans==0)
+ c:tick();assert(scans==2 and c:isBusy())
+ for i=1,100 do c:tick() end
+ assert(scans==2)
+ inventory.getItems=nil;endMP()
+end)
+test('MP own-main final audit never walks the same endpoint twice',function()
+ multiplayer=true;endpoint(inventory)
+ local old=food(79,.2);inventory.members[79]=old
+ local c=assert(Full.new(player(.1,0),sourceWorld,{old},'food',false,nil,inventory));c:tick()
+ local scans=0
+ function inventory:getItems()
+  scans=scans+1
+  return {size=function() return 1 end,get=function() return old end}
+ end
+ c:tick();assert(scans==1)
+ inventory.getItems=nil;endMP()
+end)
+test('MP inspect reads rebound nutrition and protections instead of the detached reference',function()
+ for _,mode in ipairs({'nutrition','protected','unsafe'}) do
+  local c,p,old,crate=mpTransferFixture(.1)
+  local actual=food(71,.4);old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+  if mode~='nutrition' then actual[mode]=true end
+  local effects=c:inspect(c.records[1])
+  if mode=='nutrition' then assert(effects and effects.hunger==.4)
+  else assert(not effects,mode) end
+  assert(c.records[1].item==actual);endMP()
+ end
+end)
+test('MP live consume predicate rejects rebound protected or unsafe food',function()
+ for _,mode in ipairs({'protected','unsafe'}) do
+  local c,p,old,crate=mpTransferFixture(.1)
+  local actual=food(71,.2);actual[mode]=true;old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+  assert(created.target(),mode);assert(c.records[1].item==actual)
+  endMP()
+ end
+end)
+test('MP live drink predicate checks rebound contamination instead of the old clean vessel',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({})
+ local old=bottle(81,.2);old.source=crate;crate.members[81]=old
+ local c=assert(Full.new(player(0,.1),sourceWorld,{old},'fluid',false,nil,crate));c:tick()
+ local actual,fluid=bottle(81,.2);fluid.poison=true
+ old.source=nil;crate.members[81]=nil;inventory.members[81]=actual
+ assert(created.target() and c.records[1].item==actual)
+ endMP()
+end)
+test('exact floor wrapper supplies fluid before pickup and after native wrapper replacement',function()
+ local floor={getType=function() return 'floor' end}
+ local item,fluid=bottle(83,.2);item.source=floor
+ function item:getFluidContainer() if self.source==inventory then return fluid end end
+ function item:getWorldItem() return self.ground end
+ local function wrapper(target)
+  return {getItem=function() return target end,getFluidContainer=function() return fluid end}
+ end
+ item.ground=wrapper(item)
+ local p=player(0,.1);local c=assert(Full.new(p,sourceWorld,{item},'fluid',false,nil,floor));c:tick()
+ assert(#created.calls==1);close(created.calls[1].portion,.5)
+ item.source=inventory;assert(not created.target())
+ fluid.ratio=.5;p.t=0;item.source=floor;item.ground=wrapper(item)
+ c:tick();assert(c.state=='finished' and #created.calls==1)
+end)
+test('floor fluid rejects mismatched wrapper and lost reach before dispatch',function()
+ for _,mode in ipairs({'decoy','range'}) do
+  local floor={getType=function() return 'floor' end}
+  local item,fluid=bottle(84,.2);item.source=floor
+  function item:getFluidContainer() return nil end
+  function item:getWorldItem() return self.ground end
+  item.ground={getItem=function() return mode=='decoy' and {} or item end,getFluidContainer=function() return fluid end}
+  local c=assert(Full.new(player(0,.1),sourceWorld,{item},'fluid',false,nil,floor))
+  if mode=='range' then floor.far=true end
+  c:tick();assert(c.state=='cancelled' and #created.calls==0,mode)
+ end
+end)
+test('MP terminal partial waits full grace and never queues a metabolism bite',function()
+ local c,p,old,crate=mpTransferFixture(.07)
+ local actual=food(71,.13);old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+ p.h=.0015;c:tick();assert(c:isBusy() and #created.calls==1)
+ now=now+1999;c:tick();assert(c:isBusy())
+ now=now+2;c:tick();assert(c.state=='finished' and c.reason=='Requested portion consumed; no more items were queued' and #created.calls==1)
+ endMP()
+end)
+test('MP terminal fallback rejects weak stats, incomplete quantity, excess consumption and missing identity',function()
+ for _,mode in ipairs({'weak','partial','excess','missing'}) do
+  local c,p,old,crate=mpTransferFixture(.1)
+  local actual=food(71,mode=='partial' and .15 or mode=='excess' and .05 or .1)
+  old.source=nil;crate.members[71]=nil
+  if mode~='missing' then inventory.members[71]=actual end
+  p.h=mode=='weak' and .05 or .0015
+  c:tick();assert(c:isBusy());now=now+2001;c:tick()
+  assert(c.state=='failed' and #created.calls==1,mode);endMP()
+ end
+end)
+test('MP drink terminal uses exact ratio and substantive thirst after the grace',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({})
+ local old=bottle(85,.2);old.source=crate;crate.members[85]=old
+ local p=player(0,.1);local c=assert(Full.new(p,sourceWorld,{old},'fluid',false,nil,crate));c:tick()
+ local actual,fluid=bottle(85,.2);fluid.ratio=.5;inventory.members[85]=actual;crate.members[85]=nil;old.source=nil
+ p.t=.0013;c:tick();assert(c:isBusy());now=now+2001;c:tick()
+ assert(c.state=='finished' and #created.calls==1);endMP()
+end)
+test('MP terminal uses whole-percent residual precision not a relative relief tolerance',function()
+ for _,case in ipairs({{.1,.0049,true},{.1,.0051,false},{.1,.099,false},{.004,.0039,false}}) do
+  local c,p,old,crate=mpTransferFixture(case[1])
+  local actual=food(71,.2-case[1]);old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+  p.h=case[2];c:tick();assert(c:isBusy());now=now+2001;c:tick()
+  assert(c.state==(case[3] and 'finished' or 'failed') and #created.calls==1)
+  endMP()
+ end
+end)
+test('MP strict partial acknowledgement ends without chasing observed metabolism',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ p.h=.102;c:tick();assert(c:isBusy())
+ local actual=food(71,.1);old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+ p.h=.002;c:tick()
+ assert(c.state=='finished' and #created.calls==1 and c.reason=='Requested portion consumed; no more items were queued')
+ endMP()
+end)
+test('native floor restoration without pane association is unknown not depleted',function()
+ local floor={getType=function() return 'floor' end}
+ local item=food(89,.2);item.source=floor
+ function item:getWorldItem() return self.ground end
+ local p=player(.1,0);local c=assert(Full.new(p,sourceWorld,{item},'food',false,nil,floor));c:tick()
+ item.h=.1;p.h=0;item.source=nil;item.ground={}
+ c:tick();assert(c:isBusy() and #created.calls==1 and c:remaining(item,'food')==nil)
+ item.source=floor;c:tick();assert(c.state=='finished' and #created.calls==1)
+end)
+test('MP full-item display acknowledgement waits grace then caps the next selected portion',function()
+ for _,residual in ipairs({.05108881369,.0549}) do
+  multiplayer=true;endpoint(inventory);local crate=endpoint({})
+  local a,b=food(91,.01999999955),food(92,.2);a.source=crate;b.source=crate;crate.members[91]=a;crate.members[92]=b
+  local p=player(.07008568197,0);local c=assert(Full.new(p,sourceWorld,{a,b},'food',false,nil,crate));c:tick()
+  crate.members[91]=nil;inventory.members[91]=a;a.source=inventory;assert(not created.target())
+  inventory.members[91]=nil;a.source=nil;p.h=residual
+  c:tick();assert(#created.calls==1);now=now+2001;c:tick()
+  assert(#created.calls==2 and created.calls[2].item==b)
+  close(created.calls[2].portion,.05008568242/.2)
+  endMP()
+ end
+end)
+test('MP full-item fallback rejects unacknowledged missing zero-benefit and intermediate packets',function()
+ for _,mode in ipairs({'zero','missing','intermediate','subpoint'}) do
+  multiplayer=true;endpoint(inventory);local crate=endpoint({})
+  local relief=mode=='subpoint' and .004 or .02
+  local a,b=food(93,relief),food(94,.2);a.source=crate;b.source=crate;crate.members[93]=a;crate.members[94]=b
+  local p=player(.07,0);local c=assert(Full.new(p,sourceWorld,{a,b},'food',false,nil,crate));c:tick()
+  if mode~='missing' then crate.members[93]=nil;inventory.members[93]=a;a.source=inventory;assert(not created.target()) end
+  crate.members[93]=nil;inventory.members[93]=nil;a.source=nil
+  p.h=mode=='zero' and .07 or mode=='intermediate' and .06 or mode=='subpoint' and .067 or .051
+  c:tick();now=now+2001;c:tick();assert(c.state=='failed' and #created.calls==1,mode)
+  endMP()
+ end
+end)
+test('MP planned partial cannot redispatch on float residual or overconsumed quantity',function()
+ for _,mode in ipairs({'rounding','overshoot'}) do
+  -- With these real floating operands, (need / relief) * relief is just
+  -- below need despite the partial portion being sufficient by construction.
+  local c,p,old,crate=mpTransferFixture(.0503)
+  assert(c.inflight.partial and c.inflight.expectedHunger > 0 and c.inflight.expectedHunger < 1e-10)
+  local actual=food(71,c.inflight.expectedRemaining-(mode=='overshoot' and .01 or 0))
+  old.source=nil;crate.members[71]=nil;inventory.members[71]=actual;p.h=.0001
+  c:tick();assert(c:isBusy());now=now+2001;c:tick()
+  assert(c.state==(mode=='overshoot' and 'failed' or 'finished'))
+  assert(#created.calls==1);endMP()
+ end
+end)
+test('MP full-item corroboration measures residual difference across display bucket boundaries',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({})
+ local a,b=food(95,.02),food(96,.2);a.source=crate;b.source=crate;crate.members[95]=a;crate.members[96]=b
+ local p=player(.0749,0);local c=assert(Full.new(p,sourceWorld,{a,b},'food',false,nil,crate));c:tick()
+ crate.members[95]=nil;inventory.members[95]=a;a.source=inventory;assert(not created.target())
+ inventory.members[95]=nil;a.source=nil;p.h=.0551
+ c:tick();assert(#created.calls==1);now=now+2001;c:tick()
+ assert(#created.calls==2);close(created.calls[2].portion,.0549/.2)
+ endMP()
+end)
+test('MP small drink overshoot is terminal observation only and never another sip',function()
+ for _,mode in ipairs({'actual','below','threshold','missing','unchanged','wrong','large','under','unsafe','empty'}) do
+  multiplayer=true;endpoint(inventory);local crate=endpoint({})
+  local old=bottle(97,.09);old.source=crate;crate.members[97]=old
+  local p=player(0,.05003837298);local c=assert(Full.new(p,sourceWorld,{old},'fluid',false,nil,crate));c:tick()
+  local expected=c.inflight.expectedRemaining
+  local actual,fluid=bottle(mode=='wrong' and 98 or 97,.09)
+  fluid.ratio=mode=='actual' and .4413819015 or mode=='below' and expected-.0049
+   or mode=='threshold' and expected-.0051 or mode=='large' and expected-.02
+   or mode=='under' and expected+.002 or mode=='empty' and 0 or expected-.002
+  fluid.empty=mode=='empty';fluid.poison=mode=='unsafe'
+  old.source=nil;crate.members[97]=nil
+  if mode~='missing' then inventory.members[97]=actual end
+  p.t=mode=='unchanged' and .05003837298 or .00078594
+  c:tick();assert(#created.calls==1)
+  if mode~='wrong' then assert(c:isBusy());now=now+2001;c:tick() end
+  if mode=='actual' or mode=='below' then
+   assert(c.state=='finished' and c.count==0 and c.reason=='The selected drink has slightly less left than planned; no second sip was queued.',mode)
+  else assert(c.state=='failed',mode) end
+  assert(#created.calls==1);endMP()
  end
 end)
 print('Til Full controller: '..count..' scenarios passed')
