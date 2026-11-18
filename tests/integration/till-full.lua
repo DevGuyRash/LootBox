@@ -849,5 +849,27 @@ test('MP full-item corroboration measures residual difference across display buc
  assert(#created.calls==2);close(created.calls[2].portion,.0549/.2)
  endMP()
 end)
+test('MP small drink overshoot is terminal observation only and never another sip',function()
+ for _,mode in ipairs({'actual','below','threshold','missing','unchanged','wrong','large','under','unsafe','empty'}) do
+  multiplayer=true;endpoint(inventory);local crate=endpoint({})
+  local old=bottle(97,.09);old.source=crate;crate.members[97]=old
+  local p=player(0,.05003837298);local c=assert(Full.new(p,sourceWorld,{old},'fluid',false,nil,crate));c:tick()
+  local expected=c.inflight.expectedRemaining
+  local actual,fluid=bottle(mode=='wrong' and 98 or 97,.09)
+  fluid.ratio=mode=='actual' and .4413819015 or mode=='below' and expected-.0049
+   or mode=='threshold' and expected-.0051 or mode=='large' and expected-.02
+   or mode=='under' and expected+.002 or mode=='empty' and 0 or expected-.002
+  fluid.empty=mode=='empty';fluid.poison=mode=='unsafe'
+  old.source=nil;crate.members[97]=nil
+  if mode~='missing' then inventory.members[97]=actual end
+  p.t=mode=='unchanged' and .05003837298 or .00078594
+  c:tick();assert(#created.calls==1)
+  if mode~='wrong' then assert(c:isBusy());now=now+2001;c:tick() end
+  if mode=='actual' or mode=='below' then
+   assert(c.state=='finished' and c.count==0 and c.reason=='The selected drink has slightly less left than planned; no second sip was queued.',mode)
+  else assert(c.state=='failed',mode) end
+  assert(#created.calls==1);endMP()
+ end
+end)
 print('Til Full controller: '..count..' scenarios passed')
 

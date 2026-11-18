@@ -386,6 +386,19 @@ function TillFull:step()
                 self.count = self.count + 1
                 self:finish("finished", "Requested portion consumed; no more items were queued"); return
             end
+            -- Multiplayer fluid updates can consume slightly more than the
+            -- planned ratio. This observation only stops the job; it never
+            -- acknowledges an exact amount or permits another native action.
+            if isClient and isClient() and self.kind == "fluid" and not receipt and before.partial
+                and not record.identityUnresolved and finite(quantity) and quantity > 0
+                and quantity < before.expectedRemaining and self:inspect(record) then
+                if math.floor((before.expectedRemaining - quantity) * 100 + 0.5) == 0 and substantial then
+                    self:finish("finished", "The selected drink has slightly less left than planned; no second sip was queued.")
+                    return
+                end
+                self:finish("failed", "The selected drink has a different volume than planned; no second sip was queued.")
+                return
+            end
             self:finish("failed", "Consumption was not fully confirmed; no more items were queued"); return
         end
         self.count = self.count + 1
