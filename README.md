@@ -8,7 +8,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 Subscribe to [LootBox on Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3838652822), or install the local package. The Workshop ID is `3838652822`, and the mod ID is `LootBox`.
 
-Extract the built `LootBox-0.9.8.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.9.9.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -16,7 +16,7 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.9.8.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop listing metadata and the preview are kept in `workshop/`; release uploads use the shared SteamWorkshopPublisher.
+The archive is `dist/LootBox-0.9.9.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop listing metadata and the preview are kept in `workshop/`; release uploads use the shared SteamWorkshopPublisher.
 
 ## Start with a workflow
 
@@ -133,5 +133,7 @@ Hover the item list in your inventory or the loot window, then use **Home** or
 **End** to reach its top or bottom. **Page Up** and **Page Down** move one viewport
 with a row of overlap so partially visible rows are not skipped. These shortcuts
 only scroll the hovered list; they do not select, transfer, or consume items.
+Home and End leave the item popup closed until you move the mouse again.
+You can also click the row under the pointer without moving it first.
 Change or unbind all four under **Options > Key bindings > LootBox**. Text entry,
 context menus, modal dialogs, and item dragging leave the shortcuts inactive.
