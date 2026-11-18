@@ -10,7 +10,7 @@ local function fixture()
     isClient = function() return f.client == true end
     isServer = function() return f.server == true end
     f.player = {getPlayerNum = function() return 2 end}
-    f.item = {container = {}, isSealed = function() return false end, getOpeningRecipe = function() return nil end,
+    f.item = {container = {}, getID = function() return 481 end, isSealed = function() return false end, getOpeningRecipe = function() return nil end,
         getContainer = function(self) return self.container end}
     local q = {queue = {}}
     function q:removeFromQueue(a) for i,v in ipairs(self.queue) do if v == a then table.remove(self.queue,i); return end end end
@@ -614,6 +614,142 @@ test("native callback errors propagate unchanged and invalidate accumulated rece
     assert(not ok and err=="native failed")
     f.failNative=false;f.consume:updateEat(.5);f:finish()
     local done,_,_,receipt=f.native:poll();assert(done and receipt==nil)
+end)
+
+local function depletedReturnFixture(f)
+    receiptFixture(f,"food")
+    local source,inventory={members={f.item}},{members={}}
+    source.getType=function() return "floor" end
+    for _,container in ipairs({source,inventory}) do
+        container.getItems=function(self)
+            return {size=function() return #self.members end,get=function(_,i) return self.members[i+1] end}
+        end
+    end
+    f.source,f.inventory=source,inventory
+    f.player.getInventory=function() return inventory end
+    f.item.container=source;f.item.raw=-.07
+    f.item.getHungChange=function(self) return self.raw end
+    f.item.getBaseHunger=function() return -.14 end
+    f.item.getWorldItem=function() return f.worldItem end
+    local make=f.action
+    function f:action(name)
+        local a=make(self,name)
+        if name=="ISEatFoodAction" then
+            local complete,perform=a.complete,a.perform
+            a.complete=function(self,...)
+                if f.failComplete then error("complete error",0) end
+                local first,second,third=complete(self,...)
+                if not f.keepFood then f.item.container=nil;inventory.members={};f.item.raw=0/0 end
+                if f.duringComplete then f:duringComplete() end
+                return first,second,third
+            end
+            a.perform=function(self,...)
+                if f.failPerform then error("perform error",0) end
+                return perform(self,...)
+            end
+        elseif name=="ReturnContainer" then
+            f.restore=a;a.Type="ISInventoryTransferAction";a.item=f.item
+            a.srcContainer=inventory;a.destContainer=source;a.queueList={{items={f.item}}}
+            a.isStarted=function(self) return self.started==true end
+        end
+        return a
+    end
+    function f:dispatch(kind,portion)
+        f.calls[#f.calls+1]={kind,portion}
+        f.queue:addToQueue(f:action("Transfer"))
+        f.queue:addToQueue(f:action("ISEatFoodAction"))
+        if f.mask then f.queue:addToQueue(f:action("WearMask")) end
+        f.queue:addToQueue(f:action("ReturnContainer"))
+    end
+    function f:prepare()
+        assert(self:withReceipt());self.actions[1]:perform()
+        self.item.container=inventory;source.members={};inventory.members={self.item}
+    end
+end
+
+test("native perform then complete retires exact depleted Floor return without starting it",function(f)
+    depletedReturnFixture(f);f:prepare()
+    assert(not f.native.active.receipt)
+    f.consume:perform()
+    assert(f.native.active.deferredReturn==f.restore and not f.queue.current and #f.queue.queue==0)
+    assert(not f.restore.action and not f.restore.cancelled)
+    local a,b,c=f.consume:complete()
+    assert(a=="completed" and b==nil and c==7)
+    assert(f.restore.cancelled and not f.restore.performed and not f.restore.stopped)
+    assert(not f.native.active.owned[f.restore] and not f.native.active.reason)
+    local done,_,_,receipt=f.native:poll()
+    assert(done and receipt.item==f.item and receipt.hunger>0)
+end)
+test("deferral rejects partial masks foreign MP cancellations and unsupported native shapes",function()
+    for _,mode in ipairs({"client","server","cancel","escape","interrupt","noObserver","partial",
+        "wrongItem","wrongID","wrongSource","wrongDestination","mask","tool","batch","noList",
+        "topItems","started","nativeAction","foreign","prep","reverseCallbacks"}) do
+        local f=fixture();depletedReturnFixture(f)
+        if mode=="partial" then f.item.raw=-.14 elseif mode=="mask" then f.mask=true end
+        f:prepare()
+        if mode=="client" then f.client=true
+        elseif mode=="server" then f.server=true
+        elseif mode=="cancel" then f.restore:forceCancel()
+        elseif mode=="escape" then Keyboard={KEY_ESCAPE=1};isKeyDown=function() return true end
+        elseif mode=="interrupt" then f.player.isRunning=function() return true end
+        elseif mode=="noObserver" then f.native.active.observesComplete=false
+        elseif mode=="wrongItem" then f.restore.item={}
+        elseif mode=="wrongID" then f.item.getID=function() return 999 end
+        elseif mode=="wrongSource" then f.restore.srcContainer={}
+        elseif mode=="wrongDestination" then f.restore.destContainer={}
+        elseif mode=="tool" then f.restore.queueList[1].items[1]={}
+        elseif mode=="batch" then f.restore.queueList[1].items[2]={}
+        elseif mode=="noList" then f.restore.queueList=nil
+        elseif mode=="topItems" then f.restore.items={f.item}
+        elseif mode=="started" then f.restore.started=true
+        elseif mode=="nativeAction" then f.restore.action={}
+        elseif mode=="foreign" then f.queue:addToQueue(f:action("Foreign"))
+        elseif mode=="prep" then f.native.active.reachedConsumption=false
+        elseif mode=="reverseCallbacks" then f.consume:complete() end
+        f.consume:perform()
+        assert(not f.native.active.deferredReturn and f.native.active.owned[f.restore],mode)
+        f.restore:stop();assert(f.native.active.reason,mode)
+        Keyboard=nil;isKeyDown=nil
+    end
+end)
+test("unproven completion restores original action unchanged and fails closed",function()
+    for _,mode in ipairs({"living","world","sourceID","mainID","noReceipt","escape","foreign","cancel","missingComplete"}) do
+        local f=fixture();depletedReturnFixture(f);f:prepare();f.consume:perform()
+        assert(f.native.active.deferredReturn==f.restore)
+        if mode=="living" then f.keepFood=true
+        elseif mode=="world" then f.worldItem={}
+        elseif mode=="sourceID" then f.source.members={{getID=function() return f.item:getID() end}}
+        elseif mode=="mainID" then f.duringComplete=function() f.inventory.members={{getID=function() return f.item:getID() end}} end
+        elseif mode=="noReceipt" then f.native.active.needSampler=function() return 0/0,0 end
+        elseif mode=="escape" then Keyboard={KEY_ESCAPE=1};isKeyDown=function() return true end
+        elseif mode=="foreign" then f.duringComplete=function() f.foreign=f:action("Foreign");f.queue:addToQueue(f.foreign) end
+        elseif mode=="cancel" then f.native:cancel("explicit cancel") end
+        if mode=="missingComplete" then f.native:poll() else f.consume:complete() end
+        assert(not f.native.active.deferredReturn and f.native.active.owned[f.restore],mode)
+        assert(f.native.active.reason and not f.restore.cancelled,mode)
+        assert(f.restore.item==f.item and f.restore.srcContainer==f.inventory and f.restore.destContainer==f.source,mode)
+        if f.foreign then assert(f.queue.current==f.foreign and not f.foreign.cancelled) end
+        Keyboard=nil;isKeyDown=nil
+        f:finish();assert(f.native:poll()==false,mode)
+    end
+end)
+test("perform complete and native return cleanup errors restore return without swallowing errors",function()
+    for _,mode in ipairs({"perform","complete","cleanup"}) do
+        local f=fixture();depletedReturnFixture(f);f:prepare()
+        if mode=="perform" then f.failPerform=true end
+        f.consume:perform()
+        if mode=="perform" then
+            assert(f.native.active.reason:find("perform error"));f.native:poll()
+        else
+            if mode=="complete" then f.failComplete=true
+            else f.native.active.nativeCancel[f.restore]=function() error("cleanup error",0) end end
+            local ok,problem=pcall(f.consume.complete,f.consume)
+            if mode=="complete" then assert(not ok and problem=="complete error")
+            else assert(ok and f.native.active.reason:find("cleanup error")) end
+        end
+        assert(not f.native.active.deferredReturn and f.native.active.owned[f.restore])
+        f:finish();assert(f.native:poll()==false)
+    end
 end)
 
 print("PASS "..tests.." Till Full native boundary scenarios")
