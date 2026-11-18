@@ -720,5 +720,85 @@ test('MP live drink predicate checks rebound contamination instead of the old cl
  assert(created.target() and c.records[1].item==actual)
  endMP()
 end)
+test('exact floor wrapper supplies fluid before pickup and after native wrapper replacement',function()
+ local floor={getType=function() return 'floor' end}
+ local item,fluid=bottle(83,.2);item.source=floor
+ function item:getFluidContainer() if self.source==inventory then return fluid end end
+ function item:getWorldItem() return self.ground end
+ local function wrapper(target)
+  return {getItem=function() return target end,getFluidContainer=function() return fluid end}
+ end
+ item.ground=wrapper(item)
+ local p=player(0,.1);local c=assert(Full.new(p,sourceWorld,{item},'fluid',false,nil,floor));c:tick()
+ assert(#created.calls==1);close(created.calls[1].portion,.5)
+ item.source=inventory;assert(not created.target())
+ fluid.ratio=.5;p.t=0;item.source=floor;item.ground=wrapper(item)
+ c:tick();assert(c.state=='finished' and #created.calls==1)
+end)
+test('floor fluid rejects mismatched wrapper and lost reach before dispatch',function()
+ for _,mode in ipairs({'decoy','range'}) do
+  local floor={getType=function() return 'floor' end}
+  local item,fluid=bottle(84,.2);item.source=floor
+  function item:getFluidContainer() return nil end
+  function item:getWorldItem() return self.ground end
+  item.ground={getItem=function() return mode=='decoy' and {} or item end,getFluidContainer=function() return fluid end}
+  local c=assert(Full.new(player(0,.1),sourceWorld,{item},'fluid',false,nil,floor))
+  if mode=='range' then floor.far=true end
+  c:tick();assert(c.state=='cancelled' and #created.calls==0,mode)
+ end
+end)
+test('MP terminal partial waits full grace and never queues a metabolism bite',function()
+ local c,p,old,crate=mpTransferFixture(.07)
+ local actual=food(71,.13);old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+ p.h=.0015;c:tick();assert(c:isBusy() and #created.calls==1)
+ now=now+1999;c:tick();assert(c:isBusy())
+ now=now+2;c:tick();assert(c.state=='finished' and c.reason=='Requested portion consumed; no more items were queued' and #created.calls==1)
+ endMP()
+end)
+test('MP terminal fallback rejects weak stats, incomplete quantity, excess consumption and missing identity',function()
+ for _,mode in ipairs({'weak','partial','excess','missing'}) do
+  local c,p,old,crate=mpTransferFixture(.1)
+  local actual=food(71,mode=='partial' and .15 or mode=='excess' and .05 or .1)
+  old.source=nil;crate.members[71]=nil
+  if mode~='missing' then inventory.members[71]=actual end
+  p.h=mode=='weak' and .05 or .0015
+  c:tick();assert(c:isBusy());now=now+2001;c:tick()
+  assert(c.state=='failed' and #created.calls==1,mode);endMP()
+ end
+end)
+test('MP drink terminal uses exact ratio and substantive thirst after the grace',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({})
+ local old=bottle(85,.2);old.source=crate;crate.members[85]=old
+ local p=player(0,.1);local c=assert(Full.new(p,sourceWorld,{old},'fluid',false,nil,crate));c:tick()
+ local actual,fluid=bottle(85,.2);fluid.ratio=.5;inventory.members[85]=actual;crate.members[85]=nil;old.source=nil
+ p.t=.0013;c:tick();assert(c:isBusy());now=now+2001;c:tick()
+ assert(c.state=='finished' and #created.calls==1);endMP()
+end)
+test('MP terminal uses whole-percent residual precision not a relative relief tolerance',function()
+ for _,case in ipairs({{.1,.0049,true},{.1,.0051,false},{.1,.099,false},{.004,.0039,false}}) do
+  local c,p,old,crate=mpTransferFixture(case[1])
+  local actual=food(71,.2-case[1]);old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+  p.h=case[2];c:tick();assert(c:isBusy());now=now+2001;c:tick()
+  assert(c.state==(case[3] and 'finished' or 'failed') and #created.calls==1)
+  endMP()
+ end
+end)
+test('MP strict partial acknowledgement ends without chasing observed metabolism',function()
+ local c,p,old,crate=mpTransferFixture(.1)
+ p.h=.102;c:tick();assert(c:isBusy())
+ local actual=food(71,.1);old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+ p.h=.002;c:tick()
+ assert(c.state=='finished' and #created.calls==1 and c.reason=='Requested portion consumed; no more items were queued')
+ endMP()
+end)
+test('native floor restoration without pane association is unknown not depleted',function()
+ local floor={getType=function() return 'floor' end}
+ local item=food(89,.2);item.source=floor
+ function item:getWorldItem() return self.ground end
+ local p=player(.1,0);local c=assert(Full.new(p,sourceWorld,{item},'food',false,nil,floor));c:tick()
+ item.h=.1;p.h=0;item.source=nil;item.ground={}
+ c:tick();assert(c:isBusy() and #created.calls==1 and c:remaining(item,'food')==nil)
+ item.source=floor;c:tick();assert(c.state=='finished' and #created.calls==1)
+end)
 print('Til Full controller: '..count..' scenarios passed')
 

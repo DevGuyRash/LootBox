@@ -174,6 +174,20 @@ function TillFull:sourceProblem(record, allowConsumed)
     end
 end
 
+-- Floor fluids live on the exact world wrapper until vanilla picks them up.
+-- Never borrow another object's fluid, or authorize a stale floor association.
+function TillFull:fluidFor(item)
+    local fluid = item:getFluidContainer()
+    if fluid then return fluid end
+    local source = item:getContainer()
+    local ground = item.getWorldItem and item:getWorldItem()
+    if source and source.getType and source:getType() == "floor" and ground
+        and ground.getItem and ground:getItem() == item and ground.getFluidContainer
+        and self.world.consumptionSource and self.world:consumptionSource(item, source) then
+        return ground:getFluidContainer()
+    end
+end
+
 function TillFull:inspect(record)
     local sourceProblem = self:sourceProblem(record)
     if sourceProblem then return nil, sourceProblem end
@@ -192,7 +206,7 @@ function TillFull:inspect(record)
         hunger, thirst = -item:getHungerChange(), -item:getThirstChange()
     else
         if instanceof(item, "Food") and not safeFood(item) then return nil, "This fluid's food container is unsafe" end
-        local fluid = item:getFluidContainer()
+        local fluid = self:fluidFor(item)
         if not fluid or fluid:getCapacity() > 3 then return nil, "Use an open drinking vessel" end
         hunger, thirst = fluidEffects(fluid, opening)
         if hunger == nil then return nil, thirst end
@@ -234,11 +248,15 @@ end
 -- Native perform() only retires the client action. In multiplayer, complete()
 -- applies nutrition and item changes later. A stat fluctuation alone is not an
 -- acknowledgement of our requested portion; wait for that exact item quantity.
-local function remaining(item, kind)
-    if not item:getContainer() then return 0 end
+function TillFull:remaining(item, kind)
+    if not item:getContainer() then
+        if item.getWorldItem and item:getWorldItem() then return nil end
+        return 0
+    end
     if kind == "food" then return math.max(0, -item:getHungChange()) end
-    local fluid = item:getFluidContainer()
-    if not fluid or fluid:isEmpty() then return 0 end
+    local fluid = self:fluidFor(item)
+    if not fluid then return nil end
+    if fluid:isEmpty() then return 0 end
     return fluid:getFilledRatio()
 end
 
@@ -317,7 +335,7 @@ function TillFull:step()
                 improved = (before.hrelief <= 0 or hungerConfirmed) and (before.trelief <= 0 or thirstConfirmed)
             end
         end
-        local quantity = remaining(before.item, self.kind)
+        local quantity = self:remaining(before.item, self.kind)
         if record.identityUnresolved then
             quantity = record.seenInMain and record.absentAtEndpoints and before.expectedRemaining <= 0 and 0 or nil
         end
@@ -326,6 +344,23 @@ function TillFull:step()
         -- an intermediate progress update or an unrelated need improvement.
         if not improved or not consumed then
             if getTimestampMs() < self.confirmation then return end
+            -- Client updates conceal metabolism. This terminal-only outcome
+            -- never permits another bite, and never claims literal fullness.
+            local substantialHunger = hungerConfirmed or (before.hunger >= 0.01
+                and hunger < before.hunger and math.floor(hunger * 100 + 0.5) == 0)
+            local substantialThirst = thirstConfirmed or (before.thirst >= 0.01
+                and thirst < before.thirst and math.floor(thirst * 100 + 0.5) == 0)
+            local substantial = self.kind == "food" and substantialHunger or self.kind == "fluid" and substantialThirst
+            if self.both then
+                substantial = (before.hrelief <= 0 or substantialHunger) and (before.trelief <= 0 or substantialThirst)
+            end
+            if isClient and isClient() and not receipt and before.partial and before.coversTarget
+                and not record.identityUnresolved and not self:sourceProblem(record)
+                and finite(quantity) and math.abs(quantity - before.expectedRemaining) <= 0.000001
+                and substantial then
+                self.count = self.count + 1
+                self:finish("finished", "Requested portion consumed; no more items were queued"); return
+            end
             self:finish("failed", "Consumption was not fully confirmed; no more items were queued"); return
         end
         self.count = self.count + 1
@@ -333,10 +368,22 @@ function TillFull:step()
             self:finish("finished", "The requested portion satisfied the need measured before consumption")
             return
         end
+        -- A fully acknowledged planned client portion is also terminal. Do
+        -- not turn post-dispatch metabolism into permission for another nibble;
+        -- whole-item exhaustion still follows the selected-stack path below.
+        if isClient and isClient() and before.partial and before.coversTarget
+            and not record.identityUnresolved and finite(quantity)
+            and math.abs(quantity - before.expectedRemaining) <= 0.000001 then
+            self:finish("finished", "Requested portion consumed; no more items were queued")
+            return
+        end
         self.confirmation, self.inflight = nil, nil
         local current = self.records[self.index]
         local depleted = not current.item:getContainer()
-        if self.kind == "fluid" and current.item:getFluidContainer() then depleted = depleted or current.item:getFluidContainer():isEmpty() end
+        if self.kind == "fluid" then
+            local fluid = self:fluidFor(current.item)
+            depleted = depleted or (fluid and fluid:isEmpty())
+        end
         if self.kind == "food" then depleted = depleted or current.item:getHungChange() >= 0 end
         if depleted then self.index = self.index + 1 end
     end
@@ -372,7 +419,7 @@ function TillFull:step()
         end
         return
     end
-    local quantity = remaining(record.item, self.kind)
+    local quantity = self:remaining(record.item, self.kind)
     if not finite(quantity) or quantity <= 0 then self:finish("cancelled", "The selected quantity is unavailable"); return end
     local expectedRemaining = quantity * (1 - portion)
     local expectedHunger = math.max(0, hunger - math.max(0, effects.hunger) * portion)
@@ -405,7 +452,7 @@ function TillFull:step()
         local protected = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
         local unsafe = item:isSealed() or (instanceof(item, "Food") and not safeFood(item))
         if self.kind == "fluid" then
-            local fluid = item:getFluidContainer()
+            local fluid = self:fluidFor(item)
             if not fluid then unsafe = true
             elseif not fluid:isEmpty() then
                 local hrelief, trelief = fluidEffects(fluid)

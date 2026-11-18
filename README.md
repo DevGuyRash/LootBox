@@ -125,7 +125,7 @@ The menu action starts directly without opening another window. A refusal uses c
 player action prevents further stack consumption. Native mask/item restoration is
 preserved, so cancellation can remain pending during cleanup. No-progress or
 unavailable native actions stop safely rather than repeatedly queuing items.
-In single-player, a partial portion completes when the exact amount and its native effect are confirmed. It does not take another bite just for hunger or thirst accrued during that action.
+In single-player, a partial portion completes when the exact amount and its native effect are confirmed. It does not take another bite just for hunger or thirst accrued during that action. In multiplayer, a confirmed partial portion does not start a second action just to chase normal metabolism. If the exact amount was consumed and the observed remaining need rounds to zero percent, LootBox reports the portion consumed rather than claiming an exact server zero.
 “Til Full” requests a stop at the observed target; native partial consumption and
 multiplayer latency mean it cannot promise exact quantities or instantaneous
 stopping. See [verification](docs/verification.md) for the coverage and limits of each workflow.
