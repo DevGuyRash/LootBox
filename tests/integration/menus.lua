@@ -1310,6 +1310,87 @@ test("Til Full follows a native Open and Eat or Drink recipe without relying on 
     ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
 end)
 
+test("nearby loot Eat/Drink follows nested native rows and preserves exact clicked source", function(f)
+    local oldPane, oldManager, oldClient = ISInventoryPane, getScriptManager, isClient
+    ISInventoryPane = {getActualItems = function(rows)
+        local out = {}
+        for _, row in ipairs(rows) do
+            if row.items then for n=2,#row.items do out[#out+1] = row.items[n] end
+            else out[#out+1] = row end
+        end
+        return out
+    end}
+    local recipe = {}
+    isClient = function() return false end
+    getScriptManager = function() return {getCraftRecipe=function(_,key) return key=="OpenMe" and recipe end} end
+    ISInventoryPaneContextMenu.onEatItems, ISInventoryPaneContextMenu.onDrinkFluid = function() end, function() end
+    f.preferences.tillFullEnabled = true
+    local picked, peer, decoy = item(f.crate), item(f.crate), item(f.inventory)
+    picked.getOpeningRecipe = function() return "OpenMe" end
+    local rows = {{items={picked,picked,peer}}, decoy}
+    local originalSource = f.crate
+    for _, kind in ipairs({"food", "fluid"}) do for _, closed in ipairs({false,true}) do
+        local parent, group, amounts = Menu:new(), Menu:new(), Menu:new()
+        local menus = {group, amounts}
+        parent.getSubMenu = function(_,id) return menus[id] end
+        local use = parent:addOption("Container actions",nil,nil);use.subOption=1
+        local action=group:addOption("Localized native action",nil,nil);action.subOption=2
+        local original = amounts:addOption("1/4", kind=="food" and rows or picked,
+            kind=="food" and ISInventoryPaneContextMenu.onEatItems or ISInventoryPaneContextMenu.onDrinkFluid)
+        original.param3=closed and recipe or nil
+        original.param4=kind=="fluid" and picked or 25
+        use.notAvailable=true
+        Menus.inventoryMenu(0,parent,rows);assert(#amounts.options==1)
+        use.notAvailable=false
+        Menus.inventoryMenu(0,parent,rows);Menus.inventoryMenu(0,parent,rows)
+        assert(#amounts.options==2 and amounts.options[1]==original)
+        local added=amounts.options[2];assert(added.name=="Til Full")
+        local captured
+        f.app.tillFull = function(_,items,actionKind,open,source)
+            assert(#items==2 and items[1]==picked and items[2]==peer and actionKind==kind)
+            assert(open==original.param3 and source==originalSource)
+            captured=true;return true
+        end
+        picked.source=f.inventory -- menu never recaptures a moved item at click time
+        assert(added.onSelect(added.target) and captured)
+        picked.source=originalSource
+    end end
+    ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
+end)
+
+test("native ground Drink binds its real world wrapper only to the selected floor item", function(f)
+    local oldPane = ISInventoryPane
+    ISInventoryPane = {getActualItems = function(rows) return rows end}
+    ISInventoryPaneContextMenu.onDrinkFluid = function() end
+    f.preferences.tillFullEnabled=true
+    local floor = container("floor",false)
+    local chosen,other = item(floor),item(floor)
+    local function world(value)
+        return {classes={IsoWorldInventoryObject=true},getItem=function() return value end}
+    end
+    local owner,foreign = world(chosen),world(other)
+    f.app.tillFull = function(_,items,kind,recipe,source)
+        assert(kind=="fluid" and not recipe and source==floor and #items==1 and items[1]==chosen)
+        f.groundConsumed = true;return true
+    end
+    for _, mode in ipairs({"pane","world","foreign","mismatch","stale"}) do
+        local parent,amounts=Menu:new(),Menu:new()
+        parent.getSubMenu=function() return amounts end
+        local root=parent:addOption("Drink",nil,nil);root.subOption=1
+        local native=amounts:addOption("All",mode=="foreign" and foreign or owner, ISInventoryPaneContextMenu.onDrinkFluid)
+        native.param4=mode=="mismatch" and other or (mode=="foreign" and other or chosen)
+        if mode=="stale" then chosen.source=nil end
+        if mode=="pane" then Menus.inventoryMenu(0,parent,{chosen})
+        else Menus.worldMenu(0,parent,{owner},false) end
+        local added=amounts.options[2]
+        if mode=="pane" or mode=="world" then
+            f.groundConsumed=false
+            assert(added and added.onSelect(added.target) and f.groundConsumed)
+        else assert(not added) end
+    end
+    ISInventoryPane=oldPane
+end)
+
 assert(#failures == 0, table.concat(failures, "\n"))
 print(passed .. " menu and guide integration cases passed (native rendering and App boundaries are doubles)")
 

@@ -23,11 +23,47 @@ end
 function Native.new(player) return setmetatable({player = player}, Native) end
 function Native:isBusy() return self.active ~= nil end
 
+local function finite(value)
+    return type(value) == "number" and value == value and math.abs(value) < math.huge
+end
+local function pack(...) return {n = select("#", ...), ...} end
+
+-- In SP these callbacks apply nutrition synchronously. Measuring only their
+-- contribution excludes metabolism between ticks without widening a tolerance.
+local function observeNeeds(state, action)
+    local name = state.kind == "food" and "complete" or "updateEat"
+    local previous = action[name]
+    if type(previous) ~= "function" then return end
+    action[name] = function(current, ...)
+        local beforeOK, beforeH, beforeT = pcall(state.needSampler)
+        local exact = current == state.consume and current.item == state.item
+        local result = pack(pcall(previous, current, ...))
+        if not result[1] then
+            state.receiptInvalid, state.receipt = true, nil
+            error(result[2], 0)
+        end
+        local afterOK, afterH, afterT = pcall(state.needSampler)
+        if not exact or current.item ~= state.item or not beforeOK or not afterOK
+            or not finite(beforeH) or not finite(beforeT) or not finite(afterH) or not finite(afterT) then
+            state.receiptInvalid, state.receipt = true, nil
+        elseif not state.receiptInvalid then
+            local receipt = state.receipt or {item = state.item, hunger = 0, thirst = 0}
+            receipt.hunger = receipt.hunger + math.max(0, beforeH - afterH)
+            receipt.thirst = receipt.thirst + math.max(0, beforeT - afterT)
+            state.receipt = receipt
+        end
+        return unpack(result, 2, result.n)
+    end
+end
+
 local function hook(self, state, action)
     local originalStop, originalPerform, originalStart = action.stop, action.perform, action.start
     local originalCancel = action.forceCancel
     if type(originalStop) ~= "function" or type(originalPerform) ~= "function" then
         return nil, "Unsupported native action lifecycle"
+    end
+    if action == state.consume and state.needSampler and not isClient() and not isServer() then
+        observeNeeds(state, action)
     end
     if action == state.consume and type(originalStart) == "function" then
         action.start = function(started)
@@ -117,14 +153,25 @@ function Native:cancel(reason)
     return true
 end
 
-function Native:begin(item, kind, portion, atTarget)
+local function missingSource(item)
+    if item and item.getContainer and item:getContainer() then return end
+    local ground = item and item.getWorldItem and item:getWorldItem()
+    if ground and ground:getItem() == item and ground:getSquare() then
+        return "Open the nearby Floor pane and try again"
+    end
+    return "The selected item is no longer in an available container"
+end
+
+function Native:begin(item, kind, portion, atTarget, needSampler)
     if self.active then return nil, "A consumption action is already active" end
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption kind" end
     if type(portion) ~= "number" or portion ~= portion or portion <= 0 or portion > 1 then
         return nil, "Invalid native portion"
     end
     if type(atTarget) ~= "function" then return nil, "A live stop predicate is required" end
-    if not item or (item.isSealed and item:isSealed()) then return nil, "Open the item before using Til Full" end
+    local sourceProblem = missingSource(item)
+    if sourceProblem then return nil, sourceProblem end
+    if item.isSealed and item:isSealed() then return nil, "Open the item before using Til Full" end
     if interrupted(self.player) then return nil, "The player cannot begin consumption now" end
     if kind == "food" and item.getRequireInHandOrInventory then
         local required = item:getRequireInHandOrInventory()
@@ -135,7 +182,8 @@ function Native:begin(item, kind, portion, atTarget)
     local ok, target = pcall(atTarget)
     if not ok then return nil, "Could not read current fullness" end
     if target then return nil, "Already at the requested limit" end
-    local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget}
+    local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget,
+        item = item, kind = kind, needSampler = type(needSampler) == "function" and needSampler or nil}
     self.active = state
     local dispatched, err = pcall(function()
         if kind == "food" then
@@ -167,7 +215,9 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     if self.active then return nil, "A consumption action is already active" end
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption kind" end
     if type(atTarget) ~= "function" then return nil, "A live stop predicate is required" end
-    if not item or not recipe or not item:getContainer()
+    local sourceProblem = missingSource(item)
+    if sourceProblem then return nil, sourceProblem end
+    if not recipe
         or not item:getOpeningRecipe() or getScriptManager():getCraftRecipe(item:getOpeningRecipe()) ~= recipe then
         return nil, "The selected opening recipe changed"
     end
@@ -269,7 +319,7 @@ function Native:poll()
         return false, "Opening result was not confirmed; no consumption was queued"
     end
     self.active = nil
-    return true, "complete"
+    return true, "complete", nil, state.receipt
 end
 
 return Native

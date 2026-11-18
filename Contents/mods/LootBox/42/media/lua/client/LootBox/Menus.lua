@@ -115,11 +115,23 @@ local function open(playerIndex, context, mode, message)
     return window
 end
 
+local function inventoryItem(value)
+    if native(value, "InventoryItem") then return value end
+    if native(value, "IsoWorldInventoryObject") then
+        local item = call(value, "getItem")
+        if native(item, "InventoryItem") then return item end
+    end
+end
+
 local function selectedItem(items)
     for _, selected in ipairs(items or {}) do
-        if native(selected, "InventoryItem") then return selected end
+        local direct = inventoryItem(selected)
+        if direct then return direct end
         if type(selected) == "table" then
-            for _, item in ipairs(selected.items or {}) do if native(item, "InventoryItem") then return item end end
+            for _, value in ipairs(selected.items or {}) do
+                local item = inventoryItem(value)
+                if item then return item end
+            end
         end
     end
 end
@@ -494,7 +506,7 @@ end
 local function runTillFull(selection)
     local app, err = App.get(selection.playerIndex)
     local ok
-    if app then ok, err = app:tillFull(selection.items, selection.kind, selection.openingRecipe) end
+    if app then ok, err = app:tillFull(selection.items, selection.kind, selection.openingRecipe, selection.source) end
     if not ok then
         local player = getSpecificPlayer(selection.playerIndex)
         local message = "Til Full: " .. tostring(err or "The native action could not start")
@@ -527,7 +539,8 @@ local function consumptionMenu(playerIndex, parent, items)
         end
         if #candidates == 0 then
             for _, row in ipairs(items or {}) do
-                if native(row, "InventoryItem") then candidates[#candidates + 1] = row end
+                local item = inventoryItem(row)
+                if item then candidates[#candidates + 1] = item end
             end
         end
         local snapshot, seen, contains = {}, {}, false
@@ -541,46 +554,51 @@ local function consumptionMenu(playerIndex, parent, items)
         end
         return contains and snapshot or nil
     end
-    -- Match native callback identities, never translated labels or invented eligibility.
-    for _, root in ipairs(parent.options or {}) do
-        local child = root.subOption and parent:getSubMenu(root.subOption)
-        if child and not root.notAvailable then
-            local kind, anchor, openingRecipe, already
-            for _, option in ipairs(child.options or {}) do
-                if option.onSelect == runTillFull then already = true end
-                if not option.notAvailable then
-                    local action, item
-                    if nativeMenu.onEatItems and option.onSelect == nativeMenu.onEatItems then
-                        action, item = "food", (ISInventoryPane.getActualItems(option.target) or {})[1]
-                    elseif nativeMenu.onDrinkFluid and option.onSelect == nativeMenu.onDrinkFluid then
-                        action, item = "fluid", option.target
-                        if native(item, "IsoWorldInventoryObject") then item = call(item, "getItem") end
-                        if option.param4 and item ~= option.param4 then item = nil end
-                    end
-                    if item then
-                        local recipe = option.param3
-                        local name = recipe and call(item, "getOpeningRecipe")
-                        if not recipe or (name and getScriptManager():getCraftRecipe(name) == recipe) then
-                            kind, anchor, openingRecipe = action, item, recipe
-                        end
+    -- Mods can group native amount menus under another submenu. Only walk
+    -- enabled branches; never infer permission from a translated menu label.
+    local visited, remaining = {[parent] = true}, 256
+    local function visit(menu, root)
+        if visited[menu] or remaining <= 0 then return end
+        visited[menu], remaining = true, remaining - 1
+        local kind, anchor, openingRecipe, already, ambiguous
+        for _, option in ipairs(menu.options or {}) do
+            if option.onSelect == runTillFull then already = true end
+            if not option.notAvailable then
+                local action, item
+                if nativeMenu.onEatItems and option.onSelect == nativeMenu.onEatItems then
+                    action, item = "food", inventoryItem((ISInventoryPane.getActualItems(option.target) or {})[1])
+                elseif nativeMenu.onDrinkFluid and option.onSelect == nativeMenu.onDrinkFluid then
+                    action, item = "fluid", inventoryItem(option.target)
+                    if option.param4 and item ~= option.param4 then item = nil end
+                end
+                if item then
+                    local recipe = option.param3
+                    local name = recipe and call(item, "getOpeningRecipe")
+                    if not recipe or (name and getScriptManager():getCraftRecipe(name) == recipe) then
+                        if kind and (kind ~= action or anchor ~= item or openingRecipe ~= recipe) then ambiguous = true end
+                        kind, anchor, openingRecipe = action, item, recipe
                     end
                 end
-            end
-            local snapshot = kind and selectedStack(anchor)
-            if snapshot and #snapshot > 0 and not already then
-                local chooseOpened = kind == "food" and openingRecipe and isClient()
-                local title = chooseOpened and "Open first for Til Full" or "Til Full"
-                local added = child:addOption(title, {playerIndex = playerIndex, items = snapshot,
-                    kind = kind, openingRecipe = openingRecipe}, runTillFull)
-                -- Use vanilla item-icon rendering, including modded food/drink textures.
-                if added then added.itemForTexture = root.itemForTexture or snapshot[1] end
-                if chooseOpened then
-                    tooltip(added, title, "Opens one selected item without eating. In multiplayer, right-click the opened food and choose Eat > Til Full.")
-                elseif openingRecipe and kind == "fluid" then
-                    tooltip(added, title, "Open this vessel and drink until the selected need is satisfied. Til Full does not drink alcohol or unsafe mixtures.")
-                end
+                local child = option.subOption and parent:getSubMenu(option.subOption)
+                if child then visit(child, option) end
             end
         end
+        local snapshot = not ambiguous and not already and kind and selectedStack(anchor)
+        if not snapshot or #snapshot == 0 then return end
+        local chooseOpened = kind == "food" and openingRecipe and isClient()
+        local title = chooseOpened and "Open first for Til Full" or "Til Full"
+        local added = menu:addOption(title, {playerIndex = playerIndex, items = snapshot,
+            kind = kind, openingRecipe = openingRecipe, source = anchor:getContainer()}, runTillFull)
+        if added then added.itemForTexture = root.itemForTexture or anchor end
+        if chooseOpened then
+            tooltip(added, title, "Opens one selected item without eating. In multiplayer, right-click the opened food and choose Eat > Til Full.")
+        elseif openingRecipe and kind == "fluid" then
+            tooltip(added, title, "Open this vessel and drink until the selected need is satisfied. Til Full does not drink alcohol or unsafe mixtures.")
+        end
+    end
+    for _, root in ipairs(parent.options or {}) do
+        local child = not root.notAvailable and root.subOption and parent:getSubMenu(root.subOption)
+        if child then visit(child, root) end
     end
 end
 
@@ -672,6 +690,15 @@ function Menus.worldMenu(playerIndex, parent, objects, test)
     local app = App.get(playerIndex)
     if not app then return end
     if test then return ISWorldObjectContextMenu.setTest() end
+    -- Extend an actual native amount menu for an explicitly clicked ground
+    -- item if one exists; never offer to consume an entire tile or container.
+    if preferences.tillFullEnabled then
+        local clicked = {}
+        for _, object in ipairs(objects or {}) do
+            if native(object, "IsoWorldInventoryObject") and inventoryItem(object) then clicked[#clicked + 1] = object end
+        end
+        if #clicked > 0 then consumptionMenu(playerIndex, parent, clicked) end
+    end
     local player = getSpecificPlayer(playerIndex)
     local context = { playerIndex = playerIndex, kind = "world", containers = {} }
     for _, object in ipairs(objects or {}) do

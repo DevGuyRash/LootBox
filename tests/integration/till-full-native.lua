@@ -7,8 +7,11 @@ local tests = 0
 local function fixture()
     local f = {time = 0, target = false, actions = {}, calls = {}}
     getTimestampMs = function() return f.time end
+    isClient = function() return f.client == true end
+    isServer = function() return f.server == true end
     f.player = {getPlayerNum = function() return 2 end}
-    f.item = {isSealed = function() return false end, getOpeningRecipe = function() return nil end}
+    f.item = {container = {}, isSealed = function() return false end, getOpeningRecipe = function() return nil end,
+        getContainer = function(self) return self.container end}
     local q = {queue = {}}
     function q:removeFromQueue(a) for i,v in ipairs(self.queue) do if v == a then table.remove(self.queue,i); return end end end
     function q:addToQueue(a)
@@ -52,6 +55,59 @@ test("wrapper portions and complete restoration for both native kinds",function(
         f:finish(); assert(f.native:poll()==true and not f.native:isBusy())
         assert(f.calls[#f.calls][1]==kind and f.calls[#f.calls][2]==.4)
     end
+end)
+test("native wrappers own exact external pickup and their original return behavior",function()
+    for _,kind in ipairs({"food","fluid"}) do
+        for _,sourceType in ipairs({"crate","floor"}) do
+            local f=fixture()
+            local inventory,source={}, {getType=function() return sourceType end}
+            f.item.container=source;f.item.id=481
+            f.item.getContainer=function(self) return self.container end
+            f.item.getID=function(self) return self.id end
+            f.player.getInventory=function() return inventory end
+            local originalDispatch=f.dispatch
+            function f:dispatch(k,p)
+                assert(self.item:getContainer()==source and self.item:getID()==481)
+                originalDispatch(self,k,p)
+                local transfer,consume,restore=self.actions[1],self.actions[2],self.actions[4]
+                local pickup=transfer.perform
+                function transfer:perform()
+                    f.item.container=inventory
+                    return pickup(self)
+                end
+                local eat=consume.perform
+                function consume:perform()
+                    assert(f.item:getContainer()==inventory and f.item:getID()==481)
+                    return eat(self)
+                end
+                local putBack=restore.perform
+                function restore:perform()
+                    f.item.container=source
+                    return putBack(self)
+                end
+            end
+            assert(f:begin(kind,.4))
+            assert(#f.calls==1 and #f.actions==4) -- no adapter-created duplicate pickup
+            f:finish();assert(f.native:poll()==true)
+            assert(f.item:getContainer()==source and f.item:getID()==481)
+        end
+    end
+end)
+test("nil ground consumption requires native floor association without queueing",function(f)
+    f.item.container=nil
+    local ground={getItem=function() return f.item end,getSquare=function() return {} end}
+    f.item.getWorldItem=function() return ground end
+    for _,kind in ipairs({"food","fluid"}) do
+        local ok,reason=f:begin(kind)
+        assert(not ok and reason=="Open the nearby Floor pane and try again")
+        assert(#f.calls==0 and #f.queue.queue==0 and not f.native:isBusy())
+    end
+    ground.getItem=function() return {} end
+    local ok,reason=f:begin()
+    assert(not ok and reason=="The selected item is no longer in an available container")
+    ground.getItem=function() return f.item end;ground.getSquare=function() return nil end
+    ok,reason=f:begin()
+    assert(not ok and reason=="The selected item is no longer in an available container")
 end)
 test("reject invalid admission before wrapper dispatch",function(f)
     for _,p in ipairs({0,-1,1.01,math.huge,0/0}) do assert(not f.native:begin(f.item,"food",p,function() return false end)) end
@@ -266,6 +322,20 @@ local function openingFixture(f)
     end
 end
 
+test("nil ground opening requires native floor association without queueing",function(f)
+    openingFixture(f);f.item.container=nil
+    local ground={getItem=function() return f.item end,getSquare=function() return {} end}
+    f.item.getWorldItem=function() return ground end
+    for _,kind in ipairs({"food","fluid"}) do
+        local ok,reason=f:open(kind)
+        assert(not ok and reason=="Open the nearby Floor pane and try again")
+        assert(#f.calls==0 and #f.queue.queue==0 and not f.native:isBusy())
+        assert(ISEntityUI.HandcraftStart==f.originalHandcraftStart)
+    end
+    f.item.getWorldItem=function() return nil end
+    local ok,reason=f:open()
+    assert(not ok and reason=="The selected item is no longer in an available container")
+end)
 test("opening dispatch never requests native auto-eat and returns exact craft result",function(f)
     openingFixture(f)
     local result=f:output()
@@ -355,6 +425,99 @@ test("scoped craft guard restores the original factory after native exceptions",
     assert(not f:open())
     assert(ISEntityUI.HandcraftStart==f.originalHandcraftStart)
     assert(f.native:poll()==false)
+end)
+
+local function receiptFixture(f,kind)
+    f.hunger,f.thirst=.2,.3
+    local make=f.action
+    function f:action(name)
+        local a=make(self,name)
+        if name==(kind=="food" and "ISEatFoodAction" or "ISDrinkFluidAction") then
+            f.consume=a;a.item=f.item
+            a.complete=function()
+                f.hunger=f.hunger-.1;f.thirst=f.thirst-.05
+                return "completed",nil,7
+            end
+            a.updateEat=function(_,delta)
+                local amount=math.max(0,delta-(f.drunk or 0));f.drunk=delta
+                f.hunger=f.hunger-.04*amount;f.thirst=f.thirst-.1*amount
+                return delta,nil,"increment"
+            end
+        end
+        return a
+    end
+    function f:sample() return self.hunger,self.thirst end
+    function f:withReceipt()
+        return self.native:begin(self.item,kind,.5,function() return false end,
+            function() return self:sample() end)
+    end
+end
+test("SP food receipt observes exact native complete and preserves all return values",function(f)
+    receiptFixture(f,"food");assert(f:withReceipt())
+    f.hunger=f.hunger+.000008 -- metabolism outside authoritative callback
+    local a,b,c=f.consume:complete()
+    assert(a=="completed" and b==nil and c==7)
+    f:finish();local done,reason,opened,receipt=f.native:poll()
+    assert(done and reason=="complete" and opened==nil and receipt.item==f.item)
+    assert(math.abs(receipt.hunger-.1)<1e-12 and math.abs(receipt.thirst-.05)<1e-12)
+end)
+test("SP fluid receipt sums only native updateEat increments not intervening metabolism",function(f)
+    receiptFixture(f,"fluid");assert(f:withReceipt())
+    f.consume.complete=function(a) return a:updateEat(1) end
+    for _,delta in ipairs({.1,.4,.4,.8}) do
+        f.hunger=f.hunger+.000002;f.thirst=f.thirst+.000003
+        local a,b,c=f.consume:updateEat(delta)
+        assert(a==delta and b==nil and c=="increment")
+    end
+    f.consume:complete();f:finish()
+    local done,_,_,receipt=f.native:poll()
+    assert(done and receipt.item==f.item)
+    assert(math.abs(receipt.hunger-.04)<1e-12 and math.abs(receipt.thirst-.1)<1e-12)
+end)
+test("MP callbacks remain unwrapped and provide no local authoritative receipt",function(f)
+    receiptFixture(f,"food");f.client=true;assert(f:withReceipt())
+    f:finish();local done,_,_,receipt=f.native:poll()
+    assert(done and receipt==nil)
+    assert(f.consume:complete()=="completed")
+end)
+test("server callbacks never produce a singleplayer receipt",function(f)
+    receiptFixture(f,"food");f.server=true;assert(f:withReceipt())
+    assert(f.consume:complete()=="completed")
+    f:finish();local done,_,_,receipt=f.native:poll()
+    assert(done and receipt==nil)
+end)
+test("missing invalid or wrong-item observation cannot provide a receipt",function()
+    for _,mode in ipairs({"missing","nan","error","wrong"}) do
+        local f=fixture();receiptFixture(f,"food")
+        if mode=="missing" then
+            local make=f.action
+            function f:action(name) local a=make(self,name);a.complete=nil;return a end
+        elseif mode=="nan" then function f:sample() return 0/0,.2 end
+        elseif mode=="error" then function f:sample() error("sampler failed") end end
+        assert(f:withReceipt())
+        if mode=="wrong" then f.consume.item={} end
+        if f.consume.complete then assert(f.consume:complete()=="completed") end
+        f:finish();local done,_,_,receipt=f.native:poll();assert(done and receipt==nil)
+    end
+end)
+test("native callback errors propagate unchanged and invalidate accumulated receipt",function(f)
+    receiptFixture(f,"fluid")
+    local make=f.action
+    function f:action(name)
+        local a=make(self,name);local previous=a.updateEat
+        if previous then
+            a.updateEat=function(self,...)
+                if f.failNative then error("native failed",0) end
+                return previous(self,...)
+            end
+        end
+        return a
+    end
+    assert(f:withReceipt());f.consume:updateEat(.2);f.failNative=true
+    local ok,err=pcall(f.consume.updateEat,f.consume,.4)
+    assert(not ok and err=="native failed")
+    f.failNative=false;f.consume:updateEat(.5);f:finish()
+    local done,_,_,receipt=f.native:poll();assert(done and receipt==nil)
 end)
 
 print("PASS "..tests.." Till Full native boundary scenarios")

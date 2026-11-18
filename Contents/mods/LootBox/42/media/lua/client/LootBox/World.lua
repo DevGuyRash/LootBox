@@ -162,6 +162,95 @@ function World:canAccess(container)
         and call(container, "isLockedToCharacter", self.player) ~= true
 end
 
+-- Consumption authorizes one exact item, not a container search or a walk-to job.
+function World:consumptionSource(item, source)
+    local function member(container, value)
+        local items = call(container, "getItems")
+        -- This is the direct item list, not ItemContainer's recursive/type lookup.
+        local present = call(items, "contains", value)
+        if type(present) == "boolean" then return present end
+        local count = size(items)
+        if count > 4096 then return false end
+        for index = 0, count - 1 do if at(items, index) == value then return true end end
+        return false
+    end
+    local function nearby(square)
+        local current = call(self.player, "getCurrentSquare")
+        return current and loaded(square) and call(current, "getZ") == call(square, "getZ")
+            and math.abs(call(current, "getX") - call(square, "getX")) <= 1
+            and math.abs(call(current, "getY") - call(square, "getY")) <= 1
+            and (current == square or call(current, "canReachTo", square) == true)
+            and permitted(self.player, square)
+    end
+    local function ground(value)
+        local object = call(value, "getWorldItem")
+        local square = call(object, "getSquare")
+        local index = call(object, "getWorldObjectIndex")
+        return object and nativeInteger(index) and index >= 0 and call(object, "getItem") == value
+            and nearby(square) and at(call(square, "getWorldObjects"), index) == object
+    end
+    if not item or not source or call(item, "getContainer") ~= source then
+        return nil, "The selected item moved or changed"
+    end
+    if call(source, "getType") == "floor" then
+        if not self:valid(source) then return nil, "The floor selection is stale" end
+        if member(source, item) and ground(item) then return true end
+        return nil, "The selected ground item is no longer nearby and reachable"
+    end
+    if not member(source, item) then return nil, "The selected item is no longer in its source" end
+    -- Validate every bag link instead of trusting getOutermostContainer alone.
+    local inventory, current, seen = call(self.player, "getInventory"), source, {}
+    local claimsPlayerOwner = false
+    for _ = 1, 64 do
+        if seen[current] or call(current, "isLockedToCharacter", self.player) == true then
+            return nil, "The selected source is locked or invalid"
+        end
+        seen[current] = true
+        if current == inventory then return true end
+        local owner = call(current, "getParent")
+        claimsPlayerOwner = claimsPlayerOwner or owner == self.player
+        if owner ~= self.player and (instance(owner, "IsoGameCharacter")
+            or instance(owner, "IsoPlayer") or instance(owner, "IsoZombie")) then
+            return nil, "Another character's inventory is not a loot source"
+        end
+        local bag = call(current, "getContainingItem")
+        if not bag then break end
+        if not isBag(bag) or call(bag, "getInventory") ~= current then
+            return nil, "The selected bag changed"
+        end
+        local parent = call(bag, "getContainer")
+        if not parent or call(parent, "getType") == "floor" then
+            if not ground(bag) then return nil, "The selected bag is no longer reachable" end
+            break
+        end
+        if not member(parent, bag) then return nil, "The selected bag moved" end
+        current = parent
+        if _ == 64 then return nil, "The selected bag nesting is too deep" end
+    end
+    if claimsPlayerOwner then return nil, "The selected bag no longer belongs to the player inventory" end
+    local loot = getPlayerLoot and getPlayerLoot(call(self.player, "getPlayerNum"))
+    local visible = loot and loot.inventoryPane and loot.inventoryPane.inventory == source
+    for index, button in ipairs(loot and loot.backpacks or {}) do
+        if index > 256 then break end
+        if button.inventory == source then visible = true; break end
+    end
+    local reachable = nearby(self:square(source))
+    local part = call(current, "getVehiclePart")
+    if part then
+        -- Vanilla uses this for both seated storage and outside vehicle parts.
+        -- Vehicle center distance is not the access point of a long vehicle.
+        local vehicle, index = call(part, "getVehicle"), call(part, "getIndex")
+        reachable = vehicle and nativeInteger(index) and index >= 0
+            and call(vehicle, "getPartByIndex", index) == part
+            and call(part, "getItemContainer") == current
+            and call(vehicle, "canAccessContainer", index, self.player) == true
+    end
+    if not visible or not self:canAccess(source) or not reachable then
+        return nil, "The selected loot source is no longer displayed, accessible, and nearby"
+    end
+    return true
+end
+
 function World:carryFactor(container)
     local inventory, seen = call(self.player, "getInventory"), {}
     while container and container ~= inventory and not seen[container] do
