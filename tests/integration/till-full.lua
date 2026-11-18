@@ -800,5 +800,54 @@ test('native floor restoration without pane association is unknown not depleted'
  c:tick();assert(c:isBusy() and #created.calls==1 and c:remaining(item,'food')==nil)
  item.source=floor;c:tick();assert(c.state=='finished' and #created.calls==1)
 end)
+test('MP full-item display acknowledgement waits grace then caps the next selected portion',function()
+ for _,residual in ipairs({.05108881369,.0549}) do
+  multiplayer=true;endpoint(inventory);local crate=endpoint({})
+  local a,b=food(91,.01999999955),food(92,.2);a.source=crate;b.source=crate;crate.members[91]=a;crate.members[92]=b
+  local p=player(.07008568197,0);local c=assert(Full.new(p,sourceWorld,{a,b},'food',false,nil,crate));c:tick()
+  crate.members[91]=nil;inventory.members[91]=a;a.source=inventory;assert(not created.target())
+  inventory.members[91]=nil;a.source=nil;p.h=residual
+  c:tick();assert(#created.calls==1);now=now+2001;c:tick()
+  assert(#created.calls==2 and created.calls[2].item==b)
+  close(created.calls[2].portion,.05008568242/.2)
+  endMP()
+ end
+end)
+test('MP full-item fallback rejects unacknowledged missing zero-benefit and intermediate packets',function()
+ for _,mode in ipairs({'zero','missing','intermediate','subpoint'}) do
+  multiplayer=true;endpoint(inventory);local crate=endpoint({})
+  local relief=mode=='subpoint' and .004 or .02
+  local a,b=food(93,relief),food(94,.2);a.source=crate;b.source=crate;crate.members[93]=a;crate.members[94]=b
+  local p=player(.07,0);local c=assert(Full.new(p,sourceWorld,{a,b},'food',false,nil,crate));c:tick()
+  if mode~='missing' then crate.members[93]=nil;inventory.members[93]=a;a.source=inventory;assert(not created.target()) end
+  crate.members[93]=nil;inventory.members[93]=nil;a.source=nil
+  p.h=mode=='zero' and .07 or mode=='intermediate' and .06 or mode=='subpoint' and .067 or .051
+  c:tick();now=now+2001;c:tick();assert(c.state=='failed' and #created.calls==1,mode)
+  endMP()
+ end
+end)
+test('MP planned partial cannot redispatch on float residual or overconsumed quantity',function()
+ for _,mode in ipairs({'rounding','overshoot'}) do
+  -- With these real floating operands, (need / relief) * relief is just
+  -- below need despite the partial portion being sufficient by construction.
+  local c,p,old,crate=mpTransferFixture(.0503)
+  assert(c.inflight.partial and c.inflight.expectedHunger > 0 and c.inflight.expectedHunger < 1e-10)
+  local actual=food(71,c.inflight.expectedRemaining-(mode=='overshoot' and .01 or 0))
+  old.source=nil;crate.members[71]=nil;inventory.members[71]=actual;p.h=.0001
+  c:tick();assert(c:isBusy());now=now+2001;c:tick()
+  assert(c.state==(mode=='overshoot' and 'failed' or 'finished'))
+  assert(#created.calls==1);endMP()
+ end
+end)
+test('MP full-item corroboration measures residual difference across display bucket boundaries',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({})
+ local a,b=food(95,.02),food(96,.2);a.source=crate;b.source=crate;crate.members[95]=a;crate.members[96]=b
+ local p=player(.0749,0);local c=assert(Full.new(p,sourceWorld,{a,b},'food',false,nil,crate));c:tick()
+ crate.members[95]=nil;inventory.members[95]=a;a.source=inventory;assert(not created.target())
+ inventory.members[95]=nil;a.source=nil;p.h=.0551
+ c:tick();assert(#created.calls==1);now=now+2001;c:tick()
+ assert(#created.calls==2);close(created.calls[2].portion,.0549/.2)
+ endMP()
+end)
 print('Til Full controller: '..count..' scenarios passed')
 
