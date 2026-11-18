@@ -109,6 +109,7 @@ Portable verification builds the full package before running contracts. The opti
 ## Eat or drink Til Full
 
 **Til Full** appears alongside vanilla amounts in eligible Eat and Drink submenus.
+Right-click the actual item in your inventory, a nearby loot container, or the nearby **Floor** pane. The game handles pickup and any normal return; another item of the same type is not a substitute. A container that moves out of reach or becomes locked cannot supply another item.
 It uses only the clicked selection/stack, one native consumption action at a time,
 and stops when the chosen action's need is restored: Eat targets hunger, Drink targets thirst, even when the item restores both. It does not aim for maximum stuffed moodles or find extra items elsewhere.
 In single-player, **Open and Eat > Til Full** opens one selected can at a time and measures the exact food it produced before eating. It does not open another can when the hunger target is met. In multiplayer, **Open first for Til Full** opens one selected can without eating. Once its contents appear, right-click that opened food and choose **Eat > Til Full**. The game does not identify the replacement to the client when opening without an automatic bite.
@@ -124,6 +125,7 @@ The menu action starts directly without opening another window. A refusal uses c
 player action prevents further stack consumption. Native mask/item restoration is
 preserved, so cancellation can remain pending during cleanup. No-progress or
 unavailable native actions stop safely rather than repeatedly queuing items.
+In single-player, a partial portion completes when the exact amount and its native effect are confirmed. It does not take another bite just for hunger or thirst accrued during that action.
 “Til Full” requests a stop at the observed target; native partial consumption and
 multiplayer latency mean it cannot promise exact quantities or instantaneous
 stopping. See [verification](docs/verification.md) for the coverage and limits of each workflow.

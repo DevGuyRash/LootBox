@@ -477,7 +477,7 @@ function Instance:start(plan, options)
     if started then self.consumption = nil end
     return started, problem
 end
-function Instance:tillFull(items, kind, openingRecipe)
+function Instance:tillFull(items, kind, openingRecipe, menuSource)
     if self.error or loadError then return nil, self.error or loadError end
     local options, err = App.getPreferences()
     if err then return nil, err end
@@ -485,7 +485,7 @@ function Instance:tillFull(items, kind, openingRecipe)
     if self.recovery:status().pending then return nil, "Recover personal gear before consuming" end
     if self.consumption and self.consumption:isBusy() then return nil, "Til Full is already active; use Current job to cancel" end
     local controller
-    controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds, openingRecipe)
+    controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds, openingRecipe, menuSource)
     if not controller then return nil, err end
     -- A full player choosing this convenience action must not even cancel
     -- unrelated work. Both-needs preference retains its explicit meaning.
