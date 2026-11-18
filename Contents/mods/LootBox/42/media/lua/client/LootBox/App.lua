@@ -477,7 +477,7 @@ function Instance:start(plan, options)
     if started then self.consumption = nil end
     return started, problem
 end
-function Instance:tillFull(items, kind)
+function Instance:tillFull(items, kind, openingRecipe)
     if self.error or loadError then return nil, self.error or loadError end
     local options, err = App.getPreferences()
     if err then return nil, err end
@@ -485,7 +485,7 @@ function Instance:tillFull(items, kind)
     if self.recovery:status().pending then return nil, "Recover personal gear before consuming" end
     if self.consumption and self.consumption:isBusy() then return nil, "Til Full is already active; use Current job to cancel" end
     local controller
-    controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds)
+    controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds, openingRecipe)
     if not controller then return nil, err end
     -- A full player choosing this convenience action must not even cancel
     -- unrelated work. Both-needs preference retains its explicit meaning.
@@ -591,7 +591,16 @@ function App.tick()
     App.escapeDown = escapeDown
     local stamp = getTimestampMs()
     for _, instance in pairs(sessions) do
-        if instance.consumption then instance.consumption:tick() end
+        local consumption = instance.consumption
+        if consumption then
+            consumption:tick()
+            if consumption.openedFoodPrompt then
+                local message = consumption.openedFoodPrompt
+                consumption.openedFoodPrompt = nil
+                if HaloTextHelper and HaloTextHelper.addGoodText then HaloTextHelper.addGoodText(instance.player, message)
+                else print("[LootBox] " .. message) end
+            end
+        end
         instance.jobs:tick()
         instance:runReplacement()
         if not instance.lastObserve or stamp - instance.lastObserve >= 1000 then

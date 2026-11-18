@@ -1,3 +1,3 @@
-LootBox 0.9.9
+LootBox 0.9.10
 
-Home and End still jump to the top or bottom of the inventory or loot list. They no longer show a popup or select an item under a stationary pointer, including with NeatUI Inventory's keyboard navigation enabled. Move the mouse to see item tooltips again, or click the row directly.
+Single-player: Open and Eat > Til Full can now open the selected can and eat from the food it produced. In multiplayer, Open first for Til Full opens one item without taking a bite; choose Eat > Til Full on the opened food. Open and Drink also supports eligible sealed vessels that use a native opening recipe. Needed openers, selected-stack limits, fullness targets and existing unsafe-food/drink restrictions still apply.

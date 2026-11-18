@@ -8,7 +8,7 @@ All executable mod files are client-side. A multiplayer host can enable `LootBox
 
 Subscribe to [LootBox on Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3838652822), or install the local package. The Workshop ID is `3838652822`, and the mod ID is `LootBox`.
 
-Extract the built `LootBox-0.9.9.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
+Extract the built `LootBox-0.9.10.zip` package. Copy its `Contents/mods/LootBox` directory into your game's local `Zomboid/mods` directory and enable LootBox in the game's Mods menu. Preserve both the `42` and `common` directories. Existing saves and multiplayer servers have their own mod selections. No helper mod or development tools are required to play.
 
 For a development build, use Python 3.10 or later and Lua 5.1.
 
@@ -16,7 +16,7 @@ For a development build, use Python 3.10 or later and Lua 5.1.
 python3 tools/build.py
 ```
 
-The archive is `dist/LootBox-0.9.9.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop listing metadata and the preview are kept in `workshop/`; release uploads use the shared SteamWorkshopPublisher.
+The archive is `dist/LootBox-0.9.10.zip`. `dist/manifest.json` records its file hashes. The build does not download game files or alter a running game. After updating, reconnect or restart to load the new Lua environment. Workshop listing metadata and the preview are kept in `workshop/`; release uploads use the shared SteamWorkshopPublisher.
 
 ## Start with a workflow
 
@@ -111,7 +111,9 @@ Portable verification builds the full package before running contracts. The opti
 **Til Full** appears alongside vanilla amounts in eligible Eat and Drink submenus.
 It uses only the clicked selection/stack, one native consumption action at a time,
 and stops when the chosen action's need is restored: Eat targets hunger, Drink targets thirst, even when the item restores both. It does not aim for maximum stuffed moodles or find extra items elsewhere.
-Open sealed items normally first; food requiring another item uses the normal Eat action instead. Favorited items are allowed for this explicit consumption action. Food and fluid vessels already in the player's main inventory may be worn, held, or attached: normal native consumption runs without LootBox unequipping them. Keep and personal-gear recovery protections still apply, as do native vessel-size and safety restrictions. Unsafe, changed, or unavailable items
+In single-player, **Open and Eat > Til Full** opens one selected can at a time and measures the exact food it produced before eating. It does not open another can when the hunger target is met. In multiplayer, **Open first for Til Full** opens one selected can without eating. Once its contents appear, right-click that opened food and choose **Eat > Til Full**. The game does not identify the replacement to the client when opening without an automatic bite.
+
+**Open and Drink > Til Full** opens eligible sealed vessels with the native recipe and drinks only after their contents can be checked. The normal opener is still required. Alcohol, poison and unsafe mixtures remain excluded; use a native amount instead. Food requiring an additional item for eating still uses the normal Eat action. Favorited items are allowed for this explicit consumption action. Food and fluid vessels already in the player's main inventory may be worn, held, or attached: normal native consumption runs without LootBox unequipping them. Keep and personal-gear recovery protections still apply, as do native vessel-size and safety restrictions. Unsafe, changed, or unavailable items
 stop the request; normal native admission rules still apply.
 
 In LootBox Settings, **Show Til Full in Eat and Drink** controls the menu entry.
@@ -124,7 +126,7 @@ preserved, so cancellation can remain pending during cleanup. No-progress or
 unavailable native actions stop safely rather than repeatedly queuing items.
 “Til Full” requests a stop at the observed target; native partial consumption and
 multiplayer latency mean it cannot promise exact quantities or instantaneous
-stopping. This feature has portable Lua boundary tests, not live-game acceptance.
+stopping. See [verification](docs/verification.md) for the coverage and limits of each workflow.
 
 
 ### Inventory navigation shortcuts

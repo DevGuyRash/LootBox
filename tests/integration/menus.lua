@@ -1253,7 +1253,7 @@ test("Til Full refusal uses compact native feedback without another window", fun
     ISInventoryPane, HaloTextHelper = oldPane, oldHalo
 end)
 
-test("Til Full respects disabled, unavailable and opening-recipe native actions", function(f)
+test("Til Full respects disabled, unavailable and stale native opening recipes", function(f)
     local oldPane = ISInventoryPane
     ISInventoryPane = {getActualItems = function() return {f.apple} end}
     ISInventoryPaneContextMenu.onEatItems = function() end
@@ -1271,6 +1271,43 @@ test("Til Full respects disabled, unavailable and opening-recipe native actions"
         assert(#child.options == 1, mode)
     end
     ISInventoryPane = oldPane
+end)
+
+test("Til Full follows a native Open and Eat or Drink recipe without relying on labels", function(f)
+    local oldPane, oldManager, oldClient = ISInventoryPane, getScriptManager, isClient
+    isClient=function() return false end
+    local recipe = {}
+    getScriptManager = function() return {getCraftRecipe=function(_,key) return key=="OpenMe" and recipe end} end
+    ISInventoryPane = {getActualItems = function(selected) return selected end}
+    ISInventoryPaneContextMenu.onEatItems, ISInventoryPaneContextMenu.onDrinkFluid = function() end, function() end
+    f.apple.getOpeningRecipe = function() return "OpenMe" end
+    f.preferences.tillFullEnabled = true
+    f.app.tillFull = function(_,items,kind,opening)
+        assert(#items == 1 and items[1] == f.apple and opening == recipe)
+        f.consumeKind = kind;return true
+    end
+    for _, kind in ipairs({"food","fluid"}) do
+        local parent, child = Menu:new(), Menu:new()
+        local root = parent:addOption("Native localized name", nil, nil);root.subOption=7
+        parent.getSubMenu = function() return child end
+        local original
+        if kind == "food" then original = child:addOption("1/4", {f.apple}, ISInventoryPaneContextMenu.onEatItems)
+        else original = child:addOption("All", f.apple, ISInventoryPaneContextMenu.onDrinkFluid);original.param4=f.apple end
+        original.param3 = recipe
+        Menus.inventoryMenu(0,parent,{f.apple});Menus.inventoryMenu(0,parent,{f.apple})
+        assert(#child.options==2 and child.options[1]==original and original.param3==recipe)
+        local added=child.options[2];assert(added.name=="Til Full" and added.itemForTexture==f.apple)
+        assert(added.onSelect(added.target) and f.consumeKind==kind)
+    end
+    isClient=function() return true end
+    local parent,child=Menu:new(),Menu:new()
+    local root=parent:addOption("Open and eat",nil,nil);root.subOption=7
+    parent.getSubMenu=function() return child end
+    child:addOption("All",{f.apple},ISInventoryPaneContextMenu.onEatItems).param3=recipe
+    Menus.inventoryMenu(0,parent,{f.apple})
+    assert(child.options[2].name=="Open first for Til Full")
+    assert(child.options[2].toolTip.description:find("without eating",1,true))
+    ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
 end)
 
 assert(#failures == 0, table.concat(failures, "\n"))

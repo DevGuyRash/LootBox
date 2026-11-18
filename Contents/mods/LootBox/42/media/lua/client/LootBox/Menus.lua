@@ -494,7 +494,7 @@ end
 local function runTillFull(selection)
     local app, err = App.get(selection.playerIndex)
     local ok
-    if app then ok, err = app:tillFull(selection.items, selection.kind) end
+    if app then ok, err = app:tillFull(selection.items, selection.kind, selection.openingRecipe) end
     if not ok then
         local player = getSpecificPlayer(selection.playerIndex)
         local message = "Til Full: " .. tostring(err or "The native action could not start")
@@ -545,23 +545,40 @@ local function consumptionMenu(playerIndex, parent, items)
     for _, root in ipairs(parent.options or {}) do
         local child = root.subOption and parent:getSubMenu(root.subOption)
         if child and not root.notAvailable then
-            local kind, anchor, already
+            local kind, anchor, openingRecipe, already
             for _, option in ipairs(child.options or {}) do
                 if option.onSelect == runTillFull then already = true end
-                if not option.notAvailable and option.param3 == nil then
+                if not option.notAvailable then
+                    local action, item
                     if nativeMenu.onEatItems and option.onSelect == nativeMenu.onEatItems then
-                        kind = "food"
-                        anchor = (ISInventoryPane.getActualItems(option.target) or {})[1]
+                        action, item = "food", (ISInventoryPane.getActualItems(option.target) or {})[1]
                     elseif nativeMenu.onDrinkFluid and option.onSelect == nativeMenu.onDrinkFluid then
-                        kind, anchor = "fluid", option.target
+                        action, item = "fluid", option.target
+                        if native(item, "IsoWorldInventoryObject") then item = call(item, "getItem") end
+                        if option.param4 and item ~= option.param4 then item = nil end
+                    end
+                    if item then
+                        local recipe = option.param3
+                        local name = recipe and call(item, "getOpeningRecipe")
+                        if not recipe or (name and getScriptManager():getCraftRecipe(name) == recipe) then
+                            kind, anchor, openingRecipe = action, item, recipe
+                        end
                     end
                 end
             end
             local snapshot = kind and selectedStack(anchor)
             if snapshot and #snapshot > 0 and not already then
-                local added = child:addOption("Til Full", {playerIndex = playerIndex, items = snapshot, kind = kind}, runTillFull)
+                local chooseOpened = kind == "food" and openingRecipe and isClient()
+                local title = chooseOpened and "Open first for Til Full" or "Til Full"
+                local added = child:addOption(title, {playerIndex = playerIndex, items = snapshot,
+                    kind = kind, openingRecipe = openingRecipe}, runTillFull)
                 -- Use vanilla item-icon rendering, including modded food/drink textures.
                 if added then added.itemForTexture = root.itemForTexture or snapshot[1] end
+                if chooseOpened then
+                    tooltip(added, title, "Opens one selected item without eating. In multiplayer, right-click the opened food and choose Eat > Til Full.")
+                elseif openingRecipe and kind == "fluid" then
+                    tooltip(added, title, "Open this vessel and drink until the selected need is satisfied. Til Full does not drink alcohol or unsafe mixtures.")
+                end
             end
         end
     end

@@ -19,10 +19,11 @@ local function safeFood(item)
         and not item:isAlcoholic() and (not item:isbDangerousUncooked() or item:isCooked())
 end
 
-local function fluidEffects(fluid)
+local function fluidEffects(fluid, opening)
     local properties = fluid:getProperties()
-    if fluid:isEmpty() or not fluid:canPlayerEmpty() or fluid:isPoisonous() or fluid:isTainted()
-        or properties:getPoison() > 0 or properties:getAlcohol() > 0 or properties:getFoodSicknessChange() > 0 then
+    if properties:getAlcohol() > 0 then return nil, "Til Full does not drink alcohol; choose a normal Drink amount instead" end
+    if fluid:isEmpty() or (not opening and not fluid:canPlayerEmpty()) or fluid:isPoisonous() or fluid:isTainted()
+        or properties:getPoison() > 0 or properties:getFoodSicknessChange() > 0 then
         return nil, "This drink is empty, sealed, or unsafe"
     end
     local sample = fluid:createFluidSample()
@@ -56,7 +57,7 @@ function TillFull.portion(hunger, thirst, hrelief, trelief, both, kind)
     return math.min(1, fraction)
 end
 
-function TillFull.new(player, world, items, kind, both)
+function TillFull.new(player, world, items, kind, both, openingRecipe)
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption action" end
     if type(items) ~= "table" then return nil, "Choose an item stack" end
     local records, seen = {}, {}
@@ -73,7 +74,7 @@ function TillFull.new(player, world, items, kind, both)
     end
     if #records == 0 or #records > 4096 then return nil, "Choose a nonempty bounded item stack" end
     return setmetatable({player = player, world = world, records = records, kind = kind, both = both == true,
-        index = 1, count = 0, native = Adapter.new(player), state = "running", attempts = 0}, TillFull)
+        index = 1, count = 0, native = Adapter.new(player), state = "running", attempts = 0, openingRecipe = openingRecipe}, TillFull)
 end
 
 function TillFull:inspect(record)
@@ -82,22 +83,25 @@ function TillFull:inspect(record)
         or (source ~= record.source and source ~= self.player:getInventory()) then return nil, "The selected item moved or changed" end
     local protected, reason = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
     if protected then return nil, "Protected: " .. tostring(reason or "selected item") end
-    if item:isSealed() then return nil, "Open this item normally before using Til Full" end
+    local opening = self.openingRecipe and not record.opened and (item:isSealed()
+        or (self.kind == "food" and item:getScriptItem():isCantEat()))
+    if item:isSealed() and not opening then return nil, "Open this item normally before using Til Full" end
     local hunger, thirst
     if self.kind == "food" then
-        if not instanceof(item, "Food") or not safeFood(item) or item:getScriptItem():isCantEat() then return nil, "This food is not safe to consume automatically" end
+        if not instanceof(item, "Food") or not safeFood(item) or (not opening and item:getScriptItem():isCantEat()) then return nil, "This food is not safe to consume automatically" end
         local required = item.getRequireInHandOrInventory and item:getRequireInHandOrInventory()
         if required and required:size() > 0 then return nil, "Use the normal Eat action for food requiring another item" end
+        if opening then return {opening = true} end
         hunger, thirst = -item:getHungerChange(), -item:getThirstChange()
     else
         if instanceof(item, "Food") and not safeFood(item) then return nil, "This fluid's food container is unsafe" end
         local fluid = item:getFluidContainer()
         if not fluid or fluid:getCapacity() > 3 then return nil, "Use an open drinking vessel" end
-        hunger, thirst = fluidEffects(fluid)
+        hunger, thirst = fluidEffects(fluid, opening)
         if hunger == nil then return nil, thirst end
     end
     if not finite(hunger) or not finite(thirst) then return nil, "The item's nutrition is unavailable" end
-    return {hunger = hunger, thirst = thirst}
+    return {hunger = hunger, thirst = thirst, opening = opening}
 end
 
 function TillFull:alreadySatisfied()
@@ -105,13 +109,16 @@ function TillFull:alreadySatisfied()
     if not self.both then return (self.kind == "food" and hunger <= 0) or (self.kind == "fluid" and thirst <= 0) end
     local effects = self:inspect(self.records[self.index])
     if not effects then return false end
+    -- Closed cans expose no relief values. Do not open one solely to discover
+    -- whether it helps thirst after hunger is already satisfied.
+    if effects.opening and self.kind == "food" then return hunger <= 0 end
     local portion = TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, true, self.kind)
     return portion ~= nil and portion <= 0
 end
 
 function TillFull:finish(state, reason)
     self.state, self.reason = state, reason
-    self.records, self.inflight, self.confirmation = nil, nil, nil
+    self.records, self.inflight, self.confirmation, self.opening = nil, nil, nil, nil
 end
 
 function TillFull:isBusy() return self.state == "running" or self.state == "cancelling" end
@@ -151,13 +158,37 @@ function TillFull:step()
         before.lastHunger, before.lastThirst = hunger, thirst
     end
     if self.native:isBusy() then
-        local done, reason = self.native:poll()
+        local done, reason, opened = self.native:poll()
         if done == nil then return end
         if self.state == "cancelling" then self:finish("cancelled", self.reason); return end
         if self.stopReason then self:finish("cancelled", self.stopReason); return end
         if self.targetReached then self:finish("finished", "The selected need target is satisfied"); return end
         if not done then self:finish("cancelled", reason or "Native consumption was interrupted"); return end
-        self.confirmation = getTimestampMs() + 2000
+        if self.opening then
+            self.opening = nil
+            if reason == "chooseOpened" and not opened and self.kind == "food" and self.openingRecipe
+                and isClient and isClient() and self.count == 0 then
+                if hunger <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
+                if self.player:isDead() or self.player:isAsleep() then
+                    self:finish("cancelled", "The player cannot consume now"); return
+                end
+                self.openedFoodPrompt = "When the opened food appears, right-click it and choose Eat > Til Full."
+                self:finish("finished", self.openedFoodPrompt)
+                return
+            end
+            if reason ~= "opened" or not opened then
+                self:finish("failed", "The opened item was not confirmed"); return
+            end
+            -- The adapter supplies only the causally identified native output.
+            -- Never discover another item by type or position in the inventory.
+            local previous = self.records[self.index]
+            local source = self.player:getInventory()
+            if opened == previous.item and opened:getID() == previous.id then source = previous.source end
+            self.records[self.index] = {item = opened, id = opened:getID(), fullType = tostring(opened:getFullType()),
+                source = source, opened = true}
+        else
+            self.confirmation = getTimestampMs() + 2000
+        end
     end
     if self.state == "cancelling" then self:finish("cancelled", self.reason); return end
     if self.player:isDead() or self.player:isAsleep() then self:finish("cancelled", "The player cannot consume now"); return end
@@ -189,10 +220,33 @@ function TillFull:step()
     if not record then self:finish("finished", "The selected stack is exhausted"); return end
     local effects, reason = self:inspect(record)
     if not effects then self:finish("cancelled", reason); return end
-    local portion = TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both, self.kind)
+    -- A closed can has no native hunger relief until its replacement exists.
+    local portion = effects.opening and self.kind == "food" and (hunger > 0 and 1 or 0)
+        or TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both, self.kind)
     if portion == nil then self:finish("cancelled", "This item cannot restore the need selected by Eat or Drink"); return end
     if portion <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
     if self.attempts >= 256 then self:finish("cancelled", "Til Full reached its bounded action limit"); return end
+    if effects.opening then
+        self.opening = true
+        local ok, failure = self.native:beginOpen(record.item, self.kind, self.openingRecipe, function()
+            local current, problem = self:inspect(record)
+            if not current then
+                self.stopReason = problem or "The selected item is no longer safe to open"
+                return true
+            end
+            local h, t = needs(self.player)
+            local fraction = current.opening and self.kind == "food" and (h > 0 and 1 or 0)
+                or TillFull.portion(h, t, current.hunger, current.thirst, self.both, self.kind)
+            self.targetReached = fraction ~= nil and fraction <= 0
+            return self.targetReached
+        end)
+        self.attempts = self.attempts + 1
+        if not ok then
+            self.reason = failure or "The native opening action could not start"
+            if self.native:isBusy() then self.state = "cancelling" else self:finish("cancelled", self.reason) end
+        end
+        return
+    end
     local quantity = remaining(record.item, self.kind)
     if not finite(quantity) or quantity <= 0 then self:finish("cancelled", "The selected quantity is unavailable"); return end
     local expectedRemaining = quantity * (1 - portion)
