@@ -109,6 +109,45 @@ test("nil ground consumption requires native floor association without queueing"
     ok,reason=f:begin()
     assert(not ok and reason=="The selected item is no longer in an available container")
 end)
+test("Floor fluid passes exact world wrapper to stock drink while retaining canonical item",function(f)
+    local fluid,inventory={},{}
+    f.item.container={getType=function() return "floor" end}
+    f.item.getFluidContainer=function(self) return self.fluid end
+    local ground={getItem=function() return f.item end,getSquare=function() return {} end,
+        getFluidContainer=function() return fluid end}
+    f.item.getWorldItem=function() return ground end
+    ISInventoryPaneContextMenu.onDrinkFluid=function(target,portion,player)
+        assert(target==ground and target:getItem()==f.item and player==f.player)
+        assert(f.item:getFluidContainer()==nil and target:getFluidContainer()==fluid)
+        f:dispatch("fluid",portion)
+        local transfer,consume=f.actions[1],f.actions[2]
+        consume.item=target:getItem();consume.fluidContainer=target:getFluidContainer()
+        local pickup=transfer.perform
+        function transfer:perform()
+            f.item.container=inventory;f.item.fluid=fluid
+            return pickup(self)
+        end
+    end
+    assert(f:begin("fluid",.2));assert(f.native.active.item==f.item)
+    f.actions[1]:perform()
+    assert(f.item:getContainer()==inventory and f.item:getFluidContainer()==fluid)
+    assert(f.actions[2].item==f.item and f.actions[2].fluidContainer==fluid)
+    f.actions[2]:perform();f.target=true -- restoration may change source/fullness
+    assert(f.native:poll()==nil)
+    f:finish();assert(f.native:poll()==true)
+end)
+test("stale or non-Floor world wrappers never replace ordinary drink targets",function()
+    for _,mode in ipairs({"crate","wrongItem","noSquare","noFluid"}) do
+        local f=fixture()
+        f.item.container={getType=function() return mode=="crate" and "crate" or "floor" end}
+        local ground={getItem=function() return mode=="wrongItem" and {} or f.item end,
+            getSquare=function() if mode~="noSquare" then return {} end end,
+            getFluidContainer=function() if mode~="noFluid" then return {} end end}
+        f.item.getWorldItem=function() return ground end
+        assert(f:begin("fluid"));assert(#f.calls==1)
+        f.native:cancel();f:finish();assert(f.native:poll()==false)
+    end
+end)
 test("reject invalid admission before wrapper dispatch",function(f)
     for _,p in ipairs({0,-1,1.01,math.huge,0/0}) do assert(not f.native:begin(f.item,"food",p,function() return false end)) end
     f.item.isSealed=function() return true end; assert(not f:begin())
@@ -357,6 +396,26 @@ test("MP opening adopts only unique direct same-ID same-type fluid vessel",funct
             assert(done==nil)
             f.time=2001;assert(f.native:poll()==false)
         end
+    end
+end)
+test("Floor opening uses stock world pickup prefix and exact canonical craft input",function(f)
+    openingFixture(f);f.item.kind="fluid"
+    f.source.getType=function() return "floor" end
+    local ground={getItem=function() return f.item end,getSquare=function() return {} end,
+        getFluidContainer=function() return {} end}
+    f.item.getWorldItem=function() return ground end
+    local pickup
+    ISInventoryPaneContextMenu.transferIfNeeded=function(player,target)
+        assert(player==f.player and target==ground)
+        pickup=f:action("WorldPickup");f.queue:addToQueue(pickup)
+    end
+    assert(f:open("fluid"));assert(f.queue.queue[1]==pickup and f.native.active.owned[pickup])
+    f.native:cancel("cancel floor pickup")
+    f:finish();assert(f.native:poll()==false)
+    assert(f.item.sealed)
+    for _,action in ipairs(f.actions) do
+        if action.Type=="ISHandcraftAction" then assert(not action.performed) end
+        if action.Type=="ReturnOpener" then assert(action.performed) end
     end
 end)
 test("nil ground opening requires native floor association without queueing",function(f)

@@ -153,6 +153,17 @@ function Native:cancel(reason)
     return true
 end
 
+local function fluidTarget(item)
+    local source = item:getContainer()
+    local ground = item.getWorldItem and item:getWorldItem()
+    if source and source.getType and source:getType() == "floor"
+        and ground and ground:getItem() == item and ground:getSquare()
+        and ground.getFluidContainer and ground:getFluidContainer() then
+        return ground
+    end
+    return item
+end
+
 local function missingSource(item)
     if item and item.getContainer and item:getContainer() then return end
     local ground = item and item.getWorldItem and item:getWorldItem()
@@ -189,7 +200,7 @@ function Native:begin(item, kind, portion, atTarget, needSampler)
         if kind == "food" then
             ISInventoryPaneContextMenu.eatItem(item, portion, self.player:getPlayerNum())
         else
-            ISInventoryPaneContextMenu.onDrinkFluid(item, portion, self.player)
+            ISInventoryPaneContextMenu.onDrinkFluid(fluidTarget(item), portion, self.player)
         end
     end)
     local seenConsume = false
@@ -256,8 +267,13 @@ function Native:beginOpen(item, kind, recipe, atTarget)
         if addToQueue then ISTimedActionQueue.add(action) end
         return action
     end
-    local dispatched, err = pcall(ISInventoryPaneContextMenu.OnNewCraft,
-        item, recipe, self.player:getPlayerNum(), false, 0)
+    local dispatched, err = pcall(function()
+        -- Stock Open-and-Drink first transfers its world wrapper, then gives
+        -- crafting the canonical selected inventory item, never the wrapper.
+        local target = kind == "fluid" and fluidTarget(item) or item
+        if target ~= item then ISInventoryPaneContextMenu.transferIfNeeded(self.player, target) end
+        ISInventoryPaneContextMenu.OnNewCraft(item, recipe, self.player:getPlayerNum(), false, 0)
+    end)
     ISEntityUI.HandcraftStart = startCraft
     local seenCraft = false
     for index, action in ipairs(queue.queue) do
@@ -304,11 +320,11 @@ function Native:poll()
     local queue = queueFor(self)
     if queue.current == state.consume then state.reachedConsumption = true end
     if not state.reason then
-        -- A successfully opened food may replace the exact original object.
-        -- Its controller revalidates the returned result and fullness before
-        -- consumption; don't interpret that expected replacement as cancellation.
+        -- Native consumption has already ended after perform. Its restoration
+        -- may move the item back to Floor or replace the original opened food.
+        -- Let cleanup drain; the controller verifies final quantity/fullness.
         local ok, target = true, false
-        if not state.opening or not state.performed then ok, target = pcall(state.atTarget) end
+        if not state.performed then ok, target = pcall(state.atTarget) end
         if not ok then state.reason = "Could not read current fullness"
         elseif target then state.reason = "Requested limit reached"
         elseif interrupted(self.player) then state.reason = "Player interrupted consumption"
