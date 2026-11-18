@@ -1123,10 +1123,11 @@ test("the manual Current job key can open persisted recovery after entering a wo
 end)
 
 test("install registers a native rebindable F7 action without duplicating existing bindings", function()
-    local registrations, menuInstalls = {tick = {}, key = {}}, 0
+    local registrations, menuInstalls = {tick = {}, key = {}, start = {}}, 0
     local options = {addTitle = function() end, addDescription = function() end, addButton = function() end}
     PZAPI = {ModOptions = {getOptions = function() return options end}}
     Events = {OnTick = {Add = function(fn) registrations.tick[#registrations.tick + 1] = fn end},
+        OnGameStart = {Add = function(fn) registrations.start[#registrations.start + 1] = fn end},
         OnKeyStartPressed = {Add = function(fn) registrations.key[#registrations.key + 1] = fn end}}
     package.loaded["LootBox/Menus"] = {install = function() menuInstalls = menuInstalls + 1 end}
     package.loaded.keyBinding = true
@@ -1134,7 +1135,7 @@ test("install registers a native rebindable F7 action without duplicating existi
     UI.installed = nil
     UI.install(); UI.install()
     assert(#keyBinding == 7 and keyBinding[1].key == 9 and keyBinding[3].value == "LootBoxCurrentJob" and keyBinding[3].key == 65)
-    assert(#registrations.tick == 1 and #registrations.key == 2 and menuInstalls == 1)
+    assert(#registrations.tick == 1 and #registrations.key == 2 and #registrations.start == 1 and menuInstalls == 1)
     assert(keyBinding[4].value == "LootBoxScrollTop" and keyBinding[4].key == 199)
     assert(keyBinding[5].value == "LootBoxScrollBottom" and keyBinding[5].key == 207)
     assert(keyBinding[6].value == "LootBoxScrollPageUp" and keyBinding[6].key == 201)

@@ -45,6 +45,47 @@ local function hoveredPane()
     return result
 end
 
+-- A changed scroll offset is not mouse input. Use screen coordinates, not
+-- pane-relative Y (which changes when the contents scroll under the pointer).
+local function holdHover(pane)
+    if not pane.lootBoxHoverHooks then
+        pane.lootBoxHoverHooks = true
+        for _, name in ipairs({"onMouseMove", "updateTooltip"}) do
+            local previous = pane[name]
+            pane[name] = function(self, ...)
+                local at = self.lootBoxHoverAt
+                if at and not self.doController and self.inventory == at.inventory and self:isMouseOver()
+                    and getMouseX() == at.x and getMouseY() == at.y then
+                    self.mouseOverOption = 0
+                    return
+                end
+                self.lootBoxHoverAt = nil
+                return previous(self, ...)
+            end
+        end
+        -- Native mouse-down and context menus consume the last hit-tested row.
+        -- Re-hit-test through the active list/grid view before a stationary click.
+        for _, name in ipairs({"onMouseDown", "onRightMouseUp", "onMouseWheel"}) do
+            local previous = pane[name]
+            pane[name] = function(self, ...)
+                if self.lootBoxHoverAt then
+                    self.lootBoxHoverAt = nil
+                    self:onMouseMove(0, 0)
+                end
+                return previous(self, ...)
+            end
+        end
+    end
+    pane.lootBoxHoverAt = {x = getMouseX(), y = getMouseY(), inventory = pane.inventory}
+    pane.mouseOverOption, pane.buttonOption = 0, 0
+    pane:hideButtons()
+    if pane.toolRender and pane.toolRender:isVisible() then
+        pane.toolRender:removeFromUIManager()
+        pane.toolRender:setVisible(false)
+    end
+    if pane.parent.onCharacter then Key.setHighlightDoors(pane.player, nil) end
+end
+
 function Navigation.onKeyStartPressed(key)
     local core = getCore()
     if core:isDoingTextEntry() or (UIManager and UIManager.isModalVisible and UIManager.isModalVisible())
@@ -62,10 +103,50 @@ function Navigation.onKeyStartPressed(key)
         end
     end
     if not action then return false end
+    local endpoint = action == "top" or action == "bottom"
+    local neat = NeatInventory
+    if endpoint and neat and ((neat.Settings and neat.Settings.panel) or (neat.Category and neat.Category.popup)) then
+        return false
+    end
     local pane = hoveredPane()
-    if not pane or not Navigation.scroll(pane, action) then return false end
+    if not pane or pane.dragging or pane.draggingMarquis or not Navigation.scroll(pane, action) then return false end
+    if endpoint then
+        if pane.ninvKeyMode and neat and neat.Keys and neat.Keys.leaveKeyMode then
+            neat.Keys.leaveKeyMode(pane)
+        end
+        holdHover(pane)
+    elseif pane.lootBoxHoverAt then
+        pane.lootBoxHoverAt = nil
+        pane:onMouseMove(0, 0)
+    end
     if GameKeyboard and GameKeyboard.eatKeyPress then GameKeyboard.eatKeyPress(key) end
-    return true
+    return true, endpoint
+end
+
+local neatKeyStart, lastNeatKey
+local function dispatch(key)
+    local handled, endpoint = Navigation.onKeyStartPressed(key)
+    if neatKeyStart then
+        if not endpoint then
+            if key ~= Keyboard.KEY_LSHIFT and key ~= Keyboard.KEY_RSHIFT then lastNeatKey = key end
+            return neatKeyStart(key)
+        end
+        -- Neat normally stops the previous held key at the start of an event.
+        -- Its repeat listener still runs, even when we own this endpoint.
+        local repeatTimer = NeatInventory.Shared and NeatInventory.Shared.Repeat
+        if lastNeatKey and repeatTimer then repeatTimer.stop(lastNeatKey) end
+        lastNeatKey = nil
+    end
+    return handled
+end
+local function attachNeatKeys()
+    -- NeatUI's independent Home/End listener also selects a row and enables
+    -- its controller tooltip. EatKeyPress does not stop other Lua listeners.
+    local keys = NeatInventory and NeatInventory.Keys
+    if keys and keys.leaveKeyMode and keys.onKeyStartPressed and keys.onKeyStartPressed ~= neatKeyStart then
+        Events.OnKeyStartPressed.Remove(keys.onKeyStartPressed)
+        neatKeyStart = keys.onKeyStartPressed
+    end
 end
 
 function Navigation.install()
@@ -80,7 +161,8 @@ function Navigation.install()
             keyBinding[#keyBinding + 1] = {value = binding.name, key = Keyboard[binding.key]}
         end
     end
-    Events.OnKeyStartPressed.Add(Navigation.onKeyStartPressed)
+    Events.OnKeyStartPressed.Add(dispatch)
+    Events.OnGameStart.Add(attachNeatKeys)
 end
 
 return Navigation
