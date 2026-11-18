@@ -6,14 +6,24 @@ CharacterStat = { HUNGER = {getMinimumValue=function() return 0 end}, THIRST = {
 function instanceof(item, name) return name == 'Food' and item.food end
 local created
 package.loaded['LootBox/TillFullNative'] = {new=function()
- local n = {busy=false, calls={}}
+ local n = {busy=false, calls={}, opens={}}
  function n:isBusy() return self.busy end
  function n:begin(item, kind, portion, target)
   self.busy=true; self.calls[#self.calls+1]={item=item,kind=kind,portion=portion}; self.target=target
   if self.refuse then return nil,'refused after preparation' end
   return true
  end
- function n:poll() if self.pending then return nil end; self.busy=false; return self.result ~= false, self.reason end
+ function n:beginOpen(item,kind,recipe,target)
+  self.busy=true;self.opening=true;self.opens[#self.opens+1]={item=item,kind=kind,recipe=recipe};self.target=target
+  if self.refuse then return nil,'opening refused after preparation' end
+  return true
+ end
+ function n:poll()
+  if self.pending then return nil end
+  self.busy=false
+  if self.opening then self.opening=false;return self.result ~= false,self.reason or 'opened',self.opened end
+  return self.result ~= false,self.reason
+ end
  function n:cancel() self.result=false end
  created=n; return n
 end}
@@ -38,7 +48,7 @@ local function food(id,relief,base)
  function f:getThirstChange() return -self.t end
  function f:getHungChange() return -self.h end
  function f:getBaseHunger() return -self.base end
- function f:getScriptItem() return {isCantEat=function() return false end} end
+ function f:getScriptItem() return {isCantEat=function() return f.cantEat or false end} end
  for _,name in ipairs({'isRotten','isBurnt','isFrozen','isTainted','isPoison','isAlcoholic','isbDangerousUncooked'}) do f[name]=function(self) return self.unsafe or false end end
  function f:getPoisonPower() return 0 end
  function f:getFoodSicknessChange() return 0 end
@@ -298,6 +308,139 @@ test('initial full food and fluid never dispatch even from external containers',
   local c=assert(Full.new(player(case[3],case[4]),world,{case[1]},case[2])); c:tick()
   assert(c.state=='finished' and #created.calls==0)
  end
+end)
+local recipe={name='OpenCan'}
+local function can(id)
+ local f=food(id,0);f.cantEat=true;return f
+end
+test('sealed food opens exact selected can before sizing its replacement portion',function()
+ local p=player(.1,0);local a,output,outside=can(10),food(20,.4),food(21,.4)
+ local c=assert(Full.new(p,world,{a},'food',false,recipe));c:tick()
+ assert(#created.opens==1 and created.opens[1].item==a and #created.calls==0)
+ created.pending=true;c:tick();assert(#created.calls==0)
+ created.pending=false;created.opened=output;a.source=nil;c:tick()
+ assert(#created.calls==1 and created.calls[1].item==output and c.count==0)
+ close(created.calls[1].portion,.25);assert(outside.h==.4)
+end)
+test('opening a fluid preserves its exact identity and rechecks need before consuming',function()
+ local p=player(0,.3);local a,fluid=bottle(10,.5);a.sealed=true
+ function fluid:canPlayerEmpty() return not a.sealed end
+ local c=assert(Full.new(p,world,{a},'fluid',false,recipe));c:tick()
+ assert(#created.opens==1 and #created.calls==0)
+ a.sealed=false;created.opened=a;p.t=.1;c:tick()
+ assert(created.calls[1].item==a);close(created.calls[1].portion,.2)
+end)
+test('already satisfied packaged food never opens even without source relief',function()
+ local c=assert(Full.new(player(0,.5),world,{can(1)},'food',false,recipe))
+ assert(c:alreadySatisfied());c:tick();assert(c.state=='finished' and #created.opens==0 and #created.calls==0)
+end)
+test('unsafe and protected cans are not opened and unsafe output is not eaten',function()
+ for _,flag in ipairs({'unsafe','protected'}) do
+  local a=can(1);a[flag]=true;local c=assert(Full.new(player(.1,0),world,{a},'food',false,recipe));c:tick()
+  assert(c.state=='cancelled' and #created.opens==0)
+ end
+ local c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c:tick()
+ created.opened=food(2,.2);created.opened.unsafe=true;c:tick()
+ assert(c.state=='cancelled' and #created.calls==0)
+end)
+test('opening cannot guess missing output or accept one left outside main inventory',function()
+ for _,mode in ipairs({'missing','external','sealed'}) do
+  local c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c:tick()
+  if mode~='missing' then created.opened=food(2,.2)
+   if mode=='external' then created.opened.source={} else created.opened.sealed=true end
+  end
+  c:tick();assert(not c:isBusy() and #created.calls==0 and #created.opens==1,mode)
+ end
+end)
+test('cancel during opening waits cleanup and never consumes confirmed output',function()
+ local c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c:tick()
+ created.pending=true;c:cancel();c:tick();assert(c:isBusy())
+ created.pending=false;created.opened=food(2,.2);c:tick()
+ assert(c.state=='cancelled' and #created.calls==0 and #created.opens==1)
+end)
+test('target reached during opening does not consume the newly opened food',function()
+ local p=player(.1,0);local c=assert(Full.new(p,world,{can(1)},'food',false,recipe));c:tick()
+ p.h=0;created.opened=food(2,.2);c:tick()
+ assert(c.state=='finished' and #created.calls==0 and #created.opens==1)
+end)
+test('opening refusal after preparation retains cancellation cleanup',function()
+ local c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));created.refuse=true;created.pending=true
+ c:tick();assert(c.state=='cancelling' and #created.opens==1);c:tick();assert(c:isBusy())
+ created.pending=false;created.result=false;c:tick();assert(c.state=='cancelled' and #created.calls==0)
+end)
+test('selected packaged stack opens one can at a time only after exact consumption confirmation',function()
+ local p=player(.3,0);local a,b,outside=can(1),can(2),can(3)
+ local c=assert(Full.new(p,world,{a,b},'food',false,recipe));c:tick()
+ local out=food(10,.2);created.opened=out;c:tick();assert(#created.opens==1 and #created.calls==1)
+ c:tick();assert(#created.opens==1);out.source=nil;p.h=.1;c:tick()
+ assert(#created.opens==2 and created.opens[2].item==b and outside.cantEat)
+ created.opened=food(20,.2);c:tick();assert(#created.calls==2);close(created.calls[2].portion,.5)
+end)
+test('opening target and protection changes stop without consuming',function()
+ local p=player(.1,0);local a=can(1);local c=assert(Full.new(p,world,{a},'food',false,recipe));c:tick()
+ p.h=0;assert(created.target());created.result=false;c:tick();assert(c.state=='finished' and #created.calls==0)
+ a=can(2);c=assert(Full.new(player(.1,0),world,{a},'food',false,recipe));c:tick()
+ a.protected=true;assert(created.target());created.result=false;c:tick()
+ assert(c.state=='cancelled' and #created.calls==0)
+end)
+test('opening never bypasses unsafe fluid or bounded work limits',function()
+ local a,fluid=bottle(1,.5);a.sealed=true;fluid.poison=true
+ local c=assert(Full.new(player(0,.3),world,{a},'fluid',false,recipe));c:tick()
+ assert(c.state=='cancelled' and #created.opens==0)
+ c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c.attempts=256;c:tick()
+ assert(c.state=='cancelled' and #created.opens==0)
+end)
+local multiplayer=false
+function isClient() return multiplayer end
+test('multiplayer opening hands back exact choice without consuming or opening stack peers',function()
+ multiplayer=true
+ local first,second=can(1),can(2)
+ local c=assert(Full.new(player(.3,0),world,{first,first,second},'food',false,recipe));c:tick()
+ assert(#created.opens==1 and #c.records==2)
+ created.reason='chooseOpened';c:tick()
+ assert(c.state=='finished' and c.count==0 and c.records==nil and #created.calls==0 and #created.opens==1)
+ assert(c.openedFoodPrompt=='When the opened food appears, right-click it and choose Eat > Til Full.')
+ c.openedFoodPrompt=nil;c:tick();assert(c.openedFoodPrompt==nil and #created.opens==1)
+ multiplayer=false
+end)
+test('opening fallback never prompts after cancellation refusal or satisfied hunger',function()
+ multiplayer=true
+ for _,mode in ipairs({'cancel','refuse','full','dead'}) do
+  local p=player(.3,0);local c=assert(Full.new(p,world,{can(1),can(2)},'food',false,recipe));c:tick()
+  created.reason='chooseOpened'
+  if mode=='cancel' then c:cancel() elseif mode=='refuse' then created.result=false
+  elseif mode=='full' then p.h=0 else p.dead=true end
+  c:tick();assert(not c:isBusy() and c.openedFoodPrompt==nil and #created.calls==0 and #created.opens==1,mode)
+ end
+ multiplayer=false
+end)
+test('opening fallback is not accepted from single player or a fluid action',function()
+ local c=assert(Full.new(player(.3,0),world,{can(1)},'food',false,recipe));c:tick()
+ created.reason='chooseOpened';c:tick();assert(c.state=='failed' and c.openedFoodPrompt==nil)
+ multiplayer=true;local item=bottle(2,.5);item.sealed=true
+ c=assert(Full.new(player(0,.3),world,{item},'fluid',false,recipe));c:tick()
+ created.reason='chooseOpened';c:tick();assert(c.state=='failed' and c.openedFoodPrompt==nil)
+ multiplayer=false
+end)
+test('same exact opened fluid can return to its original bag but no unrelated bag',function()
+ for _,move in ipairs({'original','other','changed-id'}) do
+  local bag={};local item=bottle(1,.5);item.source=bag;item.sealed=true
+  local c=assert(Full.new(player(0,.3),world,{item},'fluid',false,recipe));c:tick()
+  item.source=inventory
+  item.sealed=false;created.opened=item
+  if move=='other' then item.source={} else item.source=bag end
+  if move=='changed-id' then item.id=99 end
+  c:tick()
+  if move=='original' then assert(#created.calls==1 and created.calls[1].item==item)
+  else assert(#created.calls==0 and c.state=='cancelled',move) end
+ end
+end)
+test('both-needs mode does not open an unknown can solely for thirst but preserves known food relief',function()
+ local c=assert(Full.new(player(0,.2),world,{can(1)},'food',true,recipe))
+ assert(c:alreadySatisfied());c:tick();assert(c.state=='finished' and #created.opens==0)
+ local known=food(2,.2);known.t=.4
+ c=assert(Full.new(player(0,.2),world,{known},'food',true,recipe));c:tick()
+ assert(#created.calls==1 and #created.opens==0);close(created.calls[1].portion,.5)
 end)
 print('Til Full controller: '..count..' scenarios passed')
 

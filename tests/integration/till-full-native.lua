@@ -27,7 +27,7 @@ local function fixture()
         f.actions[#f.actions+1] = a
         return a
     end
-    ISTimedActionQueue = {getTimedActionQueue = function() return q end}
+    ISTimedActionQueue = {getTimedActionQueue = function() return q end,add=function(a) return q:addToQueue(a) end}
     function f:dispatch(kind, portion)
         f.calls[#f.calls+1] = {kind,portion}
         if not f.noPrep then q:addToQueue(f:action("Transfer")) end
@@ -208,6 +208,153 @@ test("real controller and adapter wait for deferred item and nutrition completio
     c:tick();assert(#f.calls==1 and c:isBusy())
     f.time=100;item.h=.1;f.player.h=0 -- Deferred completion from game boundary.
     c:tick();assert(#f.calls==1 and c.state=='finished')
+end)
+
+local function openingFixture(f)
+    local inventory, source, recipe = {}, {}, {}
+    f.inventory, f.source, f.recipe = inventory, source, recipe
+    f.player.getInventory = function() return inventory end
+    f.item = {id=1, sealed=true, container=source, kind="food"}
+    function f.item:getID() return self.id end
+    function f.item:getContainer() return self.container end
+    function f.item:isSealed() return self.sealed end
+    function f.item:getOpeningRecipe() return "OpenTest" end
+    function f.item:getFluidContainer() return self.kind=="fluid" and {} or nil end
+    f.outputs={}
+    isClient=function() return f.client==true end
+    instanceof=function(item,name) return name=="Food" and item.kind=="food" end
+    ArrayList={new=function()
+        return {values={},size=function(self) return #self.values end,get=function(self,i) return self.values[i+1] end}
+    end}
+    getScriptManager=function() return {getCraftRecipe=function(_,name) return name=="OpenTest" and recipe end} end
+    ISEntityUI={HandcraftStart=function(player,logic,force,addToQueue,eat)
+        assert(player==f.player and not force and eat==0)
+        if f.noCraft then return end
+        local a=f:action("ISHandcraftAction")
+        a.character=f.player;a.craftRecipe=recipe;a.eatPercentage=eat
+        a.manualInputs={[1]={size=function() return 1 end,get=function() return f.wrongInput or f.item end}}
+        if f.autoInputs then a.manualInputs=false end
+        a.logic={getRecipeData=function()
+            return {getAllCreatedItems=function()
+                return {size=function() return #f.outputs end,get=function(_,i) return f.outputs[i+1] end}
+            end}
+        end}
+        local perform=a.perform
+        function a:perform()
+            if f.unseal then f.item.sealed=false;f.item.container=inventory end
+            return perform(self)
+        end
+        if addToQueue then f.queue:addToQueue(a) end
+        return a
+    end}
+    f.originalHandcraftStart=ISEntityUI.HandcraftStart
+    ISInventoryPaneContextMenu.OnNewCraft=function(item,r,p,all,eat)
+        assert(item==f.item and r==recipe and p==2 and all==false and eat==0)
+        f.calls[#f.calls+1]={"opening",eat}
+        f.queue:addToQueue(f:action("Transfer"))
+        ISEntityUI.HandcraftStart(f.player,{},false,true,eat)
+        f.queue:addToQueue(f:action("ReturnOpener"))
+    end
+    function f:open(kind) return self.native:beginOpen(self.item,kind or "food",recipe,function() return self.target end) end
+    function f:output(kind)
+        local result={kind=kind or "food",container=inventory}
+        function result:getContainer() return self.container end
+        function result:isSealed() return false end
+        function result:getFluidContainer() return self.kind=="fluid" and {} or nil end
+        f.outputs[#f.outputs+1]=result
+        return result
+    end
+end
+
+test("opening dispatch never requests native auto-eat and returns exact craft result",function(f)
+    openingFixture(f)
+    local result=f:output()
+    assert(f:open());assert(f.native:poll()==nil);f:finish()
+    local done,reason,item=f.native:poll()
+    assert(done and reason=="opened" and item==result and #f.calls==1 and f.calls[1][2]==0)
+end)
+test("MP fluid opening waits for exact item unseal not client perform",function(f)
+    openingFixture(f);f.client=true;f.item.kind="fluid"
+    assert(f:open("fluid"));f:finish();assert(f.native:poll()==nil)
+    f.time=500;assert(f.native:poll()==nil)
+    f.item.sealed=false;f.item.container=f.inventory
+    local done,reason,item=f.native:poll()
+    assert(done and reason=="opened" and item==f.item)
+end)
+test("MP food opens only and asks the user to choose the actual result",function(f)
+    openingFixture(f);f.client=true
+    assert(f:open());assert(f.native:poll()==nil);f:finish()
+    local done,reason,item=f.native:poll()
+    assert(done and reason=="chooseOpened" and item==nil and #f.calls==1 and f.calls[1][2]==0)
+    assert(not f.native:isBusy() and #f.queue.queue==0)
+    assert(f.item.sealed) -- client perform is not an acknowledgement of server output.
+end)
+test("MP food fallback never reports a choice after target or cancellation stops opening",function()
+    for _,mode in ipairs({"target","cancel","timeout","missing"}) do
+        local f=fixture();openingFixture(f);f.client=true;assert(f:open())
+        if mode=="target" then f.target=true
+        elseif mode=="cancel" then f.native:cancel("User cancelled")
+        elseif mode=="timeout" then f.time=120001
+        else f.queue.queue={};f.queue.current=nil end
+        f.native:poll();f:finish()
+        local done,reason,item=f.native:poll()
+        assert(done==false and reason~="chooseOpened" and item==nil and #f.calls==1)
+    end
+end)
+test("opening requires current recipe and empty queue before native dispatch",function(f)
+    openingFixture(f)
+    assert(not f.native:beginOpen(f.item,"food",{},function() return false end))
+    f.target=true;assert(not f:open());f.target=false
+    f.queue:addToQueue(f:action("Foreign"));assert(not f:open() and #f.calls==0)
+end)
+test("missing or ambiguous opening output never guesses an inventory peer",function(f)
+    openingFixture(f);f.item.sealed=false
+    assert(f:open());f:finish();assert(f.native:poll()==nil)
+    f.time=2001;local done,reason=f.native:poll()
+    assert(done==false and reason:find("not confirmed") and #f.calls==1)
+    f.outputs={};f:output();f:output();assert(f:open());f:finish()
+    done,reason=f.native:poll();assert(done==false and reason:find("multiple"))
+end)
+test("MP unseal requires stable item identity and authorized source",function(f)
+    openingFixture(f);f.client=true;f.item.kind="fluid"
+    assert(f:open("fluid"));f:finish()
+    f.item.sealed=false;f.item.id=2;assert(f.native:poll()==nil)
+    f.item.id=1;f.item.container={};assert(f.native:poll()==nil)
+    f.time=2001;assert(f.native:poll()==false and #f.calls==1)
+end)
+test("opening stop preserves returned opener and foreign work",function(f)
+    openingFixture(f)
+    assert(f:open());f.queue.current:perform()
+    local craft=f.queue.current;local foreign=f:action("Foreign");f.queue:addToQueue(foreign)
+    f.native:cancel("User cancelled")
+    assert(craft.stopped and f.queue.current.Type=="ReturnOpener")
+    f.queue.current:perform()
+    local done,reason=f.native:poll()
+    assert(done==false and reason=="User cancelled" and f.queue.current==foreign)
+    assert(not foreign.cancelled and not foreign.stopped and #f.calls==1)
+end)
+test("failed opening preparation cancels owned actions without consumption",function(f)
+    openingFixture(f);f.noCraft=true
+    assert(not f:open());f:finish();local done=f.native:poll()
+    assert(done==false and not f.native:isBusy() and #f.queue.queue==0)
+end)
+test("native manual input binding rejects a substituted peer before craft admission",function()
+    for _,mode in ipairs({"other","auto"}) do
+        local f=fixture();openingFixture(f)
+        if mode=="other" then f.wrongInput={} else f.autoInputs=true end
+        local ok,reason=f:open()
+        assert(not ok and reason:find("bind") and f.queue.current.Type=="ReturnOpener")
+        assert(ISEntityUI.HandcraftStart==f.originalHandcraftStart)
+        for _,action in ipairs(f.queue.queue) do assert(action.Type~="ISHandcraftAction") end
+        f:finish();assert(f.native:poll()==false)
+    end
+end)
+test("scoped craft guard restores the original factory after native exceptions",function(f)
+    openingFixture(f)
+    ISInventoryPaneContextMenu.OnNewCraft=function() error("native dispatch failure") end
+    assert(not f:open())
+    assert(ISEntityUI.HandcraftStart==f.originalHandcraftStart)
+    assert(f.native:poll()==false)
 end)
 
 print("PASS "..tests.." Till Full native boundary scenarios")
