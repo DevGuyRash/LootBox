@@ -340,6 +340,31 @@ function TillFull:step()
             quantity = record.seenInMain and record.absentAtEndpoints and before.expectedRemaining <= 0 and 0 or nil
         end
         local consumed = finite(quantity) and quantity <= before.expectedRemaining + 0.000001
+        if before.partial then
+            consumed = not record.identityUnresolved and finite(quantity)
+                and math.abs(quantity - before.expectedRemaining) <= 0.000001
+        end
+        -- Only complete items may continue the bounded selected stack. A
+        -- delayed client stat acknowledgement may be accepted at display
+        -- precision, but cannot increase the original remaining need budget.
+        if not improved and consumed and quantity == 0 and not before.partial and before.expectedRemaining <= 0
+            and (record.identityUnresolved or not self:sourceProblem(record))
+            and isClient and isClient() and not receipt and getTimestampMs() >= self.confirmation then
+            local function displayAck(strict, initial, current, expected, required)
+                return strict or (initial >= 0.01 and required >= 0.01
+                    and math.floor((initial - current) * 100 + 0.5) >= 1
+                    and math.floor(math.abs(current - expected) * 100 + 0.5) == 0)
+            end
+            local h = displayAck(hungerConfirmed, before.hunger, hunger, before.expectedHunger, before.requiredHunger)
+            local t = displayAck(thirstConfirmed, before.thirst, thirst, before.expectedThirst, before.requiredThirst)
+            local acknowledged = self.kind == "food" and h or self.kind == "fluid" and t
+            if self.both then acknowledged = (before.hrelief <= 0 or h) and (before.trelief <= 0 or t) end
+            if acknowledged then
+                improved = true
+                self.needCap = {hunger = math.min(self.needCap and self.needCap.hunger or math.huge, before.budgetHunger),
+                    thirst = math.min(self.needCap and self.needCap.thirst or math.huge, before.budgetThirst)}
+            end
+        end
         -- Need and item packets may arrive in either order. Never advance from
         -- an intermediate progress update or an unrelated need improvement.
         if not improved or not consumed then
@@ -354,7 +379,7 @@ function TillFull:step()
             if self.both then
                 substantial = (before.hrelief <= 0 or substantialHunger) and (before.trelief <= 0 or substantialThirst)
             end
-            if isClient and isClient() and not receipt and before.partial and before.coversTarget
+            if isClient and isClient() and not receipt and before.partial
                 and not record.identityUnresolved and not self:sourceProblem(record)
                 and finite(quantity) and math.abs(quantity - before.expectedRemaining) <= 0.000001
                 and substantial then
@@ -364,17 +389,15 @@ function TillFull:step()
             self:finish("failed", "Consumption was not fully confirmed; no more items were queued"); return
         end
         self.count = self.count + 1
-        if measured and before.coversTarget and before.partial then
-            self:finish("finished", "The requested portion satisfied the need measured before consumption")
-            return
+        if self.needCap then
+            self.needCap.hunger = math.min(self.needCap.hunger, before.budgetHunger)
+            self.needCap.thirst = math.min(self.needCap.thirst, before.budgetThirst)
         end
-        -- A fully acknowledged planned client portion is also terminal. Do
-        -- not turn post-dispatch metabolism into permission for another nibble;
-        -- whole-item exhaustion still follows the selected-stack path below.
-        if isClient and isClient() and before.partial and before.coversTarget
-            and not record.identityUnresolved and finite(quantity)
-            and math.abs(quantity - before.expectedRemaining) <= 0.000001 then
-            self:finish("finished", "Requested portion consumed; no more items were queued")
+        -- A planned partial had enough nutrition by construction. Floating
+        -- subtraction or new metabolism is never permission for another bite.
+        if before.partial then
+            self:finish("finished", measured and "The requested portion satisfied the need measured before consumption"
+                or "Requested portion consumed; no more items were queued")
             return
         end
         self.confirmation, self.inflight = nil, nil
@@ -391,9 +414,11 @@ function TillFull:step()
     if not record then self:finish("finished", "The selected stack is exhausted"); return end
     local effects, reason = self:inspect(record)
     if not effects then self:finish("cancelled", reason); return end
+    local planHunger = math.min(hunger, self.needCap and self.needCap.hunger or hunger)
+    local planThirst = math.min(thirst, self.needCap and self.needCap.thirst or thirst)
     -- A closed can has no native hunger relief until its replacement exists.
-    local portion = effects.opening and self.kind == "food" and (hunger > 0 and 1 or 0)
-        or TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both, self.kind)
+    local portion = effects.opening and self.kind == "food" and (planHunger > 0 and 1 or 0)
+        or TillFull.portion(planHunger, planThirst, effects.hunger, effects.thirst, self.both, self.kind)
     if portion == nil then self:finish("cancelled", "This item cannot restore the need selected by Eat or Drink"); return end
     if portion <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
     if self.attempts >= 256 then self:finish("cancelled", "Til Full reached its bounded action limit"); return end
@@ -425,10 +450,6 @@ function TillFull:step()
     local expectedHunger = math.max(0, hunger - math.max(0, effects.hunger) * portion)
     local expectedThirst = math.max(0, thirst - math.max(0, effects.thirst) * portion)
     local partial = portion < 1
-    local coversTarget = self.kind == "food" and expectedHunger <= 0 or self.kind == "fluid" and expectedThirst <= 0
-    if self.both then
-        coversTarget = (effects.hunger <= 0 or expectedHunger <= 0) and (effects.thirst <= 0 or expectedThirst <= 0)
-    end
     if self.kind == "food" then
         local base, remaining = record.item:getBaseHunger(), record.item:getHungChange()
         if not finite(base) or not finite(remaining) or base >= 0 or remaining >= 0 then
@@ -439,7 +460,9 @@ function TillFull:step()
     if not finite(portion) or portion <= 0 then self:finish("cancelled", "The native portion is invalid"); return end
     self.inflight = {hunger = hunger, thirst = thirst, hrelief = effects.hunger, trelief = effects.thirst,
         item = record.item, id = record.id, expectedRemaining = expectedRemaining,
-        partial = partial, coversTarget = coversTarget,
+        partial = partial,
+        budgetHunger = math.max(0, planHunger - math.max(0, effects.hunger) * (quantity - expectedRemaining) / quantity),
+        budgetThirst = math.max(0, planThirst - math.max(0, effects.thirst) * (quantity - expectedRemaining) / quantity),
         requiredHunger = hunger - expectedHunger, requiredThirst = thirst - expectedThirst,
         lastHunger = hunger, lastThirst = thirst, hungerDrift = 0, thirstDrift = 0,
         expectedHunger = expectedHunger, expectedThirst = expectedThirst}
