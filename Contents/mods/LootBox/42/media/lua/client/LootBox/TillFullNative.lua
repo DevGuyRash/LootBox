@@ -28,18 +28,91 @@ local function finite(value)
 end
 local function pack(...) return {n = select("#", ...), ...} end
 
--- In SP these callbacks apply nutrition synchronously. Measuring only their
--- contribution excludes metabolism between ticks without widening a tolerance.
-local function observeNeeds(state, action)
+local function liveCancellation(self, state)
+    return state.reason or interrupted(self.player)
+        or (Keyboard and isKeyDown and isKeyDown(Keyboard.KEY_ESCAPE))
+end
+
+local function exactFoodReturn(self, state, action, queue)
+    if isClient() or isServer() or state.opening or state.kind ~= "food"
+        or liveCancellation(self, state) or not state.reachedConsumption
+        or not state.restore[action] or action.Type ~= "ISInventoryTransferAction"
+        or queue.current == action or action.action or type(action.isStarted) ~= "function"
+        or action:isStarted() or not state.nativeCancel or not state.nativeCancel[action] then return false end
+    local item, source = state.item, state.source
+    if not source or source:getType() ~= "floor"
+        or action.item ~= item or item:getID() ~= state.itemId
+        or action.srcContainer ~= self.player:getInventory() or action.destContainer ~= source then return false end
+    -- Stock constructor shape only; never defer a merged batch or another tool.
+    local list = action.queueList
+    return action.items == nil and type(list) == "table" and #list == 1
+        and type(list[1].items) == "table" and #list[1].items == 1 and list[1].items[1] == item
+end
+
+local function depletedFood(self, state)
+    local item, receipt = state.item, state.receipt
+    if not state.performSucceeded or not receipt or state.receiptInvalid or receipt.item ~= item
+        or not finite(receipt.hunger) or not finite(receipt.thirst)
+        or receipt.hunger <= 0 or receipt.thirst < 0
+        or item:getContainer() or (item.getWorldItem and item:getWorldItem()) then return false end
+    for _, container in ipairs({state.source, self.player:getInventory()}) do
+        local items = container:getItems()
+        for index = 0, items:size() - 1 do
+            if items:get(index):getID() == state.itemId then return false end
+        end
+    end
+    return true
+end
+
+local function settleReturn(self, state, completed)
+    local action = state.deferredReturn
+    if not action then return end
+    state.deferredReturn = nil
+    local queue = queueFor(self)
+    local checked, obsolete = pcall(function()
+        return completed and #queue.queue == 0 and not queue.current
+            and exactFoodReturn(self, state, action, queue) and depletedFood(self, state)
+    end)
+    if checked and obsolete then
+        local cleaned, problem = pcall(state.nativeCancel[action], action)
+        if cleaned then
+            state.owned[action], state.restore[action] = nil, nil
+            return
+        end
+        state.reason = "Native return cleanup failed: " .. tostring(problem)
+    end
+    state.reason = state.reason or "Food completion was not confirmed; returning the item without consuming more"
+    -- Use the unchanged stock action. Never cancel/reorder unrelated work that
+    -- appeared while complete ran. No other actions are permitted at deferral.
+    if not present(queue, action) then queue:addToQueue(action) end
+end
+
+local function deferReturn(self, state, queue)
+    if not state.allFood or not state.observesComplete or state.receipt or state.deferredReturn
+        or #queue.queue ~= 2 or queue.queue[1] ~= state.consume or queue.current ~= state.consume then return end
+    local action = queue.queue[2]
+    local checked, exact = pcall(exactFoodReturn, self, state, action, queue)
+    if checked and exact then
+        queue:removeFromQueue(action)
+        state.deferredReturn = action
+    end
+end
+
+-- SP nutrition callbacks are synchronous. Native perform advances the queue
+-- BEFORE complete applies Eat; briefly hold only the simple full-Floor-food
+-- return so it cannot start against an item that complete is about to remove.
+local function observeNeeds(self, state, action)
     local name = state.kind == "food" and "complete" or "updateEat"
     local previous = action[name]
     if type(previous) ~= "function" then return end
+    if name == "complete" then state.observesComplete = true end
     action[name] = function(current, ...)
         local beforeOK, beforeH, beforeT = pcall(state.needSampler)
         local exact = current == state.consume and current.item == state.item
         local result = pack(pcall(previous, current, ...))
         if not result[1] then
             state.receiptInvalid, state.receipt = true, nil
+            settleReturn(self, state, false)
             error(result[2], 0)
         end
         local afterOK, afterH, afterT = pcall(state.needSampler)
@@ -52,6 +125,7 @@ local function observeNeeds(state, action)
             receipt.thirst = receipt.thirst + math.max(0, beforeT - afterT)
             state.receipt = receipt
         end
+        if name == "complete" then settleReturn(self, state, true) end
         return unpack(result, 2, result.n)
     end
 end
@@ -63,7 +137,7 @@ local function hook(self, state, action)
         return nil, "Unsupported native action lifecycle"
     end
     if action == state.consume and state.needSampler and not isClient() and not isServer() then
-        observeNeeds(state, action)
+        observeNeeds(self, state, action)
     end
     if action == state.consume and type(originalStart) == "function" then
         action.start = function(started)
@@ -72,6 +146,8 @@ local function hook(self, state, action)
         end
     end
     if type(originalCancel) == "function" then
+        state.nativeCancel = state.nativeCancel or {}
+        state.nativeCancel[action] = originalCancel
         action.forceCancel = function(cancelled)
             state.reason = state.reason or "Native action cancelled before completion"
             return originalCancel(cancelled)
@@ -99,6 +175,7 @@ local function hook(self, state, action)
     action.perform = function(performed)
         if performed == state.consume then state.performed = true end
         local queue, foreign = queueFor(self), {}
+        if performed == state.consume then deferReturn(self, state, queue) end
         for _, pending in ipairs(queue.queue) do
             if not state.owned[pending] then foreign[#foreign + 1] = pending end
         end
@@ -106,6 +183,13 @@ local function hook(self, state, action)
         -- admission. Foreign work must survive that path as well as stop().
         for _, pending in ipairs(foreign) do queue:removeFromQueue(pending) end
         local ok, problem = pcall(originalPerform, performed)
+        if performed == state.consume then
+            state.performSucceeded = ok
+            if not ok then
+                state.reason = "Native completion failed: " .. tostring(problem)
+                settleReturn(self, state, false)
+            end
+        end
         if ok and performed == state.consume and state.opening and not isClient() then
             local captured, captureProblem = pcall(function()
                 local outputs = performed.logic:getRecipeData():getAllCreatedItems()
@@ -133,6 +217,7 @@ function Native:cancel(reason)
     local state = self.active
     if not state then return true end
     state.reason = state.reason or reason or "Cancelled"
+    settleReturn(self, state, false)
     local queue = queueFor(self)
     -- Remove only our pending preparation/consumption; leave native restoration
     -- and all other people's queued actions intact.
@@ -194,7 +279,12 @@ function Native:begin(item, kind, portion, atTarget, needSampler)
     if not ok then return nil, "Could not read current fullness" end
     if target then return nil, "Already at the requested limit" end
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget,
-        item = item, kind = kind, needSampler = type(needSampler) == "function" and needSampler or nil}
+        item = item, itemId = item:getID(), source = item:getContainer(), kind = kind, needSampler = type(needSampler) == "function" and needSampler or nil}
+    if kind == "food" and item.getHungChange and item.getBaseHunger then
+        local remaining, base = item:getHungChange(), item:getBaseHunger()
+        state.allFood = finite(remaining) and finite(base) and remaining < 0 and base < 0
+            and portion >= remaining / base
+    end
     self.active = state
     local dispatched, err = pcall(function()
         if kind == "food" then
@@ -317,6 +407,9 @@ end
 function Native:poll()
     local state = self.active
     if not state then return false, "No consumption action is active" end
+    -- The engine normally calls complete immediately after perform. Never
+    -- leave a detached return behind if completion did not arrive.
+    settleReturn(self, state, false)
     local queue = queueFor(self)
     if queue.current == state.consume then state.reachedConsumption = true end
     if not state.reason then
