@@ -1,6 +1,6 @@
 package.path = 'Contents/mods/LootBox/42/media/lua/client/?.lua;' .. package.path
 package.loaded.keyBinding = true
-Keyboard = {KEY_HOME=199, KEY_END=207, KEY_PRIOR=201, KEY_NEXT=209}
+Keyboard = {KEY_HOME=199, KEY_END=207, KEY_PRIOR=201, KEY_NEXT=209, KEY_LSHIFT=42, KEY_RSHIFT=54}
 local codes = {LootBoxScrollTop=199, LootBoxScrollBottom=207, LootBoxScrollPageUp=201, LootBoxScrollPageDown=209}
 local textEntry, modal, context, dead, joypad, eaten = false, false, false, false, -1, nil
 local mouseX,mouseY=35,53
@@ -168,6 +168,8 @@ test('NeatUI receives unclaimed controls, not consumed endpoints that would sele
  function keys.leaveKeyMode(p) p.ninvKeyMode=false;p.doController=false end
  function keys.onKeyStartPressed(key)
   calls=calls+1
+  if NeatInventory.Settings and NeatInventory.Settings.panel then return end
+  if NeatInventory.Category and NeatInventory.Category.popup then return end
   if key==199 or key==207 then
    inventory.ninvKeyMode=true;inventory.doController=true;inventory.joyselection=49
    inventory.selected={fromNeat=true}
@@ -187,5 +189,11 @@ test('NeatUI receives unclaimed controls, not consumed endpoints that would sele
  old=inventory.selected;press(99);assert(calls==3 and inventory.y==-885 and inventory.selected==old)
  inventory.over=false;press(199);assert(calls==4)
  inventory.over=true;keys.leaveKeyMode(inventory);codes.LootBoxScrollBottom=207
+ local stopped,held
+ NeatInventory.Shared={Repeat={stop=function(k) if k==held then held=nil;stopped=k end end}}
+ press(200);held=200;press(Keyboard.KEY_LSHIFT);press(207)
+ assert(held==nil and stopped==200 and inventory.y==-885)
+ NeatInventory.Settings={panel={}};press(199);assert(inventory.y==-885);NeatInventory.Settings.panel=nil
+ NeatInventory.Category={popup={}};press(199);assert(inventory.y==-885);NeatInventory.Category.popup=nil
 end)
 print(count..' inventory navigation cases passed (native UI/input boundaries doubled)')
