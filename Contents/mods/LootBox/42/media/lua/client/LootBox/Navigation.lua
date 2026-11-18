@@ -103,12 +103,16 @@ function Navigation.onKeyStartPressed(key)
         end
     end
     if not action then return false end
+    local endpoint = action == "top" or action == "bottom"
+    local neat = NeatInventory
+    if endpoint and neat and ((neat.Settings and neat.Settings.panel) or (neat.Category and neat.Category.popup)) then
+        return false
+    end
     local pane = hoveredPane()
     if not pane or pane.dragging or pane.draggingMarquis or not Navigation.scroll(pane, action) then return false end
-    local endpoint = action == "top" or action == "bottom"
     if endpoint then
-        if pane.ninvKeyMode and NeatInventory and NeatInventory.Keys and NeatInventory.Keys.leaveKeyMode then
-            NeatInventory.Keys.leaveKeyMode(pane)
+        if pane.ninvKeyMode and neat and neat.Keys and neat.Keys.leaveKeyMode then
+            neat.Keys.leaveKeyMode(pane)
         end
         holdHover(pane)
     elseif pane.lootBoxHoverAt then
@@ -119,10 +123,20 @@ function Navigation.onKeyStartPressed(key)
     return true, endpoint
 end
 
-local neatKeyStart
+local neatKeyStart, lastNeatKey
 local function dispatch(key)
     local handled, endpoint = Navigation.onKeyStartPressed(key)
-    if neatKeyStart and not endpoint then return neatKeyStart(key) end
+    if neatKeyStart then
+        if not endpoint then
+            if key ~= Keyboard.KEY_LSHIFT and key ~= Keyboard.KEY_RSHIFT then lastNeatKey = key end
+            return neatKeyStart(key)
+        end
+        -- Neat normally stops the previous held key at the start of an event.
+        -- Its repeat listener still runs, even when we own this endpoint.
+        local repeatTimer = NeatInventory.Shared and NeatInventory.Shared.Repeat
+        if lastNeatKey and repeatTimer then repeatTimer.stop(lastNeatKey) end
+        lastNeatKey = nil
+    end
     return handled
 end
 local function attachNeatKeys()
