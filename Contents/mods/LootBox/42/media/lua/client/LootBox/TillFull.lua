@@ -175,9 +175,9 @@ function TillFull:sourceProblem(record, allowConsumed)
 end
 
 function TillFull:inspect(record)
-    local item = record.item
     local sourceProblem = self:sourceProblem(record)
     if sourceProblem then return nil, sourceProblem end
+    local item = record.item
     local protected, reason = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
     if protected then return nil, "Protected: " .. tostring(reason or "selected item") end
     local opening = self.openingRecipe and not record.opened and (item:isSealed()
@@ -400,9 +400,9 @@ function TillFull:step()
     record.confirmationAudited = nil
     record.seenInMain = record.item:getContainer() == self.player:getInventory()
     local ok, failure = self.native:begin(record.item, self.kind, portion, function()
+        local changed = self:sourceProblem(record, true) ~= nil
         local item = record.item
         local protected = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
-        local changed = self:sourceProblem(record, true) ~= nil
         local unsafe = item:isSealed() or (instanceof(item, "Food") and not safeFood(item))
         if self.kind == "fluid" then
             local fluid = item:getFluidContainer()

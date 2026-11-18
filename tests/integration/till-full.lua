@@ -692,5 +692,33 @@ test('MP own-main final audit never walks the same endpoint twice',function()
  c:tick();assert(scans==1)
  inventory.getItems=nil;endMP()
 end)
+test('MP inspect reads rebound nutrition and protections instead of the detached reference',function()
+ for _,mode in ipairs({'nutrition','protected','unsafe'}) do
+  local c,p,old,crate=mpTransferFixture(.1)
+  local actual=food(71,.4);old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+  if mode~='nutrition' then actual[mode]=true end
+  local effects=c:inspect(c.records[1])
+  if mode=='nutrition' then assert(effects and effects.hunger==.4)
+  else assert(not effects,mode) end
+  assert(c.records[1].item==actual);endMP()
+ end
+end)
+test('MP live consume predicate rejects rebound protected or unsafe food',function()
+ for _,mode in ipairs({'protected','unsafe'}) do
+  local c,p,old,crate=mpTransferFixture(.1)
+  local actual=food(71,.2);actual[mode]=true;old.source=nil;crate.members[71]=nil;inventory.members[71]=actual
+  assert(created.target(),mode);assert(c.records[1].item==actual)
+  endMP()
+ end
+end)
+test('MP live drink predicate checks rebound contamination instead of the old clean vessel',function()
+ multiplayer=true;endpoint(inventory);local crate=endpoint({})
+ local old=bottle(81,.2);old.source=crate;crate.members[81]=old
+ local c=assert(Full.new(player(0,.1),sourceWorld,{old},'fluid',false,nil,crate));c:tick()
+ local actual,fluid=bottle(81,.2);fluid.poison=true
+ old.source=nil;crate.members[81]=nil;inventory.members[81]=actual
+ assert(created.target() and c.records[1].item==actual)
+ endMP()
+end)
 print('Til Full controller: '..count..' scenarios passed')
 
