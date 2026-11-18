@@ -3,6 +3,11 @@ package.loaded.keyBinding = true
 Keyboard = {KEY_HOME=199, KEY_END=207, KEY_PRIOR=201, KEY_NEXT=209}
 local codes = {LootBoxScrollTop=199, LootBoxScrollBottom=207, LootBoxScrollPageUp=201, LootBoxScrollPageDown=209}
 local textEntry, modal, context, dead, joypad, eaten = false, false, false, false, -1, nil
+local mouseX,mouseY=35,53
+function getMouseX() return mouseX end
+function getMouseY() return mouseY end
+local highlighted
+Key={setHighlightDoors=function(_,item) highlighted=item end}
 local core = {isDoingTextEntry=function() return textEntry end, isKey=function(_,name,key) return codes[name] ~= 0 and codes[name] == key end}
 function getCore() return core end
 UIManager = {isModalVisible=function() return modal end}
@@ -12,13 +17,28 @@ local player={isDead=function() return dead end,getJoypadBind=function() return 
 function getSpecificPlayer() return player end
 function getPlayerContextMenu() return {isAnyVisible=function() return context end} end
 local function pane(over)
- local p={over=over,visible=true,itemHgt=20,height=115,total=1000,y=0,selected={sentinel=true}}
+ local p={over=over,visible=true,itemHgt=20,height=115,total=1000,y=0,selected={sentinel=true},
+  player=0,parent={onCharacter=over},inventory={},mouseOverOption=0}
  function p:isVisible() return self.visible end
  function p:isMouseOver() return self.over end
  function p:getScrollAreaHeight() return self.height end
  function p:getScrollHeight() return self.total end
  function p:getYScroll() return self.y end
  function p:setYScroll(y) self.y=y end
+ function p:hideButtons() self.buttons=false end
+ function p:onMouseMove() self.mouseOverOption=math.floor((getMouseY()-self.y-20)/self.itemHgt)+1 end
+ function p:updateTooltip()
+  if not self.grid then self:onMouseMove(0,0) end
+  local row=self.doController and self.joyselection+1 or self.mouseOverOption
+  if not self.over or row<1 then return end
+  local tip=self.toolRender or {isVisible=function(t) return t.visible end,
+   setVisible=function(t,v) t.visible=v end,removeFromUIManager=function(t) t.attached=false end}
+  self.toolRender=tip;tip.visible=true;tip.attached=true;tip.item=row
+  if self.parent.onCharacter then highlighted=row end
+ end
+ function p:onMouseDown(...) self.clicked=self.mouseOverOption;return 'left',... end
+ function p:onRightMouseUp(...) self.rightClicked=self.mouseOverOption;return 'right',... end
+ function p:onMouseWheel(del) self.wheel=del;return true end
  return p
 end
 local inventory,loot=pane(true),pane(false)
@@ -27,7 +47,10 @@ local lp={visible=true,inventoryPane=loot,isVisible=function(self) return self.v
 function getPlayerInventory() return ip end
 function getPlayerLoot() return lp end
 local callbacks={}
-Events={OnKeyStartPressed={Add=function(f) callbacks[#callbacks+1]=f end}}
+local onGameStart
+Events={OnKeyStartPressed={Add=function(f) callbacks[#callbacks+1]=f end,
+ Remove=function(f) for i,v in ipairs(callbacks) do if v==f then table.remove(callbacks,i);return end end end},
+ OnGameStart={Add=function(f) onGameStart=f end}}
 keyBinding={{value='[LootBox]'},{value='LootBoxScrollTop',key=55}}
 local N=require 'LootBox/Navigation'
 local count=0
@@ -114,5 +137,55 @@ test('malformed geometry and unknown actions cause no mutation',function()
  p.itemHgt=0;assert(not N.scroll(p,'down'));p.itemHgt=20
  p.total=0/0;assert(not N.scroll(p,'down'));p.total=1000
  assert(not N.scroll(p,'other') and p.y==0)
+end)
+test('stationary pointer never opens a row after End or repeated Home; movement restores hover',function()
+ local p=inventory
+ p:updateTooltip();assert(p.toolRender.visible and p.toolRender.attached)
+ local selected=p.selected
+ for _,key in ipairs({207,199,199}) do
+  assert(N.onKeyStartPressed(key))
+  assert(p.y==(key==207 and -885 or 0) and p.selected==selected and not p.toolRender.visible)
+  for _=1,4 do p:onMouseMove(0,0);p:updateTooltip() end
+  assert(p.mouseOverOption==0 and not p.toolRender.attached and highlighted==nil)
+ end
+ mouseX=mouseX+1;p:onMouseMove(1,0);p:updateTooltip()
+ assert(p.mouseOverOption==2 and p.toolRender.item==2 and p.toolRender.visible)
+end)
+test('unmoved clicks target the newly visible row; page and wheel keep native hover',function()
+ local p=inventory;p.grid=true
+ for _,entry in ipairs({{207,'onMouseDown','left',46},{199,'onRightMouseUp','right',2}}) do
+  assert(N.onKeyStartPressed(entry[1]));local which,arg=p[entry[2]](p,123)
+  assert(which==entry[3] and arg==123 and p.mouseOverOption==entry[4])
+  p:updateTooltip();assert(p.toolRender.visible and p.toolRender.item==entry[4])
+ end
+ N.onKeyStartPressed(199);assert(p:onMouseWheel(-1) and p.wheel==-1)
+ p:updateTooltip();assert(p.toolRender.visible)
+ N.onKeyStartPressed(199);N.onKeyStartPressed(209);p:updateTooltip()
+ assert(p.y==-80 and p.toolRender.visible and p.toolRender.item==6);p.grid=nil
+end)
+test('NeatUI receives unclaimed controls, not consumed endpoints that would select and show a keyboard tooltip',function()
+ local calls=0;local keys={}
+ function keys.leaveKeyMode(p) p.ninvKeyMode=false;p.doController=false end
+ function keys.onKeyStartPressed(key)
+  calls=calls+1
+  if key==199 or key==207 then
+   inventory.ninvKeyMode=true;inventory.doController=true;inventory.joyselection=49
+   inventory.selected={fromNeat=true}
+  end
+ end
+ NeatInventory={Keys=keys}
+ Events.OnKeyStartPressed.Add(keys.onKeyStartPressed);assert(onGameStart);onGameStart();onGameStart()
+ local function press(key) for _,f in ipairs(callbacks) do f(key) end end
+ inventory.ninvKeyMode=true;inventory.doController=true
+ local old=inventory.selected
+ press(207);inventory:updateTooltip()
+ assert(calls==0 and inventory.y==-885 and inventory.selected==old and not inventory.doController)
+ assert(not inventory.toolRender.visible)
+ press(199);assert(calls==0 and inventory.y==0)
+ press(200);press(209);assert(calls==2)
+ codes.LootBoxScrollBottom=99;press(207);assert(calls==3 and inventory.selected.fromNeat)
+ old=inventory.selected;press(99);assert(calls==3 and inventory.y==-885 and inventory.selected==old)
+ inventory.over=false;press(199);assert(calls==4)
+ inventory.over=true;keys.leaveKeyMode(inventory);codes.LootBoxScrollBottom=207
 end)
 print(count..' inventory navigation cases passed (native UI/input boundaries doubled)')

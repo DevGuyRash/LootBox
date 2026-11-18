@@ -1,5 +1,3 @@
-LootBox 0.9.8
+LootBox 0.9.9
 
-Smart Take All and Smart Take Matching now search all eligible containers visible in the loot pane by default, even when the active container is empty. Turn off "Smart Take: all visible loot containers" in LootBox Settings for active-container-only behavior. Hidden, protected, unwanted, inaccessible and recovery-reserved sources stay excluded.
-
-Footer clicks now request fresh work, safely replacing old jobs after native cleanup. Repeated clicks keep only the latest request and never silently resume old jobs. Resume job remains explicit. Empty Smart Take requests do not open a menu. Escape pauses owned work, including when native UI consumes the key event.
+Home and End still jump to the top or bottom of the inventory or loot list. They no longer show a popup or select an item under a stationary pointer, including with NeatUI Inventory's keyboard navigation enabled. Move the mouse to see item tooltips again, or click the row directly.
