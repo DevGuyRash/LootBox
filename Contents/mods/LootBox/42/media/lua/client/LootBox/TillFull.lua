@@ -83,7 +83,78 @@ function TillFull.new(player, world, items, kind, both, openingRecipe, menuSourc
         index = 1, count = 0, native = Adapter.new(player), state = "running", attempts = 0, openingRecipe = openingRecipe, menuSource = menuSource}, TillFull)
 end
 
+-- Native multiplayer transfers may replace a Java object while retaining its
+-- immutable item ID. Resolve only the two endpoints of our dispatched action.
+function TillFull:resolveTransferred(record, confirming)
+    if not (isClient and isClient()) or not record.dispatched then return end
+    local main, source = self.player:getInventory(), record.source
+    local direct = record.item:getContainer()
+    record.identityUnresolved, record.absentAtEndpoints = nil, nil
+    if not main.getItemWithID or not source or not source.getItemWithID then
+        if direct == main then record.seenInMain = true; return end
+        if direct == source then return end
+        record.identityUnresolved = true
+        return
+    end
+    local original = source:getItemWithID(record.id)
+    local carried = source == main and original or main:getItemWithID(record.id)
+    local candidate = carried or original
+    -- Native lookup is enough while the dispatched reference stays coherent.
+    -- Walk direct lists only for a replacement or the first final confirmation
+    -- of this endpoint identity, not on every native action tick.
+    local audit = candidate and candidate ~= record.item
+        or (confirming and (not record.confirmationAudited
+            or record.auditedOriginal ~= original or record.auditedCarried ~= carried))
+    if audit then
+        local function unique(container)
+            if not container.getItems then return true end
+            local found
+            local items = container:getItems()
+            for i = 0, items:size() - 1 do
+                local item = items:get(i)
+                if item:getID() == record.id then
+                    if found and found ~= item then return false end
+                    found = item
+                end
+            end
+            return true
+        end
+        if not unique(source) or (source ~= main and not unique(main)) then
+            return "The selected item identity is ambiguous"
+        end
+        if confirming then
+            record.confirmationAudited = true
+            record.auditedOriginal, record.auditedCarried = original, carried
+        end
+    end
+    if original and carried and original ~= carried then return "The selected item identity is ambiguous" end
+    local item = carried or original
+    if item then
+        if item:getID() ~= record.id or tostring(item:getFullType()) ~= record.fullType then
+            return "The selected item identity changed"
+        end
+        local container = item:getContainer()
+        if (container ~= main or carried ~= item) and (container ~= source or original ~= item) then
+            return "The selected item is no longer in its exact source or inventory"
+        end
+        record.item = item
+        if self.inflight then self.inflight.item = item end
+        if container == main then record.seenInMain = true end
+    else
+        record.identityUnresolved = true
+        record.absentAtEndpoints = source.containsID and main.containsID
+            and not source:containsID(record.id) and not main:containsID(record.id)
+            and self.world.canAccess and self.world:canAccess(source) and self.world:canAccess(main)
+    end
+end
+
 function TillFull:sourceProblem(record, allowConsumed)
+    local resolutionProblem = self:resolveTransferred(record)
+    if resolutionProblem then return resolutionProblem end
+    if record.identityUnresolved then
+        if allowConsumed then return end
+        return "The selected item transfer is not yet confirmed"
+    end
     local item, source = record.item, record.item:getContainer()
     if item:getID() ~= record.id or tostring(item:getFullType()) ~= record.fullType then
         return "The selected item moved or changed"
@@ -163,8 +234,8 @@ end
 -- Native perform() only retires the client action. In multiplayer, complete()
 -- applies nutrition and item changes later. A stat fluctuation alone is not an
 -- acknowledgement of our requested portion; wait for that exact item quantity.
-local function remaining(item, kind, sourceVerified)
-    if not item:getContainer() and not sourceVerified then return 0 end
+local function remaining(item, kind)
+    if not item:getContainer() then return 0 end
     if kind == "food" then return math.max(0, -item:getHungChange()) end
     local fluid = item:getFluidContainer()
     if not fluid or fluid:isEmpty() then return 0 end
@@ -209,7 +280,8 @@ function TillFull:step()
             -- Never discover another item by type or position in the inventory.
             local previous = self.records[self.index]
             local source = self.player:getInventory()
-            if opened == previous.item and opened:getID() == previous.id then source = previous.source end
+            if opened:getID() == previous.id and tostring(opened:getFullType()) == previous.fullType
+                and (opened == previous.item or self.kind == "fluid") then source = previous.source end
             self.records[self.index] = {item = opened, id = opened:getID(), fullType = tostring(opened:getFullType()),
                 source = source, opened = true, dispatched = true}
         else
@@ -220,6 +292,9 @@ function TillFull:step()
     if self.state == "cancelling" then self:finish("cancelled", self.reason); return end
     if self.player:isDead() or self.player:isAsleep() then self:finish("cancelled", "The player cannot consume now"); return end
     if self.confirmation then
+        local record = self.records[self.index]
+        local resolutionProblem = self:resolveTransferred(record, true)
+        if resolutionProblem then self:finish("failed", resolutionProblem); return end
         local before = self.inflight
         local hungerConfirmed = hunger <= before.expectedHunger + before.hungerDrift + 0.000001
         local thirstConfirmed = thirst <= before.expectedThirst + before.thirstDrift + 0.000001
@@ -243,6 +318,9 @@ function TillFull:step()
             end
         end
         local quantity = remaining(before.item, self.kind)
+        if record.identityUnresolved then
+            quantity = record.seenInMain and record.absentAtEndpoints and before.expectedRemaining <= 0 and 0 or nil
+        end
         local consumed = finite(quantity) and quantity <= before.expectedRemaining + 0.000001
         -- Need and item packets may arrive in either order. Never advance from
         -- an intermediate progress update or an unrelated need improvement.
@@ -286,7 +364,7 @@ function TillFull:step()
                 or TillFull.portion(h, t, current.hunger, current.thirst, self.both, self.kind)
             self.targetReached = fraction ~= nil and fraction <= 0
             return self.targetReached
-        end, record.source)
+        end)
         self.attempts = self.attempts + 1
         if not ok then
             self.reason = failure or "The native opening action could not start"
@@ -294,7 +372,7 @@ function TillFull:step()
         end
         return
     end
-    local quantity = remaining(record.item, self.kind, true)
+    local quantity = remaining(record.item, self.kind)
     if not finite(quantity) or quantity <= 0 then self:finish("cancelled", "The selected quantity is unavailable"); return end
     local expectedRemaining = quantity * (1 - portion)
     local expectedHunger = math.max(0, hunger - math.max(0, effects.hunger) * portion)
@@ -319,6 +397,8 @@ function TillFull:step()
         lastHunger = hunger, lastThirst = thirst, hungerDrift = 0, thirstDrift = 0,
         expectedHunger = expectedHunger, expectedThirst = expectedThirst}
     record.dispatched = true
+    record.confirmationAudited = nil
+    record.seenInMain = record.item:getContainer() == self.player:getInventory()
     local ok, failure = self.native:begin(record.item, self.kind, portion, function()
         local item = record.item
         local protected = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
