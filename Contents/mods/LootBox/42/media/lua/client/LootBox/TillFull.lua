@@ -59,6 +59,8 @@ end
 
 function TillFull.new(player, world, items, kind, both, openingRecipe, menuSource)
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption action" end
+    local problem = openingRecipe and Adapter.openingProblem(kind)
+    if problem then return nil, problem end
     if type(items) ~= "table" then return nil, "Choose an item stack" end
     local records, seen = {}, {}
     for _, item in ipairs(items) do
@@ -281,16 +283,6 @@ function TillFull:step()
         if not done then self:finish("cancelled", reason or "Native consumption was interrupted"); return end
         if self.opening then
             self.opening = nil
-            if reason == "chooseOpened" and not opened and self.kind == "food" and self.openingRecipe
-                and isClient and isClient() and self.count == 0 then
-                if hunger <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
-                if self.player:isDead() or self.player:isAsleep() then
-                    self:finish("cancelled", "The player cannot consume now"); return
-                end
-                self.openedFoodPrompt = "When the opened food appears, right-click it and choose Eat > Til Full."
-                self:finish("finished", self.openedFoodPrompt)
-                return
-            end
             if reason ~= "opened" or not opened then
                 self:finish("failed", "The opened item was not confirmed"); return
             end

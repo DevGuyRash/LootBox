@@ -4,8 +4,12 @@ local now, count = 0, 0
 function getTimestampMs() return now end
 CharacterStat = { HUNGER = {getMinimumValue=function() return 0 end}, THIRST = {getMinimumValue=function() return 0 end} }
 function instanceof(item, name) return name == 'Food' and item.food end
-local created
-package.loaded['LootBox/TillFullNative'] = {new=function()
+local created, multiplayer
+function isClient() return multiplayer == true end
+package.loaded['TimedActions/ISTimedActionQueue'] = true
+package.loaded['ISUI/ISInventoryPaneContextMenu'] = true
+local adapter = require 'LootBox/TillFullNative'
+adapter.new = function()
  local n = {busy=false, calls={}, opens={}}
  function n:isBusy() return self.busy end
  function n:begin(item, kind, portion, target, sampler)
@@ -26,7 +30,7 @@ package.loaded['LootBox/TillFullNative'] = {new=function()
  end
  function n:cancel() self.result=false end
  created=n; return n
-end}
+end
 local Full=require 'LootBox/TillFull'
 local inventory={}
 local function player(h,t)
@@ -390,36 +394,23 @@ test('opening never bypasses unsafe fluid or bounded work limits',function()
  c=assert(Full.new(player(.1,0),world,{can(1)},'food',false,recipe));c.attempts=256;c:tick()
  assert(c.state=='cancelled' and #created.opens==0)
 end)
-local multiplayer=false
-function isClient() return multiplayer end
-test('multiplayer opening hands back exact choice without consuming or opening stack peers',function()
+test('MP sealed peaches fail before job admission; the selected opened peaches can be eaten',function()
  multiplayer=true
- local first,second=can(1),can(2)
- local c=assert(Full.new(player(.3,0),world,{first,first,second},'food',false,recipe));c:tick()
- assert(#created.opens==1 and #c.records==2)
- created.reason='chooseOpened';c:tick()
- assert(c.state=='finished' and c.count==0 and c.records==nil and #created.calls==0 and #created.opens==1)
- assert(c.openedFoodPrompt=='When the opened food appears, right-click it and choose Eat > Til Full.')
- c.openedFoodPrompt=nil;c:tick();assert(c.openedFoodPrompt==nil and #created.opens==1)
- multiplayer=false
-end)
-test('opening fallback never prompts after cancellation refusal or satisfied hunger',function()
- multiplayer=true
- for _,mode in ipairs({'cancel','refuse','full','dead'}) do
-  local p=player(.3,0);local c=assert(Full.new(p,world,{can(1),can(2)},'food',false,recipe));c:tick()
-  created.reason='chooseOpened'
-  if mode=='cancel' then c:cancel() elseif mode=='refuse' then created.result=false
-  elseif mode=='full' then p.h=0 else p.dead=true end
-  c:tick();assert(not c:isBusy() and c.openedFoodPrompt==nil and #created.calls==0 and #created.opens==1,mode)
- end
- multiplayer=false
-end)
-test('opening fallback is not accepted from single player or a fluid action',function()
- local c=assert(Full.new(player(.3,0),world,{can(1)},'food',false,recipe));c:tick()
- created.reason='chooseOpened';c:tick();assert(c.state=='failed' and c.openedFoodPrompt==nil)
- multiplayer=true;local item=bottle(2,.5);item.sealed=true
- c=assert(Full.new(player(0,.3),world,{item},'fluid',false,recipe));c:tick()
- created.reason='chooseOpened';c:tick();assert(c.state=='failed' and c.openedFoodPrompt==nil)
+ local previous=created
+ local selected,peer=can(10),can(11)
+ local sealedType=function() return 'Base.CannedPeaches' end
+ selected.getFullType,peer.getFullType=sealedType,sealedType
+ local controller,reason=Full.new(player(.075,0),world,{selected,peer},'food',false,recipe)
+ assert(not controller and reason:find('Open',1,true) and created==previous)
+ local opened,other=food(20,.15),food(21,.15)
+ local openedType=function() return 'Base.CannedPeachesOpen' end
+ opened.getFullType,other.getFullType=openedType,openedType
+ local p=player(.075,0)
+ controller=assert(Full.new(p,world,{opened},'food'));controller:tick()
+ assert(#created.calls==1 and created.calls[1].item==opened and #created.opens==0)
+ close(created.calls[1].portion,.5)
+ opened.h=.075;p.h=0;controller:tick()
+ assert(controller.state=='finished' and #created.calls==1 and other.h==.15)
  multiplayer=false
 end)
 test('same exact opened fluid can return to its original bag but no unrelated bag',function()
@@ -651,16 +642,6 @@ test('MP duplicate ID objects in one direct endpoint are not silently chosen',fu
  inventory.members[71]=a;p.h=0;c:tick()
  assert(c.state=='failed' and #created.calls==1)
  inventory.getItems=nil;endMP()
-end)
-test('MP opening may follow the same closed input ID transfer but never an edible replacement ID',function()
- multiplayer=true;endpoint(inventory);local crate=endpoint({});local old=can(77);old.source=crate;crate.members[77]=old
- local c=assert(Full.new(player(.1,0),sourceWorld,{old},'food',false,recipe,crate));c:tick()
- local transferred=can(77);inventory.members[77]=transferred;crate.members[77]=nil;old.source=nil
- assert(not created.target() and c.records[1].item==transferred)
- local opened=food(78,.2);inventory.members[77]=nil;inventory.members[78]=opened;transferred.source=nil
- created.reason='chooseOpened';c:tick()
- assert(c.state=='finished' and c.openedFoodPrompt and #created.calls==0 and #created.opens==1)
- endMP()
 end)
 test('MP coherent action uses cheap lookups and audits each endpoint only once at confirmation',function()
  local c,p,old,crate=mpTransferFixture(.1)

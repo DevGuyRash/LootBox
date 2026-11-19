@@ -5,6 +5,7 @@ local App = require "LootBox/App"
 local Catalog = require "LootBox/Catalog"
 local Guides = require "LootBox/Guides"
 local Selection = require "LootBox/Selection"
+local TillFullNative = require "LootBox/TillFullNative"
 local Menus = {}
 local interface
 local containerCallbacks = setmetatable({}, { __mode = "k" })
@@ -583,17 +584,14 @@ local function consumptionMenu(playerIndex, parent, items)
                 if child then visit(child, option) end
             end
         end
+        if openingRecipe and TillFullNative.openingProblem(kind) then return end
         local snapshot = not ambiguous and not already and kind and selectedStack(anchor)
         if not snapshot or #snapshot == 0 then return end
-        local chooseOpened = kind == "food" and openingRecipe and isClient()
-        local title = chooseOpened and "Open first for Til Full" or "Til Full"
-        local added = menu:addOption(title, {playerIndex = playerIndex, items = snapshot,
+        local added = menu:addOption("Til Full", {playerIndex = playerIndex, items = snapshot,
             kind = kind, openingRecipe = openingRecipe, source = anchor:getContainer()}, runTillFull)
         if added then added.itemForTexture = root.itemForTexture or anchor end
-        if chooseOpened then
-            tooltip(added, title, "Opens one selected item without eating. In multiplayer, right-click the opened food and choose Eat > Til Full.")
-        elseif openingRecipe and kind == "fluid" then
-            tooltip(added, title, "Open this vessel and drink until the selected need is satisfied. Til Full does not drink alcohol or unsafe mixtures.")
+        if openingRecipe and kind == "fluid" then
+            tooltip(added, "Til Full", "Open this vessel and drink until the selected need is satisfied. Til Full does not drink alcohol or unsafe mixtures.")
         end
     end
     for _, root in ipairs(parent.options or {}) do
