@@ -59,22 +59,27 @@ do
     local large, small, duplicate=item(p.main,"Bottle",2,0),item(p.main,"Bottle",1,.5),item(p.main,"Bottle",1,.5)
     local gear=bag(p.main,"Hydration bag",3);p.gear[gear]=true
     local inner=bag(gear.bag,"Pouch")
-    item(inner.bag,"Nested",1,0)
+    local deeper=item(inner.bag,"Nested",1,0)
     local nested=item(gear.bag,"Flask",1,.8)
-    local stray=bag(p.main,"Unequipped");item(stray.bag,"Stray",1,0)
+    local stray=bag(p.main,"Unequipped");local inStray=item(stray.bag,"Stray",1,0)
+    item(stray.bag,"Full",1,1)
     item(loot,"Loot",1,0)
     local invalid=item(p.main,"Invalid",1,0);invalid.fluid.reject=true
     local result=assert(Pour.collect(p,w,source,loot,{}))
-    assert(result.source.item==source and #result.targets==5)
+    assert(result.source.item==source and #result.targets==7)
     assert(result.fill[1].item==small and result.fill[2].item==duplicate and result.fill[3].item==large)
     local eq=assert(Pour.collect(p,w,source,loot,{pourFillScope="equipped-first",pourFillOrder="largest-first"}))
-    assert(eq.fill[1].item==gear and eq.fill[2].item==nested and eq.fill[3].item==large)
+    assert(eq.fill[1].item==gear and eq.fill[2].item==deeper and eq.fill[3].item==nested and eq.fill[4].item==large)
     local only=assert(Pour.collect(p,w,source,loot,{pourFillScope="main-only"}))
-    assert(#only.targets==5 and #only.fill==3)
+    assert(#only.targets==7 and #only.fill==3)
     assert(result.fill[1].label~=result.fill[2].label and result.fill[1].icon)
     assert(result.fill[1].label:find("Main inventory",1,true) and result.fill[1].label:find("0.5 L free",1,true))
-    assert(eq.fill[2].label:find("Hydration bag",1,true))
+    assert(eq.fill[3].label:find("Hydration bag",1,true))
     assert(Pour.revalidate(p,w,result.fill[4],loot,{},result.source))
+    local inBag=result.fill[#result.fill]
+    assert(inBag.item==inStray and inBag.scope=="carried" and Pour.revalidate(p,w,inBag,loot,{},result.source))
+    stray.bag.lock=true
+    assert(not Pour.revalidate(p,w,inBag,loot,{},result.source))
     p.gear[gear]=nil
     assert(not Pour.revalidate(p,w,result.fill[4],loot,{},result.source))
 end

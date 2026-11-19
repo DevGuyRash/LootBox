@@ -3004,9 +3004,11 @@ test("terminal jobs release planning graphs but retain display summaries", funct
     local result = finish(f)
     assert(result.state == "finished" and result.condense and not result.hasJob)
     assert(f.jobs.plan == nil and f.jobs.carry == nil and f.jobs.hauled == nil and f.jobs.reviewed == nil)
-    if type(collectgarbage) == "function" then
+    -- Kahlua is backed by the JVM, whose explicit GC timing is not a
+    -- portable assertion. Controller ownership was checked above in both VMs.
+    if _VERSION=="Lua 5.1" and type(collectgarbage)=="function" and type(next)=="function" then
         collectgarbage("collect"); collectgarbage("collect")
-        assert(next(references) == nil, "Finished planning graph must be collectible")
+        for _ in pairs(references) do error("Finished planning graph must be collectible") end
     end
     -- Terminal failure has the same lifecycle, but failed recovery checkpoints
     -- remain covered by the recovery scenarios above.

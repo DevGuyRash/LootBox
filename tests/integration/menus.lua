@@ -1515,12 +1515,12 @@ test("Pour Into keeps third-party entries and localizes first-party placement wi
     local src,main,_,_,_,calls,restore=pourFixture(f)
     local ok,err=pcall(function()
         f.noDropIcon=true
-        for _,mode in ipairs({"legacy","foreign"}) do
+        for _,mode in ipairs({"legacy","foreign","ellipsis"}) do
             local parent=Menu:new()
             f.legacy=mode=="legacy"
-            local foreign=mode=="foreign" and parent:addOption("Pour Into",nil,function() f.foreignPour=true end)
+            local foreign=mode~="legacy" and parent:addOption(mode=="ellipsis" and "Pour into ..." or "Pour Into",nil,function() f.foreignPour=true end)
             Menus.inventoryMenu(0,parent,{src})
-            assert(option(parent,"Pour Into")== (foreign or nil))
+            assert(option(parent,"Pour Into")== (mode=="foreign" and foreign or nil))
             if foreign then foreign.onSelect(foreign.target);assert(f.foreignPour) end
             local root=needed(needed(parent,"LootBox").child,"Pour Into")
             assert(root.itemForTexture==src and icon(needed(root.child,"Fill All")))
