@@ -162,6 +162,22 @@ function World:canAccess(container)
         and call(container, "isLockedToCharacter", self.player) ~= true
 end
 
+-- A borrowed shelf vessel may no longer be in this container. Retain its
+-- exact original object and independently recheck native access and reach.
+function World:pourShelfReachable(container)
+    if not container or call(container,"getType")=="floor" or self:owns(container) or not self:canAccess(container) then return false end
+    local part=call(container,"getVehiclePart")
+    if part then
+        local v,index=call(part,"getVehicle"),call(part,"getIndex")
+        return v~=nil and nativeInteger(index) and index>=0 and call(v,"getPartByIndex",index)==part
+            and call(part,"getItemContainer")==container and call(v,"canAccessContainer",index,self.player)==true
+    end
+    local a,b=call(self.player,"getCurrentSquare"),self:square(container)
+    return a~=nil and loaded(b) and call(a,"getZ")==call(b,"getZ")
+        and math.abs(a:getX()-b:getX())<=1 and math.abs(a:getY()-b:getY())<=1
+        and (a==b or call(a,"canReachTo",b)==true) and permitted(self.player,b)
+end
+
 -- Consumption authorizes one exact item, not a container search or a walk-to job.
 function World:consumptionSource(item, source)
     local function member(container, value)

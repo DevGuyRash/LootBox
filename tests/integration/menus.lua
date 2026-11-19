@@ -1391,6 +1391,152 @@ test("native ground Drink binds its real world wrapper only to the selected floo
     ISInventoryPane=oldPane
 end)
 
+local function pourFixture(f)
+    local old={ISInventoryPane,FluidContainer,FluidUtil,getActivatedMods,getTexture}
+    ISInventoryPane={getActualItems=function(rows)
+        local flat={}
+        for _,row in ipairs(rows) do
+            for _,candidate in ipairs(row.items or {row}) do flat[#flat+1]=candidate end
+        end
+        return flat
+    end}
+    FluidContainer={CanTransfer=function(from,to) return from~=to end}
+    FluidUtil={roundTransfer=function(n) return n end}
+    getActivatedMods=function() return {contains=function(_,id) return f.legacy and id=="PourIntoContainer" end} end
+    getTexture=function(key)
+        if f.noDropIcon and key=="Item_WaterDrop" then return nil end
+        return old[5](key)
+    end
+    local function restore()
+        ISInventoryPane,FluidContainer,FluidUtil,getActivatedMods,getTexture=old[1],old[2],old[3],old[4],old[5]
+    end
+    local function putIn(container_)
+        container_.contents={}
+        function container_:isLockedToCharacter() return false end
+        function container_:getItems()
+            return {size=function() return #self.contents end,get=function(_,i) return self.contents[i+1] end}
+        end
+    end
+    local milk={}
+    local function vessel(c,id,kind,name,capacity,amount)
+        local i=item(c,kind);i.name=name
+        i.getID=function() return id end
+        i.isSealed=function() return false end
+        local fluid={amount=amount}
+        function fluid:getAmount() return self.amount end
+        function fluid:getCapacity() return capacity end
+        function fluid:getFreeCapacity() return capacity-self.amount end
+        function fluid:getOwner() return i end
+        function fluid:canPlayerEmpty() return true end
+        function fluid:createFluidSample()
+            return {size=function() return self.amount>0 and 1 or 0 end,
+                getFluid=function() return milk end,getPercentage=function() return 1 end,release=function() end}
+        end
+        function i:getFluidContainer() return fluid end
+        c.contents[#c.contents+1]=i
+        return i,fluid
+    end
+    putIn(f.inventory);putIn(f.crate)
+    local ready,pouch=bag(f,true,"Field Bag");putIn(pouch)
+    f.inventory.contents[#f.inventory.contents+1]=ready
+    function f.player:getPrimaryHandItem() return ready end
+    f.lootPage.getIsVisible=function() return f.visible~=false end
+    f.app.world.consumptionSource=function(_,i,c) return c==f.crate and i.source==c end
+    local a=vessel(f.inventory,10,"Base.Milk","Milk",2,1.5)
+    local b=vessel(f.inventory,11,"Base.Bottle","Bottle",1,0)
+    local d=vessel(pouch,12,"Base.Bottle","Bottle",2,0)
+    local shelf=vessel(f.crate,13,"Base.Milk","Shelf Milk",2,1)
+    local shelfTarget=vessel(f.crate,14,"Base.Bottle","Shelf Bottle",.5,0)
+    local calls={}
+    f.app.startPour=function(_,source,targets,options)
+        calls[#calls+1]={source=source,targets=targets,options=options}
+        return true
+    end
+    return a,b,d,shelf,shelfTarget,calls,restore
+end
+
+local function pourDestination(menu,item_)
+    for _,value in ipairs(menu.options) do if value.itemForTexture==item_ and value.name:find("|",1,true) then return value end end
+end
+
+test("Pour Into renders a separate native-spanning menu and dispatches one frozen Fill All",function(f)
+    local src,main,equipped,_,_,calls,restore=pourFixture(f)
+    local ok,err=pcall(function()
+        f.preferences.pourEquippedFirst=true
+        f.preferences.pourMostRoomFirst=true
+        local parent=Menu:new()
+        local nativeChild=Menu:new()
+        local vanilla=parent:addOption("Fluid",nil,function() end)
+        parent:addSubMenu(vanilla,nativeChild)
+        local rows={{items={src,src}}}
+        Menus.inventoryMenu(0,parent,rows)
+        assert(parent.options[1]==vanilla and vanilla.child==nativeChild and #nativeChild.options==0)
+        local root=needed(parent,"Pour Into")
+        Menus.inventoryMenu(0,parent,rows)
+        local occurrences=0
+        for _,o in ipairs(parent.options) do if o.name=="Pour Into" then occurrences=occurrences+1 end end
+        assert(occurrences==1 and needed(parent,"Pour Into")==root)
+        assert(root.child and icon(root)=="Item_WaterDrop")
+        local m,e=pourDestination(root.child,main),pourDestination(root.child,equipped)
+        assert(m and e and m.name:find("Main inventory",1,true) and e.name:find("Field Bag",1,true))
+        assert(m.name:find("1 L free",1,true) and e.name:find("2 L free",1,true))
+        local fill=needed(root.child,"Fill All")
+        assert(icon(fill))
+        rows[1].items={main,equipped} -- callbacks must not re-flatten new UI rows
+        fill.onSelect(fill.target);fill.onSelect(fill.target)
+        assert(#calls==1 and calls[1].source.item==src and #calls[1].targets==2)
+        assert(calls[1].targets[1].item==equipped and calls[1].targets[2].item==main)
+        assert(calls[1].options.pourFillScope=="equipped-first" and calls[1].options.pourFillOrder=="largest-first")
+        assert(not package.loaded["Fluids/ISFluidTransferAction"],"native actions must remain lazy at menu render")
+    end)
+    restore();assert(ok,err)
+end)
+
+test("Pour Into keeps third-party entries and localizes first-party placement with missing texture fallback",function(f)
+    local src,main,_,_,_,calls,restore=pourFixture(f)
+    local ok,err=pcall(function()
+        f.noDropIcon=true
+        for _,mode in ipairs({"legacy","foreign"}) do
+            local parent=Menu:new()
+            f.legacy=mode=="legacy"
+            local foreign=mode=="foreign" and parent:addOption("Pour Into",nil,function() f.foreignPour=true end)
+            Menus.inventoryMenu(0,parent,{src})
+            assert(option(parent,"Pour Into")== (foreign or nil))
+            if foreign then foreign.onSelect(foreign.target);assert(f.foreignPour) end
+            local root=needed(needed(parent,"LootBox").child,"Pour Into")
+            assert(root.itemForTexture==src and icon(needed(root.child,"Fill All")))
+            local target=assert(pourDestination(root.child,main))
+            target.onSelect(target.target)
+            assert(calls[#calls].source.item==src and #calls[#calls].targets==1 and calls[#calls].targets[1].item==main)
+        end
+    end)
+    restore();assert(ok,err)
+end)
+
+test("Pour Into rejects two real selections and hidden loot; shortcut flags and loot opt-in stay exact",function(f)
+    local src,main,_,shelf,target,calls,restore=pourFixture(f)
+    local ok,err=pcall(function()
+        local function render(rows)
+            local p=Menu:new();Menus.inventoryMenu(0,p,rows);return option(p,"Pour Into")
+        end
+        assert(not render({{items={src,main}}}))
+        assert(not render({src,main}))
+        f.preferences.contextMenus=false;assert(not render({src}))
+        f.preferences.contextMenus=true
+        f.preferences.inventoryShortcuts=false;assert(not render({src}))
+        f.preferences.inventoryShortcuts=true
+        f.visible=false;assert(not render({shelf}))
+        f.visible=true
+        local menu=assert(render({shelf})).child;assert(not pourDestination(menu,target))
+        f.preferences.pourLootToLoot=true
+        menu=assert(render({shelf})).child
+        local targetOption=assert(pourDestination(menu,target)); targetOption.onSelect(targetOption.target)
+        assert(#calls==1 and calls[1].source.item==shelf and calls[1].targets[1].item==target
+            and calls[1].options.pourLootToLoot==true)
+    end)
+    restore();assert(ok,err)
+end)
+
 assert(#failures == 0, table.concat(failures, "\n"))
 print(passed .. " menu and guide integration cases passed (native rendering and App boundaries are doubles)")
 
