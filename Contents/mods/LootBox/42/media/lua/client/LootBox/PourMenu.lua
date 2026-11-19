@@ -22,7 +22,10 @@ end
 
 local function otherPourMenu(parent)
     for _,o in ipairs(parent.options or {}) do
-        if o.name=="Pour Into" and o.target~=marker then return true end
+        if type(o.name)=="string" and o.target~=marker then
+            local name=o.name:lower():gsub("[%s%.]+$","")
+            if name=="pour into" then return true end
+        end
     end
     local mods=getActivatedMods and getActivatedMods()
     return mods and (mods:contains("PourIntoContainer") or mods:contains("\\PourIntoContainer"))
