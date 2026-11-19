@@ -55,6 +55,11 @@ package.loaded["LootBox/Jobs"] = { new = function()
         end }
 end }
 package.loaded["LootBox/TillFull"] = {new = function() error("Unexpected consumption boundary") end}
+local needsCalls, nearbyReads = 0, 0
+package.loaded["LootBox/AutoNeeds"] = {interruptObservation=function()end,step=function(instance, opts, read, now)
+    needsCalls = needsCalls + 1
+    assert(opts.autoDrinkEquipped and opts == read() and now == getTimestampMs() and instance.player == player)
+end}
 local App = require "LootBox/App"
 local Store = require "LootBox/Store"
 local function same(actual, expected)
@@ -72,6 +77,31 @@ local medicine, supplies
 test("passive session lookup leaves the main menu and categories free of player jobs", function()
     assert(App.peek(0) == nil and calls.created == 0)
     assert(App.catalog() and App.peek(0) == nil and calls.created == 0)
+end)
+
+test("opt-ins work with UI closed; passive sessions do not survey the world or wake other actors", function()
+    local previous = getTimestampMs
+    local clock = 0
+    getTimestampMs = function() return clock end
+    player.isLocalPlayer=function() return true end
+    player.getCurrentSquare=function() return {} end
+    for _, key in ipairs({"isMoving","isRunning","isSprinting","isAttacking","isAiming","hasTimedActions"}) do player[key]=function()return false end end
+    App.onNeedsUpdate(player)
+    assert(not App.peek(0) and needsCalls == 0)
+    assert(App.setPreferences({autoConsumeNested=true}))
+    App.onNeedsUpdate(player); assert(not App.peek(0) and needsCalls == 0)
+    assert(App.setPreferences({autoDrinkEquipped=true}))
+    App.onNeedsUpdate(player);assert(needsCalls==0)
+    clock=800; player.isMoving=function()return true end;App.onNeedsUpdate(player)
+    player.isMoving=function()return false end;clock=1450;App.onNeedsUpdate(player);assert(needsCalls==0)
+    clock=1850;App.onNeedsUpdate(player); App.onNeedsUpdate(player); assert(needsCalls == 1)
+    local passive=assert(App.peek(0)); assert(passive.needsOnly)
+    passive.world.observeNearby=function() nearbyReads=nearbyReads+1;return false end
+    App.tick();assert(nearbyReads==0)
+    clock=6000; App.onNeedsUpdate(player); assert(needsCalls==2)
+    assert(App.get(0)==passive and not passive.needsOnly); App.tick(); assert(nearbyReads==1)
+    assert(App.setPreferences({autoDrinkEquipped=false,autoConsumeNested=false}))
+    App.reset();getTimestampMs=previous
 end)
 
 test("main-menu custom categories preserve native and nested memberships", function()

@@ -133,6 +133,19 @@ multiplayer latency mean it cannot promise exact quantities or instantaneous
 stopping. See [verification](docs/verification.md) for the coverage and limits of each workflow.
 
 
+## Automatic food and drink
+
+In **LootBox > Settings > Automatic food and drink**, all four switches start **off**:
+
+- **Drink from equipped vessels:** use the liquid in a worn, held or belt-attached vessel. This includes the reservoir in a hydration backpack; it does not mean drinking every bottle in its pockets.
+- **Eat and drink from carried supplies:** choose one safe food or beverage from the main inventory or directly inside a carried bag. Nothing on the floor, in a nearby crate or in a vehicle is considered.
+- **Carried supplies: search bags inside bags:** extend the second switch into nested carried bags. By itself this does nothing. Locked or protected bags are not traversed.
+- **Carried supplies: allow risky can opening:** single-player only. Prefer an ordinary can opener. With this switch on, supported stock food cans may instead use the game's sharp-tool recipe at an adjacent craft surface. The game can damage the tool and cut your hand. No bare-handed opening is invented. For automatic opening, the can and tool must be in main inventory; unknown recipes and outputs are skipped.
+
+**Drinking requires Project Zomboid's own Auto-Drink option.** The game already checks many directly equipped pure-water vessels. LootBox leaves ordinary drinking to the game. In single-player, an equipped vessel the game selects but does not use can get one stock retry after at least 20 seconds of observed rising thirst with unchanged water. Water nested in a carried bag can be lent to the vanilla system and safely returned if the exact bag is still available. If you intervene, the bottle can remain in main inventory. In multiplayer, the server owns vanilla water intake: LootBox neither retries it on the client nor stages a nested pure-water bottle to force a sip.
+
+Automatic intake waits for meaningful thirst (20%) or hunger (25%), then uses one native portion for that need. The manual **Til Full: satisfy both needs** preference is not used for background intake. LootBox does not interrupt movement, aiming, combat, existing queued actions, an active or paused LootBox job, or pending gear recovery. It skips unsafe, spoiled, alcoholic, medical and unrecognized supplies; favorites and **Keep** items are never chosen. A canceled or unconfirmed portion is not automatically retried in the same need episode. In multiplayer the client can stop requesting work, but it cannot recall a bite or sip the server has already accepted. Manual Eat, Drink and Til Full remain available.
+
 ### Inventory navigation shortcuts
 
 Hover the item list in your inventory or the loot window, then use **Home** or
