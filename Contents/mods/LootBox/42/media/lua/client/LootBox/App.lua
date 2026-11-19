@@ -464,7 +464,7 @@ function Instance:currentContainer()
     return loot and loot.inventoryPane and loot.inventoryPane.inventory or nil
 end
 function Instance:preview(request)
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before starting another job" end
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job" end
     if self.error or loadError then return nil, self.error or loadError end
     local recovery = self.recovery:status()
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
@@ -472,7 +472,7 @@ function Instance:preview(request)
     return self.jobs:preview(request)
 end
 function Instance:previewCondense()
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before starting another job" end
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job" end
     if self.error or loadError then return nil, self.error or loadError end
     local recovery = self.recovery:status()
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before condensing" end
@@ -484,7 +484,7 @@ function Instance:previewCondense()
 end
 function Instance:start(plan, options)
     self.replacement, self.replacementProblem = nil, nil
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before starting another job" end
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job" end
     local recovery = self.recovery:status()
     if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
     local ok, err = self:persist()
@@ -496,13 +496,31 @@ function Instance:start(plan, options)
     if started then self.consumption = nil end
     return started, problem
 end
+function Instance:startPour(source,targets,options)
+    if self.error or loadError or self.replacement or self.recovery:status().pending then return nil,"Finish or recover the current job before pouring." end
+    local job=self.jobs:status()
+    if job.hasJob or not job.canPreview or self.consumption and self.consumption:isBusy() then return nil,"Finish the current action before pouring." end
+    local Pour=require "LootBox/Pour"
+    local function context()
+        local p,err=currentPreferences()
+        if err or not p.contextMenus or not p.inventoryShortcuts or self.error or self.replacement
+            or self.recovery:status().pending then return nil end
+        return Pour.options(p),Pour.displayed(self.player:getPlayerNum())
+    end
+    local controller,why=Pour.new(self.player,self.world,source,targets,options,context)
+    if not controller then return nil,why end
+    self.consumption=controller
+    controller:tick()
+    if not controller:isBusy() and controller.state~="finished" then return nil,controller.reason end
+    return true
+end
 function Instance:tillFull(items, kind, openingRecipe, menuSource)
     if self.error or loadError then return nil, self.error or loadError end
     local options, err = App.getPreferences()
     if err then return nil, err end
     if not options.tillFullEnabled then return nil, "Til Full is disabled in settings" end
     if self.recovery:status().pending then return nil, "Recover personal gear before consuming" end
-    if self.consumption and self.consumption:isBusy() then return nil, "Til Full is already active; use Current job to cancel" end
+    if self.consumption and self.consumption:isBusy() then return nil, (self.consumption.name or "Til Full") .. " is already active; use Current job to cancel" end
     local controller
     controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds, openingRecipe, menuSource)
     if not controller then return nil, err end
@@ -526,7 +544,7 @@ function Instance:replaceJob(callback)
     if self.error or loadError then return nil, self.error or loadError end
     if self.recovery:status().pending then return nil, "Recover personal gear before starting another job" end
     if self.consumption and self.consumption:isBusy() then
-        return nil, "Finish or cancel Til Full before starting another job"
+        return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job"
     end
     self.replacementProblem = nil
     local status = self.jobs:status()
@@ -544,7 +562,7 @@ function Instance:runReplacement()
     if not self.replacement then return end
     if self.consumption and self.consumption:isBusy() then
         self.replacement = nil
-        self.replacementProblem = "Finish or cancel Til Full before starting another job"
+        self.replacementProblem = "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job"
         return
     end
     local status = self.jobs:status()
@@ -568,12 +586,12 @@ function Instance:cancel(silent)
 end
 function Instance:pause()
     self.replacement = nil
-    if self.consumption and self.consumption:isBusy() then return nil, "Til Full cannot be paused; cancel it instead" end
+    if self.consumption and self.consumption:isBusy() then return nil, (self.consumption.name or "Til Full") .. " cannot be paused; cancel it instead" end
     return self.jobs:pause()
 end
 function Instance:resume()
     self.replacement, self.replacementProblem = nil, nil
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before resuming another job" end
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before resuming another job" end
     local ok, err = self.jobs:resume()
     if ok then self.consumption = nil end
     return ok, err
@@ -586,7 +604,7 @@ function Instance:status()
 end
 function Instance:recoveryStatus() return self.recovery:status() end
 function Instance:recoverPersonalGear()
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel Til Full before recovering personal gear" end
+    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before recovering personal gear" end
     local ok, err = self.jobs:recoverPersonalGear()
     if ok then self.consumption = nil end
     return ok, err

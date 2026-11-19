@@ -1547,6 +1547,68 @@ case("Smart Load groups native alias matches across bags then orders remaining s
     equal(destinations[3], strongStorage); equal(destinations[4], f.inventory)
 end)
 
+case("a staged pour rechecks the original accessible shelf even after native pickup", function(f)
+    local original=f.junk
+    original.items={} -- no chosen item is required to validate the return anchor
+    assert(f.world:pourShelfReachable(original) and not f.world:pourShelfReachable(f.inventory))
+    assert(not f.world:pourShelfReachable(f.remote))
+    local locked=original.isLockedToCharacter
+    original.isLockedToCharacter=function() return true end
+    assert(not f.world:pourShelfReachable(original))
+    original.isLockedToCharacter=locked
+    original.parent.storage=f.tools -- original slot is no longer on the live object
+    assert(not f.world:pourShelfReachable(original))
+end)
+
+case("pour anchors reject an identical leaf once its actual bag changes nearby shelves", function(f)
+    local tote, storage=bag(f,f.junk,"Mobile")
+    local anchor=assert(f.world:pourShelfAnchor(storage))
+    assert(f.world:pourShelfReachable(storage,anchor))
+    assert(not f.world:pourShelfReachable(f.tools,anchor))
+    function f.junk:isLockedToCharacter() return true end
+    assert(not f.world:pourShelfReachable(storage,anchor))
+    function f.junk:isLockedToCharacter() return false end
+    tote.source=f.tools
+    assert(not f.world:pourShelfReachable(storage), "pointer without direct membership must not pass")
+    table.remove(f.junk.items)
+    f.tools.items[#f.tools.items+1]=tote
+    assert(f.world:pourShelfReachable(storage) and not f.world:pourShelfReachable(storage,anchor))
+end)
+
+case("pour checks the native outer trunk for a bag even beyond vehicle-center range", function(f)
+    local v,trunk=car(f)
+    local _,storage=bag(f,trunk,"Travel bag")
+    function v:canAccessContainer(index,p) return not self.closed and index==0 and p==f.player end
+    local anchor=assert(f.world:pourShelfAnchor(storage))
+    assert(f.world:pourShelfReachable(storage,anchor))
+    v.closed=true
+    assert(not f.world:pourShelfReachable(storage,anchor))
+    v.closed=false
+    function trunk:isLockedToCharacter() return true end
+    assert(not f.world:pourShelfReachable(storage,anchor))
+    function trunk:isLockedToCharacter() return false end
+    v.removed=true
+    assert(not f.world:pourShelfReachable(storage,anchor))
+end)
+
+case("pour allows exact registered placed bag contents but fails closed on stale ground anchors", function(f)
+    local placed,storage=bag(f,nil,"Ground bag")
+    local wrapper={getItem=function() return placed end,getSquare=function() return f.origin end,
+        getWorldObjectIndex=function() return 0 end}
+    placed.world=wrapper;f.origin.ground[1]=wrapper
+    local anchor=assert(f.world:pourShelfAnchor(storage))
+    assert(f.world:pourShelfReachable(storage,anchor))
+    f.origin.ground[1]={}
+    assert(not f.world:pourShelfReachable(storage,anchor))
+    f.origin.ground[1]=wrapper
+    local other=f.item(f.junk,"Fake")
+    wrapper.getItem=function() return other end
+    assert(not f.world:pourShelfReachable(storage,anchor))
+    wrapper.getItem=function() return placed end
+    placed.source=f.inventory;f.inventory.items[#f.inventory.items+1]=placed
+    assert(not f.world:pourShelfReachable(storage,anchor))
+end)
+
 case("consumption requires exact membership and current displayed nearby loot", function(f)
     getPlayerLoot = function() return {inventoryPane = {inventory = f.junk}, backpacks = {{inventory = f.tools}}} end
     equal(f.world:consumptionSource(f.inventory.items[1], f.inventory), true)

@@ -9,6 +9,22 @@ python3 tools/verify.py
 
 The build enforces ASCII runtime source, Lua 5.1 syntax, and executable Lua exclusively under `media/lua/client`. It packages the `common` resource directory and the versioned mod and records file and archive hashes. The verifier runs category/storage and native-boundary integration suites, keeps logs and a JSON report outside Git, and fails if source files change during the run. Tests derive expected category unions, capacity-limited trips, cleanup batches, protected items, and cancellation behavior from the request or explicit hand-worked fixtures.
 
+## Pour Into contracts
+
+Run the ordinary verifier for inventory and equipped-bag enumeration, stock compatibility and mixture snapshots, menu stacking/ordering and stock-icon fallbacks, shelf move acknowledgement, paired fluid changes, cancellation and user-queue preservation. The optional stock-Lua lane executes the real fluid wrapper and action with Java boundary doubles. Copy the game's unmodified `shared/Fluids/ISFluidTransferAction.lua` and `shared/Fluids/ISFluidContainer.lua` into a temporary directory, and pass the path to its original `shared/Fluids/ISFluidUtil.lua` separately:
+
+```sh
+lua5.1 tests/integration/pour-native.lua "$STOCK_FLUIDS_DIR" "$STOCK_FLUID_UTIL"
+```
+
+An additional stock inventory lane loads the game's unchanged `client/TimedActions/ISInventoryTransferAction.lua` and `shared/TimedActions/ISInventoryTransferUtil.lua` beneath the same vanilla `media/lua` directory. It checks normal submission, native acceptance/rejection, and Add-before-Remove observation:
+
+```sh
+lua5.1 tests/integration/pour-move.lua "$STOCK_MEDIA_LUA_DIR"
+```
+
+The fluid lane exercises the same constructor, SP completion and MP delayed-field observation as the [stock B42.22 action](https://github.com/Project-Zomboid-Community-Modding/ProjectZomboid-Vanilla-Lua/blob/3b21e63fe4905a0a300a4021d05d01a9bb534729/shared/Fluids/ISFluidTransferAction.lua). It is not a dedicated-server or UI playthrough. Use the [Pour Into acceptance plan](pour-acceptance.md) on licensed stock client/server and clean default LuaBuddy installations before claiming those player paths work.
+
 ## Native interpreter and file APIs
 
 Use a legally installed game directory containing `projectzomboid.jar`, `stdlib.lua`, and `jre64/bin/java`. JDK 25 is required to compile the development-only Java runner against the inspected game JAR.
