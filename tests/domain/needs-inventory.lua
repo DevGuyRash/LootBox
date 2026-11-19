@@ -258,3 +258,16 @@ test("exact attached hydration bag uses its own fluid without admitting its pouc
 end)
 
 print("PASS " .. count .. " NeedsInventory scenarios")
+
+test("after MP opening a fresh selection considers only ready food, never even calls a crafting planner",function()
+    local p,w=fixture();local opts={autoConsumeCarried=true,autoConsumeNested=true,autoConsumeRiskyOpen=true}
+    local can=item(p.main,"food");can.sealed=true;can.openingTool=item(p.main)
+    assert(Inventory.select(p,opts,"food",w)==can)
+    local old=Open.plan;local planned=0
+    Open.plan=function(...) planned=planned+1;return old(...) end
+    assert(Inventory.select(p,opts,"food",w,nil,nil,true)==nil and planned==0)
+    local inner=bag(bag(p.main).contents);local safe=item(inner.contents,"food")
+    assert(Inventory.select(p,opts,"food",w,nil,nil,true)==safe and planned==0)
+    safe.keep=true;assert(Inventory.select(p,opts,"food",w,nil,nil,true)==nil and planned==0)
+    Open.plan=old
+end)

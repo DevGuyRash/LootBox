@@ -2,8 +2,8 @@ local Opening = {}
 local safeName, sharpName = "OpenCannedFood", "OpenCannedFoodWithKnifeOrSharpStoneFlake"
 local prepared = setmetatable({}, {__mode = "k"})
 
-local function offline()
-    return isClient and isServer and not isClient() and not isServer()
+local function localController()
+    return isClient and isServer and not isServer()
 end
 
 local function carried(main, item)
@@ -19,11 +19,15 @@ local function canOpen(main, item)
         and not item:isAlcoholic() and (not item:isbDangerousUncooked() or item:isCooked())
 end
 
+local function hasLight(player, recipe)
+    return recipe:canBeDoneInDark() == true or player:tooDarkToRead() == false
+end
+
 local function findRecipe(player, item, name, risky)
     local recipe = getScriptManager():getCraftRecipe(name)
     if not recipe or not recipe:isVanilla() or recipe:getName() ~= name
         or (risky and not recipe:isAnySurfaceCraft()) or (not risky and not recipe:isInHandCraftCraft())
-        or recipe:getOutputCount() ~= 1 then return end
+        or recipe:getOutputCount() ~= 1 or not hasLight(player, recipe) then return end
     local inputs = recipe:getInputs()
     if inputs:size() ~= 2 then return end
     local itemSlot, toolSlot
@@ -58,7 +62,7 @@ local function craftSurface(player)
 end
 
 local function plan(player, opts, kind, item, callbacks)
-    if opts.autoConsumeCarried ~= true or kind ~= "food" or not offline() then return end
+    if opts.autoConsumeCarried ~= true or kind ~= "food" or not localController() then return end
     local main = player:getInventory()
     if not canOpen(main, item) then return end
     local function find(name, risky)
@@ -88,7 +92,7 @@ end
 function Opening.validate(player, opts, kind, _, item, selected, callbacks)
     local ok, valid = pcall(function()
         if not selected or selected.kind ~= kind or selected.item ~= item or opts.autoConsumeCarried ~= true
-            or (selected.risky and opts.autoConsumeRiskyOpen ~= true) or not offline() then return false end
+            or (selected.risky and opts.autoConsumeRiskyOpen ~= true) or not localController() then return false end
         local main = player:getInventory()
         if main ~= selected.source or not canOpen(main, item) or not allowedTool(main, selected.tool, callbacks)
             or item:getID() ~= selected.itemId or selected.tool:getID() ~= selected.toolId then return false end
@@ -113,14 +117,48 @@ local function exact(list, first, second)
         or (list:get(0) == second and list:get(1) == first))
 end
 
+-- The server resolves manual inputs by ID. Reject duplicate carried IDs
+-- before sending a stock action, and require complete, bounded absence later.
+local function matchesIds(main, expected)
+    local seen, queue, found, visited = {[main]=true}, {main}, {}, 0
+    for _, container in ipairs(queue) do
+        local items = container:getItems()
+        for i = 0, items:size() - 1 do
+            visited = visited + 1
+            local item = items:get(i)
+            if visited > 1024 or not item then return false end
+            local id = item:getID()
+            if expected[id] ~= nil then
+                if item ~= expected[id] or found[id] then return false end
+                found[id] = true
+            end
+            local nested = item.getInventory and item:getInventory()
+            if nested and not seen[nested] then
+                if #queue >= 64 then return false end
+                seen[nested], queue[#queue + 1] = true, nested
+            end
+        end
+    end
+    for id, item in pairs(expected) do
+        if item and not found[id] then return false end
+    end
+    return true
+end
+
+local function uniqueInputs(main, selected)
+    return selected.itemId ~= selected.toolId
+        and matchesIds(main, {[selected.itemId]=selected.item, [selected.toolId]=selected.tool})
+end
+
 -- Construct only. The caller must validate the live option/protection/idle
 -- state again when admitting, tracking and stopping this exact native action.
 local function action(player, selected, guard)
-    if not offline() or guard() ~= true then return end
+    if not localController() or guard() ~= true then return end
     local main = player:getInventory()
     local item, tool, recipe = selected.item, selected.tool, selected.recipe
     if main ~= selected.source or not canOpen(main, item) or not carried(main, tool)
-        or item:getID() ~= selected.itemId or tool:getID() ~= selected.toolId then return end
+        or item:getID() ~= selected.itemId or tool:getID() ~= selected.toolId
+        or (isClient() and not uniqueInputs(main, selected)) then return end
     local surface
     if selected.risky then
         surface = craftSurface(player)
@@ -137,17 +175,9 @@ local function action(player, selected, guard)
         or not logic:canPerformCurrentRecipe()
         or not exact(logic:getRecipeData():getAllInputItems(), item, tool) then return end
     local native = ISHandcraftAction.FromLogic(logic, 0)
-    if not native or native.Type ~= "ISHandcraftAction" or native.character ~= player or native.craftRecipe ~= recipe
-        or native.eatPercentage ~= 0 or native.isoObject ~= surface
-        or not exact(native.containers, main) or not exact(native.items, item, tool) then return end
-    local itemIndex, toolIndex = recipe:getIndexForIO(selected.itemSlot), recipe:getIndexForIO(selected.toolSlot)
-    if itemIndex == toolIndex or not exact(native.manualInputs[itemIndex], item)
-        or not exact(native.manualInputs[toolIndex], tool) then return end
-    for index in pairs(native.manualInputs) do
-        if index ~= itemIndex and index ~= toolIndex then return end
-    end
-    if guard() ~= true then return end
-    prepared[native] = {selected = selected, surface = surface}
+    if not native then return end
+    prepared[native] = {selected = selected, surface = surface, multiplayer = isClient()}
+    if not Opening.preflight(player, selected, native) or guard() ~= true then return end
     return native
 end
 
@@ -156,14 +186,43 @@ function Opening.action(player, selected, guard)
     if ok then return native end
 end
 
+-- Last client-side check in waitToStart, before stock builds the request.
+-- Native start has not yet rebuilt logic; validate the actual serialized inputs.
+function Opening.preflight(player, selected, native)
+    local ok, allowed = pcall(function()
+        local receipt = native and prepared[native]
+        if not localController() or not receipt or receipt.selected ~= selected
+            or receipt.multiplayer ~= isClient() or native.Type ~= "ISHandcraftAction"
+            or native.character ~= player or native.craftRecipe ~= selected.recipe
+            or native.eatPercentage ~= 0 or native.isoObject ~= receipt.surface
+            or not hasLight(player, selected.recipe)
+            or (selected.risky and not withinReach(player, receipt.surface)) then return false end
+        local main, item, tool, recipe = player:getInventory(), selected.item, selected.tool, selected.recipe
+        if main ~= selected.source or not canOpen(main, item) or not carried(main, tool)
+            or item:getID() ~= selected.itemId or tool:getID() ~= selected.toolId
+            or not exact(native.containers, main) or not exact(native.items, item, tool)
+            or (receipt.multiplayer and not uniqueInputs(main, selected)) then return false end
+        local itemIndex, toolIndex = recipe:getIndexForIO(selected.itemSlot), recipe:getIndexForIO(selected.toolSlot)
+        if itemIndex == toolIndex or not exact(native.manualInputs[itemIndex], item)
+            or not exact(native.manualInputs[toolIndex], tool) then return false end
+        for index in pairs(native.manualInputs) do
+            if index ~= itemIndex and index ~= toolIndex then return false end
+        end
+        return true
+    end)
+    return ok and allowed == true
+end
+
 -- Stock start rebuilds its native crafting logic; check the real bindings
 -- immediately before the owned action can invoke the native recipe.
 function Opening.ready(player, selected, native)
     local ok, bound = pcall(function()
         local receipt, logic = prepared[native], native.logic
-        if not offline() or not receipt or receipt.selected ~= selected or native.character ~= player
+        if not localController() or not receipt or receipt.selected ~= selected or native.character ~= player
+            or receipt.multiplayer ~= isClient()
             or native.craftRecipe ~= selected.recipe or native.eatPercentage ~= 0 or not logic
             or logic:getRecipe() ~= selected.recipe or native.isoObject ~= receipt.surface
+            or not hasLight(player, selected.recipe)
             or (selected.risky and not withinReach(player, receipt.surface)) then return false end
         local main, item, tool = player:getInventory(), selected.item, selected.tool
         return main == selected.source and canOpen(main, item) and carried(main, tool)
@@ -173,12 +232,53 @@ function Opening.ready(player, selected, native)
     return ok and bound == true
 end
 
+local function multiplayerReceipt(player, selected, native)
+    local receipt = native and prepared[native]
+    if localController() and isClient() and receipt and receipt.multiplayer == true
+        and receipt.selected == selected and native.character == player and native.craftStarted == true
+        and native.craftRecipe == selected.recipe and native.eatPercentage == 0 then return receipt end
+end
+
+-- Called after native start rebuilt its actual manual inputs.
+function Opening.markStarted(player, selected, native)
+    local receipt = multiplayerReceipt(player, selected, native)
+    if not receipt or not Opening.ready(player, selected, native) then return false end
+    local ok, unique = pcall(uniqueInputs, selected.source, selected)
+    if not ok or not unique then return false end
+    receipt.started = true
+    return true
+end
+
+-- Only call from this exact owned action's native perform, not stop/UI callbacks.
+-- The server's Done state confirms the transaction ended, not its output.
+function Opening.markDone(player, selected, native)
+    local receipt = multiplayerReceipt(player, selected, native)
+    if not receipt or not receipt.started then return false end
+    receipt.done = true
+    return true
+end
+
+-- Poll separate normal inventory synchronization. No recipe or output proof is
+-- available, so callers may only begin a new independent ready-food decision.
+function Opening.openOnly(player, selected, native)
+    local ok, settled = pcall(function()
+        local receipt = multiplayerReceipt(player, selected, native)
+        if not receipt or not receipt.done then return false end
+        local main, item = player:getInventory(), selected.item
+        return main == selected.source and item:getID() == selected.itemId
+            and item:getContainer() == nil and not (item.getWorldItem and item:getWorldItem())
+            and matchesIds(main, {[selected.itemId]=false})
+    end)
+    return ok and settled == true
+end
+
 -- Use only the native action's own output receipt, never "another can of
 -- the same kind" from an inventory rescan. AddOrDrop may put it on the floor.
 function Opening.output(player, selected, native)
     local ok, item = pcall(function()
         local receipt = prepared[native]
-        if not offline() or not receipt or receipt.selected ~= selected or native.character ~= player or native.craftRecipe ~= selected.recipe
+        if not localController() or isClient() or not receipt or receipt.multiplayer
+            or receipt.selected ~= selected or native.character ~= player or native.craftRecipe ~= selected.recipe
             or not native.logic then return end
         local main = player:getInventory()
         if selected.source ~= main or carried(main, selected.item) then return end
