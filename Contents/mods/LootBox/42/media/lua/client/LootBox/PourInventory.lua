@@ -1,6 +1,6 @@
 local Stacks = require "LootBox/PourStacks"
 local Pour = {}
-local MAX_ITEMS, MAX_CONTAINERS, MAX_DEPTH = 4096, 48, 1
+local MAX_ITEMS, MAX_CONTAINERS, MAX_DEPTH = 4096, 48, 8
 local MAX_TARGETS, MAX_CHOICE_WORK = 512, 8192
 
 local function call(object, method, arg, second)
@@ -67,7 +67,7 @@ local function entryFor(player, item, container, scope, path)
         or call(fluid, "canPlayerEmpty") ~= true then return nil end
     local capacity, amount, free = call(fluid, "getCapacity"), call(fluid, "getAmount"), call(fluid, "getFreeCapacity")
     if not finite(capacity) or capacity <= 0 or not finite(amount) or amount < 0 or not finite(free) or free < 0 then return nil end
-    local where=path or (scope=="main" and "Main inventory" or scope=="equipped" and "Equipped" or "Displayed loot")
+    local where=path or (scope=="main" and "Main inventory" or scope=="equipped" and "Equipped" or scope=="carried" and "Carried" or "Displayed loot")
     local label=itemName(item) .. " | " .. where
     return {id=id, fullType=fullType, item=item, object=object, container=container, scope=scope, fluid=fluid,groundAnchor=groundAnchor,
         capacity=capacity, amount=amount, free=free, label=label, icon=call(item, "getTex")}
@@ -127,11 +127,12 @@ local function scan(player, world, loot, allowLoot)
                         and call(world,"consumptionSource",item,container)==true)) then
                         result[#result+1]=entry
                     end
-                    if gear and current.depth < MAX_DEPTH then
+                    if scope~="loot" then
                         local bag=call(item,"getInventory")
                         if bag and not containers[bag] and call(bag,"getContainingItem") == item then
-                            if #todo<MAX_CONTAINERS then
-                                todo[#todo+1]={container=bag, scope="equipped", depth=current.depth+1, path=itemName(item)}
+                            if #todo<MAX_CONTAINERS and current.depth<MAX_DEPTH then
+                                todo[#todo+1]={container=bag, scope=scope or (gear and "equipped" or "carried"),
+                                    depth=current.depth+1, path=itemName(item)}
                             else truncated=true end
                         end
                     end
@@ -240,8 +241,8 @@ local function plan(snapshot, sourceItem, options, budget, capture)
         local free=string.format("%.3f",entry.free):gsub("0+$",""):gsub("%.$","")
         entry.label=entry.label.." | "..free.." L free"
     end
-    local weight=options.pourFillScope=="equipped-first" and {equipped=1,main=2,loot=3}
-        or {main=1,equipped=2,loot=3}
+    local weight=options.pourFillScope=="equipped-first" and {equipped=1,main=2,carried=3,loot=4}
+        or {main=1,equipped=2,carried=3,loot=4}
     table.sort(fill,function(a,b)
         if a.scope~=b.scope then return weight[a.scope]<weight[b.scope] end
         if a.free~=b.free then
@@ -309,8 +310,7 @@ function Pour.accessible(player, world, entry, lootPane, allowFluidRefresh)
             if not container or seen[container] or call(container,"isLockedToCharacter",player)~=false then return false end
             if container==main then
                 local gear=equipped(player,child)
-                if depth>0 and not gear then return false end
-                scope=gear and "equipped" or "main"
+                scope=gear and "equipped" or depth>0 and "carried" or "main"
                 break
             end
             seen[container]=true
@@ -351,13 +351,13 @@ function Pour.mix(entry)
     local ok, ratios=pcall(function()
         local size=sample:size()
         if size<1 or size>128 then return nil end
-        local result={}
+        local result,nonempty={},false
         for index=0,size-1 do
             local kind,ratio=sample:getFluid(index),sample:getPercentage(index)
             if not kind or not finite(ratio) or ratio<0 or result[kind]~=nil then return nil end
-            if ratio>0 then result[kind]=ratio end
+            if ratio>0 then result[kind]=ratio;nonempty=true end
         end
-        if next(result) then return result end
+        if nonempty then return result end
     end)
     local released=pcall(function() sample:release() end)
     if ok and released then return ratios end

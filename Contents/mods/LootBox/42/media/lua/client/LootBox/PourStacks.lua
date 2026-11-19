@@ -181,8 +181,12 @@ local function selection(items,index)
         for item in pairs(directItems) do if not refs[item] then return nil end end
         return members
     end
-    local item=next(directItems)
-    if item and not next(directItems,item) and direct(item,item:getContainer()) and finite(item:getID()) then return {item} end
+    local item
+    for candidate in pairs(directItems) do
+        if item then return nil end
+        item=candidate
+    end
+    if item and direct(item,item:getContainer()) and finite(item:getID()) then return {item} end
 end
 
 -- A sole raw InventoryItem is how stock passes explicitly expanded members.
