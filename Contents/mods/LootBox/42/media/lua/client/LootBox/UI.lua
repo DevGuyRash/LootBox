@@ -1340,6 +1340,10 @@ local preferenceRows = {
     { key = "showTips", title = "Show workflow tips", description = "Show additional guidance in the Home view. Tooltips and the Help field guide stay available." },
     { key = "tillFullEnabled", title = "Show Til Full in Eat and Drink", description = "Add Til Full beside native consumption amounts for the selected stack. Native restrictions still apply." },
     { key = "tillFullBothNeeds", title = "Til Full: satisfy both needs", description = "Off makes Eat restore hunger and Drink restore thirst, even when the item affects both. On targets both needs the item can restore and may consume beyond one already satisfied need. Native fullness limits still apply." },
+    { key = "autoDrinkEquipped", title = "Drink from equipped vessels", description = "While idle and thirsty, use a safe drink in worn, held or belt-attached gear. Requires the game's Auto-Drink setting. Normal vanilla water drinking gets first chance." },
+    { key = "autoConsumeCarried", title = "Eat and drink from carried supplies", description = "When hungry or thirsty and safe to stop, use one unprotected supply in your inventory or directly inside a carried bag. Drinking requires the game's Auto-Drink setting." },
+    { key = "autoConsumeNested", title = "Carried supplies: search bags inside bags", description = "Only affects Eat and drink from carried supplies. Off searches one bag deep; on also checks bags nested inside your carried bags. Never searches the ground or nearby storage." },
+    { key = "autoConsumeRiskyOpen", title = "Carried supplies: allow risky can opening", description = "Single-player only. If no eligible can opener is available, allow the game's sharp-tool recipe at a reachable work surface. It can damage the tool and cut your hand. Only affects automatic eating." },
     { key = "condenseButton", title = "Show Condense before Transfer All", description = "Add a Condense button to the inventory footer. It uses main inventory and eligible carried bags, independently of the pane you are viewing." },
     { key = "condenseRebalance", title = "Condense: optimize bag contents", description = "Off packs main-inventory items heaviest first into the best useful bags and leaves existing contents alone. On also redistributes contents and considers useful multi-item exchanges. Weight reduction comes first; at equal carried weight it groups matching types into fewer bags. It searches for an improvement, without promising a global optimum." },
     { key = "condenseUseUnequipped", title = "Condense: include unequipped bags", description = "Off leaves unequipped loot bags and their contents alone. On makes other carried bags eligible too. They are never automatically equipped, and their printed reduction does not apply while unequipped." },
@@ -1376,6 +1380,7 @@ function Window:buildSettings()
     local rows = {}
     for index, row in ipairs(preferenceRows) do
         if index == 7 then viewport:addItem("Review and reuse", {selectable = false, tone = "custom"}) end
+        if row.key == "autoDrinkEquipped" then viewport:addItem("Automatic food and drink", {selectable = false, tone = "custom"}) end
         if row.key == "condenseButton" then viewport:addItem("Condense", {selectable = false, tone = "custom", condenseSection = true}) end
         rows[#rows + 1] = viewport:addItem(row.title, {key = row.key, description = row.description},
             row.title .. "\n" .. row.description)

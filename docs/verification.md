@@ -294,3 +294,13 @@ not a real inventory, multiplayer server, or live in-game acceptance claim.
 Expanded-stack follow-up: regression coverage includes native flat selected-child
 context shape, individual-only selection, same-source/type filtering, hunger and
 thirst growth while consuming, and already-full no-op preserving unrelated jobs.
+
+## Native acceptance for automatic supplies
+
+For a release, replay these against the exact packaged files in a disposable save. Portable tests and the installed-interpreter lane are not live gameplay proof.
+
+1. With all four switches off, approach a hunger/thirst threshold while carrying food and water. Only the game's ordinary auto-drink should act. Enable only **Drink from equipped vessels** and test a stock hydration backpack, belt-attached or worn canteen, and an ordinary main-inventory bottle. Record actual thirst, volume and queued action counts. A selected vessel alone does not count as a sip.
+2. Test the carried option with food in the main inventory, a modded worn bag, and a bag inside that bag. Toggle nesting independently. A floor duplicate or dropped parent must never be selected. Repeat with a favorite, a Keep-protected item, mixed hazardous drink and unsafe raw food.
+3. In SP, watch one nested pure-water bottle enter main, a real stock sip, and a return to its exact original parent. Try walking, starting another action, dropping the parent before an outbound/return transfer, and filling the source bag before return. No unrelated action or item may be lost.
+4. With the can and regular opener in main, validate one stock opening action and only its own edible output. No knife opening with the risk switch off. When enabled, remove the opener, provide an eligible sharp tool and adjacent legal surface; confirm the game owns injury/tool wear and no walk is queued. Never use a production save to test this.
+5. In multiplayer confirm server-observed food/non-water beverage changes, no second sip while the server owns water intake, no speculative pure-water bag transfers, and no automated can opening. Test interruption and delayed or missing acknowledgement. Do not claim server results from client logs alone.

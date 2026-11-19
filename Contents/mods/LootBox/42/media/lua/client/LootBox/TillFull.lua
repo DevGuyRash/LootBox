@@ -20,30 +20,90 @@ local function safeFood(item)
         and not item:isAlcoholic() and (not item:isbDangerousUncooked() or item:isCooked())
 end
 
-local function fluidEffects(fluid, opening)
+local restrictedFluidCategories = {"Medical", "Fuel", "Industrial", "Colors", "Dyes", "HairDyes",
+    "Paint", "Poisons", "Drug", "Blood"}
+
+local function safeFluidPart(part, strict)
+    local beverage = part:isCategory(FluidCategory.Beverage)
+    local water = part:isCategory(FluidCategory.Water)
+    local props = part:getProperties()
+    if not (beverage or water) or part:isCategory(FluidCategory.Hazardous) or part:isCategory(FluidCategory.Alcoholic)
+        or part:isPoisonous() or props:getPoison() > 0 or props:getAlcohol() > 0
+        or props:getFoodSicknessChange() > 0 then return false end
+    if strict then
+        for _, name in ipairs(restrictedFluidCategories) do
+            local category = FluidCategory[name]
+            if category and part:isCategory(category) then return false end
+        end
+        -- When this build exposes the Java collection, fail closed on other
+        -- categories even if a beverage flag is also present.
+        if part.getCategories then
+            local known, size = pcall(function() return part:getCategories():size() end)
+            if known and size ~= (beverage and 1 or 0) + (water and 1 or 0) then return false end
+        end
+    end
+    return true
+end
+
+local function fluidEffects(fluid, opening, strict)
     local properties = fluid:getProperties()
     if properties:getAlcohol() > 0 then return nil, "Til Full does not drink alcohol; choose a normal Drink amount instead" end
     if fluid:isEmpty() or (not opening and not fluid:canPlayerEmpty()) or fluid:isPoisonous() or fluid:isTainted()
         or properties:getPoison() > 0 or properties:getFoodSicknessChange() > 0 then
         return nil, "This drink is empty, sealed, or unsafe"
     end
-    local sample = fluid:createFluidSample()
-    local ok, safe = pcall(function()
-        for index = 0, sample:size() - 1 do
-            if sample:getPercentage(index) > 0 then
-                local part = sample:getFluid(index)
-                local props = part:getProperties()
-                if not (part:isCategory(FluidCategory.Beverage) or part:isCategory(FluidCategory.Water))
-                    or part:isCategory(FluidCategory.Hazardous) or part:isCategory(FluidCategory.Alcoholic)
-                    or part:isPoisonous() or props:getPoison() > 0 or props:getAlcohol() > 0
-                    or props:getFoodSicknessChange() > 0 then return false end
+    if strict and fluid.isMixture and fluid.getPrimaryFluid and fluid:isMixture() == false then
+        local primary = fluid:getPrimaryFluid()
+        if not primary or not safeFluidPart(primary, true) then return nil, "This fluid cannot be safely consumed automatically" end
+    else
+        local sample = fluid:createFluidSample()
+        local ok, safe = pcall(function()
+            local observed = false
+            for index = 0, sample:size() - 1 do
+                local proportion = sample:getPercentage(index)
+                if strict and (not finite(proportion) or proportion < 0) then return false end
+                if proportion > 0 then
+                    observed = true
+                    if not safeFluidPart(sample:getFluid(index), strict) then return false end
+                end
+            end
+            return not strict or observed
+        end)
+        sample:release()
+        if not ok or not safe then return nil, "This fluid mixture cannot be safely consumed automatically" end
+    end
+    return -properties:getHungerChange(), -properties:getThirstChange()
+end
+
+-- Automatic intake needs positive relief and must not apply a second harmful
+-- need effect or bypass a scripted Eat/Drink requirement. Manual choices retain
+-- their existing item and recipe policy.
+function TillFull.automaticEffects(item, kind, opening)
+    local ok, hunger, thirst = pcall(function()
+        if not item or opening or item:isSealed() or (item.isMedical and item:isMedical()) then return end
+        if ItemTag and item.hasTag and ((ItemTag.SMOKABLE and item:hasTag(ItemTag.SMOKABLE))
+            or (ItemTag.MEDICAL and item:hasTag(ItemTag.MEDICAL))) then return end
+        local menu = item.getCustomMenuOption and item:getCustomMenuOption()
+        if menu and menu ~= "" and (not getText or (menu ~= getText("ContextMenu_Eat") and menu ~= getText("ContextMenu_Drink"))) then return end
+        local food = instanceof(item, "Food")
+        if food then
+            local onEat = item.getOnEat and item:getOnEat()
+            local required = item.getRequireInHandOrInventory and item:getRequireInHandOrInventory()
+            if not safeFood(item) or (onEat and onEat ~= "") or (required and required:size() ~= 0) then return end
+        end
+        if kind == "food" and food then
+            if item:getScriptItem():isCantEat() then return end
+            return -item:getHungerChange(), -item:getThirstChange()
+        elseif kind == "fluid" then
+            local fluid = item:getFluidContainer()
+            if fluid and finite(fluid:getCapacity()) and fluid:getCapacity() <= 3 then
+                return fluidEffects(fluid, false, true)
             end
         end
-        return true
     end)
-    sample:release()
-    if not ok or not safe then return nil, "This fluid mixture cannot be safely consumed automatically" end
-    return -properties:getHungerChange(), -properties:getThirstChange()
+    if not ok or not finite(hunger) or not finite(thirst) or hunger < 0 or thirst < 0
+        or (kind == "food" and hunger <= 0) or (kind == "fluid" and thirst <= 0) then return end
+    return {hunger = hunger, thirst = thirst}
 end
 
 function TillFull.portion(hunger, thirst, hrelief, trelief, both, kind)
@@ -58,9 +118,13 @@ function TillFull.portion(hunger, thirst, hrelief, trelief, both, kind)
     return math.min(1, fraction)
 end
 
-function TillFull.new(player, world, items, kind, both, openingRecipe, menuSource)
+function TillFull.new(player, world, items, kind, both, openingRecipe, menuSource, automatic)
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption action" end
     if type(items) ~= "table" then return nil, "Choose an item stack" end
+    if automatic and (type(automatic) ~= "table" or type(automatic.guard) ~= "function"
+        or #items ~= 1 or both or openingRecipe or menuSource) then
+        return nil, "Automatic intake requires one exact carried item and no opening recipe"
+    end
     local records, seen = {}, {}
     for _, item in ipairs(items) do
         if not seen[item] then
@@ -81,13 +145,13 @@ function TillFull.new(player, world, items, kind, both, openingRecipe, menuSourc
     end
     if #records == 0 or #records > 4096 then return nil, "Choose a nonempty bounded item stack" end
     return setmetatable({player = player, world = world, records = records, kind = kind, both = both == true,
-        index = 1, count = 0, native = Adapter.new(player), state = "running", attempts = 0, openingRecipe = openingRecipe, menuSource = menuSource}, TillFull)
+        index = 1, count = 0, native = Adapter.new(player), state = "running", attempts = 0, openingRecipe = openingRecipe, menuSource = menuSource, automatic = automatic}, TillFull)
 end
 
 -- Native multiplayer transfers may replace a Java object while retaining its
 -- immutable item ID. Resolve only the two endpoints of our dispatched action.
 function TillFull:resolveTransferred(record, confirming)
-    if not (isClient and isClient()) or not record.dispatched then return end
+    if self.automatic or not (isClient and isClient()) or not record.dispatched then return end
     local main, source = self.player:getInventory(), record.source
     local direct = record.item:getContainer()
     record.identityUnresolved, record.absentAtEndpoints = nil, nil
@@ -193,6 +257,16 @@ function TillFull:inspect(record)
     local sourceProblem = self:sourceProblem(record)
     if sourceProblem then return nil, sourceProblem end
     local item = record.item
+    if self.automatic then
+        if not self.automatic.guard(item, record.source, "admit") then return nil, "Automatic intake is no longer permitted" end
+        if self.automatic.openingPlan and not record.opened then
+            if self.kind ~= "food" or item:getContainer() ~= self.player:getInventory()
+                or not instanceof(item, "Food") or not safeFood(item)
+                or not (item:isSealed() or item:getScriptItem():isCantEat()) then return nil, "The exact opening item is no longer eligible" end
+            return {opening = true}
+        end
+        return TillFull.automaticEffects(item, self.kind)
+    end
     local protected, reason = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
     if protected then return nil, "Protected: " .. tostring(reason or "selected item") end
     local opening = self.openingRecipe and not record.opened and (item:isSealed()
@@ -232,7 +306,7 @@ function TillFull:finish(state, reason, outcome)
     if not self:isBusy() then return end
     self.state, self.reason = state, reason
     self.records, self.inflight, self.confirmation, self.opening = nil, nil, nil, nil
-    if self.launched and outcome ~= "open_only" and (outcome ~= "target" or self.count > 0) then
+    if not self.automatic and self.launched and outcome ~= "open_only" and (outcome ~= "target" or self.count > 0) then
         Completion.consume(self.player, state, reason, outcome, self.count, getTimestampMs() - self.startedAt)
     end
 end
@@ -415,7 +489,7 @@ function TillFull:step()
         end
         -- A planned partial had enough nutrition by construction. Floating
         -- subtraction or new metabolism is never permission for another bite.
-        if before.partial then
+        if self.automatic or before.partial then
             self:finish("finished", measured and "The requested portion satisfied the need measured before consumption"
                 or "Requested portion consumed; no more items were queued")
             return
@@ -451,7 +525,12 @@ function TillFull:step()
     if effects.opening then
         self.opening = true
         record.dispatched = true
-        local ok, failure = self.native:beginOpen(record.item, self.kind, self.openingRecipe, function()
+        local function openingTarget()
+            if self.automatic then
+                local h = needs(self.player)
+                self.targetReached = h <= 0
+                return self.targetReached
+            end
             local current, problem = self:inspect(record)
             if not current then
                 self.stopReason = problem or "The selected item is no longer safe to open"
@@ -462,7 +541,15 @@ function TillFull:step()
                 or TillFull.portion(h, t, current.hunger, current.thirst, self.both, self.kind)
             self.targetReached = fraction ~= nil and fraction <= 0
             return self.targetReached
-        end)
+        end
+        local ok, failure
+        if self.automatic then
+            ok, failure = self.native:beginExactOpen(record.item, self.automatic.openingPlan, openingTarget, function(phase)
+                return self.automatic.guard(record.item, record.source, phase)
+            end)
+        else
+            ok, failure = self.native:beginOpen(record.item, self.kind, self.openingRecipe, openingTarget)
+        end
         self.attempts = self.attempts + 1
         self.launched = self.launched or ok or self.native:isBusy()
         if not ok then
@@ -496,7 +583,21 @@ function TillFull:step()
     record.dispatched = true
     record.confirmationAudited = nil
     record.seenInMain = record.item:getContainer() == self.player:getInventory()
+    local autoGuard
+    if self.automatic then
+        autoGuard = function(phase, validateEffect)
+            local item = record.item
+            if not self.automatic.guard(item, record.source, phase) then return false end
+            if phase == "consume" and validateEffect then return TillFull.automaticEffects(item, self.kind) ~= nil end
+            return true
+        end
+    end
     local ok, failure = self.native:begin(record.item, self.kind, portion, function()
+        if self.automatic then
+            local h, t = needs(self.player)
+            self.targetReached = (self.kind == "food" and h <= 0) or (self.kind == "fluid" and t <= 0)
+            return self.targetReached
+        end
         local changed = self:sourceProblem(record, true) ~= nil
         local item = record.item
         local protected = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
@@ -519,7 +620,7 @@ function TillFull:step()
         local fraction = TillFull.portion(h, t, effects.hunger, effects.thirst, self.both, self.kind)
         self.targetReached = fraction ~= nil and fraction <= 0
         return self.targetReached
-    end, function() return needs(self.player) end)
+    end, function() return needs(self.player) end, autoGuard)
     self.attempts = self.attempts + 1
     self.launched = self.launched or ok or self.native:isBusy()
     if not ok then

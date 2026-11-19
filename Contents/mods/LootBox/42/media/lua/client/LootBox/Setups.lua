@@ -1,6 +1,7 @@
 local Setups = {}
 
-Setups.defaults = { tillFullEnabled = true, tillFullBothNeeds = false, contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
+Setups.defaults = { autoDrinkEquipped = false, autoConsumeCarried = false, autoConsumeNested = false, autoConsumeRiskyOpen = false,
+    tillFullEnabled = true, tillFullBothNeeds = false, contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
     vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true,
     confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
     smartTakeAllContainers = true, matchingTransferButtons = true, showQuickProgress = false, rememberLastSetup = true, showTips = true,
