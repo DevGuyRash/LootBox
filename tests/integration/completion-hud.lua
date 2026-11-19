@@ -69,6 +69,17 @@ hud.show(1,card("LOOTBOX","Loot run cancelled","0 items moved","stopped","Cancel
 paint(5320)
 assert(find("AUTOMINDFUL").x < width and find("Cancelled by you.").x >= width)
 assert(find("Cancelled by you.").y + sm <= 510)
+local function stopSquare(playerLeft)
+    for _, rect in ipairs(blocks) do
+        if rect.x >= playerLeft and rect.r > .8 and rect.w == rect.h and rect.w >= 6 and rect.w <= 20 then
+            for _, plate in ipairs(blocks) do
+                if plate.r == .20 and plate.w == plate.h and rect.x == plate.x + math.floor((plate.w-rect.w)/2)
+                    and rect.y == plate.y + math.floor((plate.h-rect.h)/2) then return true end
+            end
+        end
+    end
+end
+assert(stopSquare(width), "The cancelled job needs a filled stop square, not a line")
 print("PASS: per-survivor FIFO, distinct badges, four-second clock, meter and fade")
 -- Exercise wrap on a resized split viewport and at a larger font size.
 width, sm = 285, 21

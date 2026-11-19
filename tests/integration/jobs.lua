@@ -3035,7 +3035,7 @@ test("terminal job feedback counts confirmed deliveries once and stays quiet acr
     assert(finish(f).moved == 2)
     tick(f)
     assert(#cards == 1 and cards[1].title == "Loot run complete")
-    assert(cards[1].detail:find("2 items moved", 1, true) and cards[1].detail:find("2.5 weight", 1, true))
+    assert(cards[1].detail:find("2 items moved | 2.5 weight | ", 1, true), "Card details use a font-safe ASCII separator")
     assert(not cards[1].detail:find("100", 1, true), "Paused time should not be counted")
     PZActionCompletionHUD = nil
 end)
