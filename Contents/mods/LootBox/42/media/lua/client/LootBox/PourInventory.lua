@@ -1,6 +1,7 @@
+local Stacks = require "LootBox/PourStacks"
 local Pour = {}
 local MAX_ITEMS, MAX_CONTAINERS, MAX_DEPTH = 4096, 48, 1
-local MAX_TARGETS = 512
+local MAX_TARGETS, MAX_CHOICE_WORK = 512, 8192
 
 local function call(object, method, arg, second)
     if not object then return nil end
@@ -141,8 +142,10 @@ local function scan(player, world, loot, allowLoot)
 end
 
 local function order(a,b) return a.id<b.id end
-local function get(entries, item)
-    for _, e in ipairs(entries) do if e.item == item then return e end end
+local function copy(entry)
+    local duplicate={}
+    for key,value in pairs(entry) do duplicate[key]=value end
+    return duplicate
 end
 
 local function legalScope(source, target, options)
@@ -150,20 +153,76 @@ local function legalScope(source, target, options)
         and options.pourLootToLoot == true
 end
 
-function Pour.collect(player, world, sourceItem, lootPane, options)
-    options=options or {}
-    local entries,truncated=scan(player,world,lootPane,call(sourceItem,"getContainer")==lootPane)
-    local source=get(entries,sourceItem)
-    if not source or round(source.amount)<=0 then return nil,"The selected vessel cannot pour from here" end
-    local targets,fill,names,refs={},{},{},{[source.fluid]=true}
+function Pour.snapshot(player, world, container, lootPane)
+    local entries,truncated=scan(player,world,lootPane,container~=nil and container==lootPane)
     table.sort(entries,order)
-    for _, entry in ipairs(entries) do
-        if not refs[entry.fluid] and legalScope(source,entry,options) and Pour.compatible(source,entry) then
-            refs[entry.fluid]=true
-            if #targets>=MAX_TARGETS then truncated=true;break end
-            targets[#targets+1]=entry
+    local sources,names={},{}
+    for _,entry in ipairs(entries) do
+        if entry.container==container and round(entry.amount)>0 then
+            sources[entry.item]=entry
             names[entry.label]=(names[entry.label] or 0)+1
-            if options.pourFillScope ~= "main-only" or entry.scope=="main" then fill[#fill+1]=entry end
+        end
+    end
+    local labels,indices={},{}
+    for _,entry in ipairs(entries) do
+        if sources[entry.item] then
+            local name=entry.label
+            if names[name]>1 then
+                indices[name]=(indices[name] or 0)+1
+                name=name.." #"..indices[name]
+            end
+            labels[entry.item]=name
+        end
+    end
+    return {entries=entries,sources=sources,labels=labels,truncated=truncated,mixtures={}}
+end
+
+function Pour.source(snapshot, item)
+    local template=snapshot and snapshot.sources[item]
+    if not template then return nil end
+    local source=copy(template)
+    source.label=snapshot.labels[item]
+    return source
+end
+
+-- A snapshot is a menu-open boundary, not action authorization. Cache both
+-- successes and unreadable mixtures only here; execution still samples again.
+local function mixture(snapshot,entry)
+    if entry.amount==0 then return true end
+    local result=snapshot.mixtures[entry.fluid]
+    if result==nil then
+        result=Pour.mix(entry) or false
+        snapshot.mixtures[entry.fluid]=result
+    end
+    return result
+end
+
+local function plan(snapshot, sourceItem, options, budget, capture)
+    options=options or {}
+    local source=Pour.source(snapshot,sourceItem)
+    if not source then return nil,"The selected vessel cannot pour from here" end
+    if capture then
+        source.pourSignature=mixture(snapshot,source)
+        if not source.pourSignature then return nil,"The selected vessel's mixture is unavailable." end
+    end
+    local truncated=snapshot.truncated
+    local targets,fill,names,refs={},{},{},{[source.fluid]=true}
+    for _, template in ipairs(snapshot.entries) do
+        if budget then
+            if budget.left<=0 then return nil,"Too many vessel combinations; select one exact vessel." end
+            budget.left=budget.left-1
+        end
+        if not refs[template.fluid] and legalScope(source,template,options) and Pour.compatible(source,template) then
+            refs[template.fluid]=true
+            local signature=not capture or mixture(snapshot,template)
+            if signature then
+                if #targets>=MAX_TARGETS then truncated=true;break end
+                local entry=copy(template)
+                if capture and type(signature)=="table" then entry.pourSignature=signature end
+                targets[#targets+1]=entry
+                names[entry.label]=(names[entry.label] or 0)+1
+                if options.pourFillScope ~= "main-only" or entry.scope=="main" then fill[#fill+1]=entry end
+            end
         end
     end
     local indices={}
@@ -187,6 +246,39 @@ function Pour.collect(player, world, sourceItem, lootPane, options)
         return order(a,b)
     end)
     return {source=source,targets=targets,fill=truncated and {} or fill,truncated=truncated}
+end
+
+function Pour.plan(snapshot, sourceItem, options, capture)
+    return plan(snapshot,sourceItem,options,nil,capture)
+end
+
+function Pour.choose(snapshot, items, options)
+    if not snapshot or snapshot.truncated or type(items)~="table" or #items>MAX_ITEMS then
+        return nil,"The full stack could not be checked; select one exact vessel."
+    end
+    local choices,seen={},{}
+    for _,item in ipairs(items) do
+        local entry=snapshot.sources[item]
+        if entry and not seen[entry.id] then
+            seen[entry.id]=true
+            choices[#choices+1]=entry
+        end
+    end
+    table.sort(choices,Stacks.lessFilled)
+    local budget={left=MAX_CHOICE_WORK}
+    for _,candidate in ipairs(choices) do
+        if mixture(snapshot,candidate) then
+            local chosen,why=plan(snapshot,candidate.item,options,budget,true)
+            if not chosen then return nil,why end
+            if #chosen.targets>0 then return chosen end
+        end
+    end
+    return nil,"No selected vessel can pour into an eligible destination."
+end
+
+function Pour.collect(player, world, sourceItem, lootPane, options)
+    local snapshot=Pour.snapshot(player,world,call(sourceItem,"getContainer"),lootPane)
+    return Pour.plan(snapshot,sourceItem,options)
 end
 
 local function member(container, item)

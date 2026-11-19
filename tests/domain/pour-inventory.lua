@@ -10,6 +10,7 @@ local function container(owner)
     return c
 end
 local nextId=0
+local stockFluid = {}
 local function item(c, name, cap, amount)
     nextId=nextId+1
     local i={id=nextId, container=c, name=name}
@@ -24,6 +25,12 @@ local function item(c, name, cap, amount)
         function i.fluid:getCapacity() return self.cap end
         function i.fluid:getFreeCapacity() return self.cap-self.amount end
         function i.fluid:canPlayerEmpty() return self.cannotEmpty~=true end
+        function i.fluid:createFluidSample()
+            return {size=function() return self.amount>0 and 1 or 0 end,
+                getFluid=function(_,index) if index==0 then return stockFluid end end,
+                getPercentage=function(_,index) if index==0 then return 1 end end,
+                release=function() end}
+        end
     end
     c.items[#c.items+1]=i
     return i
@@ -205,5 +212,81 @@ do
     assert(not Pour.stillHere(p,w,plan.targets[1],loot,{}))
     plan=assert(Pour.collect(p,w,source,loot,{}))
     assert(#plan.targets==0)
+end
+do
+    local p,w,loot=fixture()
+    local a=item(loot,"Carton",3,2)
+    local b=item(loot,"Carton",3,1.5)
+    local m=item(p.main,"Bottle",1,0)
+    local second=item(p.main,"Bottle",1,.25)
+    local third=item(p.main,"Bottle",1,.5)
+    local conflict=item(loot,"Duplicate ID",3,1);conflict.id=third.id
+    local alias=item(loot,"Duplicate fluid ref",3,1);alias.fluid=b.fluid
+    loot.items[#loot.items+1]=b -- same real item row is not a second vessel
+    local reached=0
+    local check=w.consumptionSource
+    function w:consumptionSource(i,c) reached=reached+1;return check(self,i,c) end
+    local snap=Pour.snapshot(p,w,loot,loot)
+    local once=reached
+    local first,other=assert(Pour.source(snap,a)),assert(Pour.source(snap,b))
+    assert(first.label~=other.label and not Pour.source(snap,m))
+    assert(not Pour.source(snap,conflict) and not Pour.source(snap,alias))
+    assert(not Pour.source(Pour.snapshot(p,w,loot,nil),a) and reached==once)
+    local x,y=assert(Pour.plan(snap,a)),assert(Pour.plan(snap,b))
+    assert(#x.targets==2 and #y.targets==2 and reached==once)
+    assert(x.targets[1].item==m and x.targets[2].item==second and y.targets[1]~=x.targets[1])
+    assert(y.targets[1].label==x.targets[1].label)
+    local label=x.targets[1].label
+    x.targets[1].label="tampered";x.source.label="tampered"
+    a.fluid.amount=.5;m.fluid.amount=.8
+    local again=assert(Pour.plan(snap,a))
+    assert(again.source.label==first.label and again.source.amount==2 and again.targets[1].label==label
+        and again.targets[1].amount==0 and reached==once)
+    local enabled=assert(Pour.plan(snap,a,{pourLootToLoot=true}))
+    assert(#enabled.targets==3 and reached==once)
+    for _,e in ipairs(enabled.targets) do assert(e.item~=a and e.id~=third.id and e.item~=alias) end
+end
+do
+    local p,w,loot=fixture()
+    local lowLiters=item(p.main,"A",2,1)
+    local lowRatio=item(p.main,"A",8,2)
+    local sameRatioSmaller=item(p.main,"A",4,1)
+    local sameBothLater=item(p.main,"A",4,1)
+    local target=item(p.main,"Target",1,0)
+    local empty=item(p.main,"Empty",2,0)
+    local otherHolder=item(loot,"Hidden",20,.1)
+    local dupe=item(p.main,"Duplicate",100,1)
+    local dupeWitness=item(p.main,"Duplicate witness",100,1);dupeWitness.id=dupe.id
+    local snap=Pour.snapshot(p,w,p.main,loot)
+    local choices={empty,otherHolder,dupe,lowLiters,sameBothLater,lowRatio,sameRatioSmaller,sameRatioSmaller}
+    local chosen=assert(Pour.choose(snap,choices,{}))
+    assert(chosen.source.item==sameRatioSmaller, "smallest ratio, liters then exact stable ID")
+    chosen=assert(Pour.choose(snap,{lowLiters,lowRatio},{}))
+    assert(chosen.source.item==lowRatio, "smallest ratio must beat smaller absolute liters")
+    local accepted={}
+    FluidContainer.CanTransfer=function(from,to)
+        accepted[from]=(accepted[from] or 0)+1
+        return from~=sameRatioSmaller.fluid and to==target.fluid
+    end
+    chosen=assert(Pour.choose(snap,choices,{}))
+    assert(chosen.source.item==sameBothLater and chosen.targets[1].item==target)
+    assert(accepted[sameRatioSmaller.fluid] and accepted[sameBothLater.fluid]
+        and not accepted[lowLiters.fluid] and not accepted[lowRatio.fluid])
+    assert(not Pour.choose(snap,{empty,otherHolder,dupe},{}))
+    snap.truncated=true
+    assert(not Pour.choose(snap,choices,{}), "an incomplete group may not select an uncertain substitute")
+end
+do
+    local p,w,loot=fixture()
+    local choices={}
+    for i=1,5 do choices[i]=item(p.main,"Source",10,i*.1) end
+    for _=1,2200 do item(p.main,"Bottle",1,0) end
+    local probes=0
+    FluidContainer.CanTransfer=function(from)
+        probes=probes+1
+        return from==choices[5].fluid
+    end
+    local plan,why=Pour.choose(Pour.snapshot(p,w,p.main,loot),choices,{})
+    assert(not plan and why:find("Too many",1,true) and probes<=8192)
 end
 print("PASS PourInventory scope, order, exact endpoints and native suitability")

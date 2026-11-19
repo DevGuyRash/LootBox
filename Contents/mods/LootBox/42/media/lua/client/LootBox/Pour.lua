@@ -80,7 +80,9 @@ function Pour:finish(state, reason)
     local function report(s)
         if not (held(s) or s.uncertain or self.moving==s) then return end
         local where="location unconfirmed; check the original displayed storage as well"
-        local ok,known,live=pcall(self.accessible,self,s,true)
+        -- A changed capacity invalidates the action, not the exact location
+        -- of an otherwise identified vessel when reporting an outstanding loan.
+        local ok,known,live=pcall(Inventory.accessible,self.player,self.world,s.live,self.shelf,true)
         if ok and known then
             if live.container==self.player:getInventory() then where="confirmed in main inventory"
             elseif live.container==s.selected.container then where="confirmed in original displayed storage" end
@@ -108,7 +110,11 @@ function Pour:cancel(silent)
 end
 
 function Pour:accessible(s,refresh)
-    return Inventory.accessible(self.player,self.world,s.live,self.shelf,refresh)
+    local ok,entry=Inventory.accessible(self.player,self.world,s.live,self.shelf,refresh)
+    -- Amounts legitimately evolve through stock pours. Capacity was part of
+    -- the selected fill ratio and maximum volume; never silently increase it.
+    if not ok or not sameAmount(entry.capacity,s.selected.capacity) then return false end
+    return true,entry
 end
 local function safeToMove(self,item)
     return item:isFavorite()==false and self.world:protected(item)==false
@@ -182,6 +188,9 @@ function Pour:tickMove()
     end
     s.live,s.borrowed,s.uncertain=fresh,not returning,false
     if self.cancelReason then self:finish("cancelled",self.cancelReason);return end
+    if not sameAmount(fresh.capacity,s.selected.capacity) then
+        self:unwind("The received vessel capacity changed; no further pour was requested.",s);return
+    end
     if returning and s==self.target and not self.endReason then self.index,self.target=self.index+1,nil end
 end
 
