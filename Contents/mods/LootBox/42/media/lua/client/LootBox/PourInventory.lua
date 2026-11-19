@@ -46,17 +46,22 @@ end
 
 local function entryFor(player, item, container, scope, path)
     local id,fullType = call(item, "getID"), call(item,"getFullType")
-    local object = item
+    local object,groundAnchor = item,nil
     if not finite(id) or call(item, "isSealed") ~= false then return nil end
     local fluid=call(item,"getFluidContainer")
     if call(container, "getType") == "floor" then
-        -- The stock inventory context gives the eligible world component
-        -- precedence here. We do not borrow floor items to reach item-owned fluid.
+        -- True world components transfer in place. Ordinary item-owned
+        -- fluid is only eligible through an exact native ground loan.
         local floorObject=call(item,"getWorldItem")
         local component=call(floorObject,"getFluidContainer")
-        if not component or call(component,"isMultiTileMoveable")~=false
-            or call(floorObject,"getItem")~=item or not adjacentFloor(player,floorObject) then return nil end
-        object,fluid=floorObject,component
+        if call(floorObject,"getItem")~=item or not adjacentFloor(player,floorObject) then return nil end
+        if component and call(component,"getOwner")==floorObject then
+            if call(component,"isMultiTileMoveable")~=false then return nil end
+            object,fluid=floorObject,component
+        elseif fluid and (not component or component==fluid) then
+            groundAnchor=require("LootBox/PourGround").capture(player,item,container)
+            if not groundAnchor then return nil end
+        else return nil end
     end
     if not fluid or call(fluid,"isMultiTileMoveable")==true or call(fluid, "getOwner") ~= object
         or call(fluid, "canPlayerEmpty") ~= true then return nil end
@@ -64,7 +69,7 @@ local function entryFor(player, item, container, scope, path)
     if not finite(capacity) or capacity <= 0 or not finite(amount) or amount < 0 or not finite(free) or free < 0 then return nil end
     local where=path or (scope=="main" and "Main inventory" or scope=="equipped" and "Equipped" or "Displayed loot")
     local label=itemName(item) .. " | " .. where
-    return {id=id, fullType=fullType, item=item, object=object, container=container, scope=scope, fluid=fluid,
+    return {id=id, fullType=fullType, item=item, object=object, container=container, scope=scope, fluid=fluid,groundAnchor=groundAnchor,
         capacity=capacity, amount=amount, free=free, label=label, icon=call(item, "getTex")}
 end
 
@@ -117,7 +122,7 @@ local function scan(player, world, loot, allowLoot)
                         ids[id]=true
                     end
                     local entry = entryFor(player,item,container,scope or (gear and "equipped" or "main"),current.path)
-                    if entry and (scope~="loot" or (world and (call(container,"getType")=="floor"
+                    if entry and (scope~="loot" or (world and (call(container,"getType")=="floor" and not entry.groundAnchor
                         or (call(item,"isFavorite")~=true and call(world,"protected",item)~=true))
                         and call(world,"consumptionSource",item,container)==true)) then
                         result[#result+1]=entry
@@ -318,6 +323,8 @@ function Pour.accessible(player, world, entry, lootPane, allowFluidRefresh)
     if scope~=entry.scope then return false end
     local live=entryFor(player,entry.item,entry.container,scope)
     if not live or live.id~=entry.id or live.fullType~=entry.fullType or (not allowFluidRefresh and live.fluid~=entry.fluid) or live.object~=entry.object then return false end
+    if (entry.groundAnchor or live.groundAnchor)
+        and not require("LootBox/PourGround").sameAnchor(entry.groundAnchor,live.groundAnchor) then return false end
     return true,live
 end
 
