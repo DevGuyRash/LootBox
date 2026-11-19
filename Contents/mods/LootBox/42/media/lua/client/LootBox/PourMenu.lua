@@ -68,6 +68,10 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
     local options=Pour.options(prefs)
     local plan=Inventory.collect(getSpecificPlayer(index),instance.world,item,Pour.displayed(index),options)
     if not plan or #plan.targets==0 or not Pour.capture(plan.source) then return end
+    if plan.source.scope=="loot" and plan.source.container:getType()~="floor" then
+        plan.source.pourAnchor=instance.world:pourShelfAnchor(plan.source.container)
+        if not plan.source.pourAnchor then return end
+    end
     local targets, fill, admitted={},{},{}
     for _,e in ipairs(plan.targets) do
         if Pour.capture(e) then targets[#targets+1]=e;admitted[e]=true end

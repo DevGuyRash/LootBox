@@ -132,7 +132,6 @@ local function install(s)
         return checked(allow,self) and validStart(self,...)
     end
     function action:isValid(...)
-        if s.sent then return checked(allow,self) end
         return checked(allow,self) and valid(self,...)
     end
     function action:start(...)

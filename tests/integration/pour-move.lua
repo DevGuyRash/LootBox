@@ -146,6 +146,12 @@ f.q.queue={foreign};f.q.current=foreign
 stale:stop()
 assert(f.move:poll()==false and f.q.current==foreign and f.q.queue[1]==foreign)
 print("PASS stale native stop cannot clear a newer manual action")
+reset(true);assert(begin());f.invalid=true
+assert(not f.action:isValid(), "stock validator remains authoritative after request")
+f.action:stop()
+assert(f.move:poll()==false and f.item.parent==f.source and f.writes==0)
+print("PASS loss of stock admission after submission never continues or reports success")
+
 
 -- Optional stock Lua lane. Supply the root of installed media/lua or the
 -- unmodified B42.22 mirror; no game assets are required for portable runs.
@@ -167,7 +173,7 @@ if arg and arg[1] then
     for _,mod in ipairs({"TimedActions/ISBaseTimedAction","TimedActions/ISInventoryTransferAction",
         "TimedActions/ISGrabCorpseAction","ISUI/PlayerData/ISPlayerData"}) do package.loaded[mod]=true end
     ISInventoryPage={}
-    ISTradingUI={GetUIForPlayer=function()return nil end}
+    ISTradingUI={GetUIForPlayer=function()return f.trading and {isVisible=function()return true end} end}
     CharacterTrait={DEXTROUS=1,ALL_THUMBS=2,DESENSITIZED=3,HEMOPHOBIC=4}
     Metabolics={LightWork=1}
     function getServerOptions()return {getInteger=function()return 0 end} end
@@ -250,5 +256,10 @@ if arg and arg[1] then
     f.reject[12]=true
     a:update()
     assert(f.removed[1]==12 and f.removed[2] and f.move:poll()==false and f.item.parent==f.source)
+    a=stockSetup()
+    f.trading=true
+    assert(not a:isValid(), "ordinary stock validator stops while trading becomes active")
+    a:stop()
+    assert(f.removed[1]==12 and f.removed[2] and f.move:poll()==false and f.item.parent==f.source and f.writes==0)
     print("PASS pinned stock inventory action: exact MP request, positive result, delayed Add/Remove, and rejection")
 end
