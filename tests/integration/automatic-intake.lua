@@ -71,7 +71,7 @@ local function fixture(kind, nested)
         if not self.current then
             self.current=action
             action.action={}
-            action:start()
+            if not f.deferStart then action:start() end
         end
     end
     ISTimedActionQueue = {getTimedActionQueue=function() return q end,add=function(a) return q:addToQueue(a) end}
@@ -79,6 +79,7 @@ local function fixture(kind, nested)
         local a = {Type=typ,item=exact,character=p}
         function a:isValid() return true end
         function a:isValidStart() return not f.stuffed end
+        function a:waitToStart() if f.inWait then f.inWait() end; return false end
         function a:start() self.started=(self.started or 0)+1 end
         function a:forceCancel() self.cancelled=true end
         function a:stop()
@@ -159,7 +160,7 @@ local function fixture(kind, nested)
                 local a=action("ISHandcraftAction", nil)
                 local finished=a.perform
                 function a:perform()
-                    self:performRecipe()
+                    if not f.mp then self:performRecipe() end
                     return finished(self)
                 end
                 function a:performRecipe()
@@ -175,6 +176,12 @@ local function fixture(kind, nested)
             end,
             ready=function(character,plan,native)
                 return character==p and plan==f.openingPlan and native.Type=="ISHandcraftAction" and not f.staleBinding
+            end,
+            preflight=function() return not f.rebound end,
+            markStarted=function(_, _, native) return native.started==1 and not f.staleBinding end,
+            markDone=function(_, _, native) return native.started==1 and f.serverDone==true end,
+            openOnly=function(_, _, native)
+                return native.started==1 and f.serverDone==true and item.source==nil and not f.duplicateId
             end,
             output=function(character,plan,native)
                 assert(character==p and plan==f.openingPlan and native.Type=="ISHandcraftAction" and not native.performed)
@@ -320,23 +327,68 @@ test("exact SP opener follows only its synchronously identified native output",f
     assert(f.applied==1 and table.concat(f.dispatch,",")=="open,eat" and not f.controller:isBusy())
 end)
 test("unsafe or ambiguous opening has no automatic bite or second craft",function()
-    for _,problem in ipairs({"foreign","stale-binding","absent-output","mp"}) do
-        local f=fixture("food"); f:opening(); f.mp=problem=="mp"
-        f:tick()
-        if problem=="mp" then
-            assert(not f.q.current and #f.dispatch==0)
-        else
-            local other
-            if problem=="foreign" then other=f.action("Foreign",nil); f.q:addToQueue(other)
-            elseif problem=="stale-binding" then f.staleBinding=true
-            else f.missingOutput=true end
-            f:perform(); f:tick()
-            assert(f.q.current==other and not f.controller:isBusy())
-            assert(f.applied==0 and #f.dispatch==1)
-            if other then assert(not f.crafted and other.started==1 and not other.cancelled)
-            elseif problem=="stale-binding" then assert(not f.crafted)
-            else assert(f.crafted==1) end
+    for _,problem in ipairs({"foreign","stale-binding","absent-output"}) do
+        local f=fixture("food"); f:opening(); f:tick()
+        local other
+        if problem=="foreign" then other=f.action("Foreign",nil); f.q:addToQueue(other)
+        elseif problem=="stale-binding" then f.staleBinding=true
+        else f.missingOutput=true end
+        f:perform(); f:tick()
+        assert(f.q.current==other and not f.controller:isBusy())
+        assert(f.applied==0 and #f.dispatch==1)
+        if other then assert(not f.crafted and other.started==1 and not other.cancelled)
+        elseif problem=="stale-binding" then assert(not f.crafted)
+        else assert(f.crafted==1) end
+    end
+end)
+
+test("MP craft waits for native Done AND disappearance of exact input in either order; no follow-on bite",function()
+    for _,order in ipairs({"done-first","input-first"}) do
+        local f=fixture("food"); f.mp=true; f:opening(); f:tick()
+        local a=assert(f.q.current);assert(a.Type=="ISHandcraftAction" and a.started==1)
+        if order=="input-first" then
+            f.item.source=nil; f:tick(); assert(f.q.current==a and not a.stopped and a:isValid())
         end
+        f.serverDone=true; f:perform(); f:tick()
+        if order=="done-first" then
+            assert(f.controller:isBusy() and not f.q.current)
+            f.item.source=nil; f:tick(260)
+        end
+        assert(f.controller.state=="finished" and f.controller.mpOpenedInputRetired and f.controller.count==0)
+        assert(not f.crafted and f.applied==0 and #f.dispatch==1)
+    end
+end)
+test("MP rejected, timed out, protected, foreign and duplicate-id acknowledgements never authorize hunger",function()
+    for _,mode in ipairs({"rejected","not-removed","duplicate","foreign","cancelled","not-bound"}) do
+        local f=fixture("food"); f.mp=true; f:opening()
+        if mode=="not-bound" then f.staleBinding=true end
+        f:tick(); local a=assert(f.q.current)
+        if mode=="rejected" then a:stop()
+        else
+            f.serverDone=true
+            if mode~="not-removed" then f.item.source=nil end
+            if mode=="duplicate" then f.duplicateId=true end
+            f:perform()
+            if mode=="foreign" then f.q:addToQueue(f.action("Foreign",nil)) end
+            if mode=="cancelled" then f.safe=false end
+        end
+        f:tick(); f:tick(7001)
+        assert(not f.controller:isBusy() and not f.controller.mpOpenedInputRetired, mode)
+        assert(f.applied==0 and #f.dispatch==1,mode)
+        if mode=="foreign" then assert(f.q.current.Type=="Foreign" and not f.q.current.cancelled) end
+    end
+end)
+test("last native MP wait gate prevents Request even if guards change within stock wait",function()
+    for _,mode in ipairs({"mid-wait","before-wait","rebound"}) do
+        local f=fixture("food"); f.mp=true; f.deferStart=true; f:opening(); f:tick()
+        local a=assert(f.q.current); assert(a:isValid())
+        if mode=="mid-wait" then f.inWait=function() f.safe=false end
+        elseif mode=="rebound" then f.rebound=true else f.safe=false end
+        local sent=0
+        -- LuaTimedActionNew.start ignores Lua start's return value and sends
+        -- the ordinary Request, so a check in that callback would be too late.
+        if a:isValid() and a:waitToStart()==false then a:start(); sent=sent+1 end
+        assert(sent==0,mode); f:tick(); f:tick(); assert(not f.q.current and #f.dispatch==1 and f.applied==0)
     end
 end)
 

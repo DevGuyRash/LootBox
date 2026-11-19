@@ -266,6 +266,9 @@ local function checkAuto(self, state, phase, validateEffect)
         or ISInventoryPaneContextMenu.getEatingMask(player, false) then return false end
     for _, action in ipairs(queue.queue) do if not state.owned[action] then return false end end
     if queue.current and not state.owned[queue.current] then return false end
+    if phase == "waitOpening" then
+        return isClient() and state.remoteOpenStarted == true and state.autoGuard(phase) == true
+    end
     local source = item:getContainer()
     local expected = phase == "prepare" and state.source or player:getInventory()
     if source ~= expected or item:getID() ~= state.itemId
@@ -325,13 +328,18 @@ local function dispatchAuto(self, state, phase)
     state.owned[action] = true
     state.autoPhase, state.autoAction = phase, action
     state.autoDone = nil
-    action.stopOnWalk, action.stopOnAim = true, true
+    action.stopOnWalk, action.stopOnAim, action.stopOnRun = true, true, true
     local function emptyDrink()
         return phase == "consume" and state.kind == "fluid" and action.fluidContainer and action.fluidContainer:isEmpty()
     end
+    local remoteOpen = phase == "open" and isClient()
+    local function guardPhase()
+        if remoteOpen and state.remoteOpenStarted and item:getContainer() ~= main then return "waitOpening" end
+        return phase
+    end
     local function verify(allowEmpty, validateEffect)
         local sameFluid = phase ~= "consume" or state.kind ~= "fluid" or action.fluidContainer == state.item:getFluidContainer()
-        if (phase == "open" or action.item == state.item) and sameFluid and autoAllowed(self, state, allowEmpty and emptyDrink() and "settle" or phase, validateEffect) then
+        if (phase == "open" or action.item == state.item) and sameFluid and autoAllowed(self, state, allowEmpty and emptyDrink() and "settle" or guardPhase(), validateEffect) then
             return true
         end
         state.reason = state.reason or "Automatic intake yielded to a player action or unsafe item"
@@ -347,8 +355,34 @@ local function dispatchAuto(self, state, phase)
         return verify(false, phase == "consume" and state.kind == "food") and valid(self)
     end
     function action:isValidStart() return verify() and validStart(self) end
+    if isClient() and (phase == "open" or phase == "consume") then
+        -- LuaTimedActionNew.start sends the standard request even if Lua
+        -- start returns false. Gate the engine's actual last pre-start hook.
+        local wait = action.waitToStart
+        if type(wait) ~= "function" then return nil, "The game's remote action gate is unavailable" end
+        local function readyToRequest(native)
+            if not verify(false, true) then return false end
+            if remoteOpen and not state.openingAdapter.preflight(player, state.openingPlan, native) then
+                state.reason = "The exact stock recipe or inputs changed before the server request"
+                return false
+            end
+            return true
+        end
+        function action:waitToStart()
+            if not readyToRequest(self) or wait(self) ~= false then return true end
+            return not readyToRequest(self)
+        end
+    end
     if type(start) == "function" then
-        function action:start() if verify(false, false) then return start(self) end end
+        function action:start()
+            if not verify(false, false) then return end
+            local result = start(self)
+            if remoteOpen then
+                state.remoteOpenStarted = state.openingAdapter.markStarted(player, state.openingPlan, self)
+                if not state.remoteOpenStarted then state.reason = "The stock opening action did not bind its exact inputs" end
+            end
+            return result
+        end
     end
     if type(update) == "function" then
         function action:update() if not emptyDrink() and verify() then return update(self) end end
@@ -357,11 +391,14 @@ local function dispatchAuto(self, state, phase)
         -- perform also retires the native action. If it is too late to stop
         -- normally, let that cleanup run but do not apply unsafe SP nutrition.
         verify(true)
+        if remoteOpen and not state.reason then
+            state.remoteOpenDone = state.openingAdapter.markDone(player, state.openingPlan, self)
+        end
         local ok = perform(self)
         state.autoDone = ok == true
         return ok
     end
-    if phase == "open" then
+    if phase == "open" and not remoteOpen then
         local recipe = action.performRecipe
         if type(recipe) ~= "function" then return nil, "Unsupported native recipe lifecycle" end
         function action:performRecipe(...)
@@ -470,8 +507,8 @@ end
 
 function Native:beginExactOpen(item, plan, atTarget, guard)
     if self.active then return nil, "A consumption action is already active" end
-    if isClient() or isServer() or item:getContainer() ~= self.player:getInventory() then
-        return nil, "Automatic opening requires exact main-inventory inputs in single-player"
+    if isServer() or item:getContainer() ~= self.player:getInventory() then
+        return nil, "Automatic opening requires exact carried main-inventory inputs"
     end
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget, autoGuard = guard,
         item = item, itemId = item:getID(), source = item:getContainer(), openingPlan = plan, kind = "food"}
@@ -581,7 +618,8 @@ local function pollAuto(self, state, queue)
     if state.autoAction and present(queue, state.autoAction) then
         if not state.reason then
             if now() - state.started >= TIMEOUT then self:cancel("Native automatic action timed out")
-            elseif not autoAllowed(self, state, state.autoPhase)
+            elseif not autoAllowed(self, state, state.autoPhase == "open" and isClient() and state.remoteOpenStarted
+                and state.item:getContainer() ~= self.player:getInventory() and "waitOpening" or state.autoPhase)
                 and not (state.autoPhase == "consume" and state.kind == "fluid" and state.receipt and state.receipt.thirst > 0
                     and state.autoAction.fluidContainer:isEmpty() and autoAllowed(self, state, "settle"))
                 and (state.autoPhase ~= "consume" or not state.performed) then
@@ -593,6 +631,23 @@ local function pollAuto(self, state, queue)
     if state.reason or not state.autoDone then
         self.active = nil
         return false, state.reason or "Native automatic action ended without completion"
+    end
+    if state.autoPhase == "open" and isClient() then
+        if not state.remoteOpenDone or #queue.queue > 0 or queue.current or not autoAllowed(self, state, "waitOpening") then
+            self.active = nil
+            return false, "The server opening was interrupted or not acknowledged"
+        end
+        state.confirmUntil = state.confirmUntil or now() + 7000
+        if not state.checkedInputAt or now() - state.checkedInputAt >= 250 then
+            state.checkedInputAt = now()
+            if state.openingAdapter.openOnly(self.player, state.openingPlan, state.autoAction) then
+                self.active = nil
+                return true, "mpOpenSettled"
+            end
+        end
+        if now() < state.confirmUntil then return nil end
+        self.active = nil
+        return false, "The selected can's removal was not confirmed; no food was queued"
     end
     if state.autoPhase == "open" then
         self.active = nil

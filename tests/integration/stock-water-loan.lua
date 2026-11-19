@@ -13,6 +13,8 @@ CharacterStat = {THIRST={}}
 function getTimestampMs() return f.now end
 function isClient() return f.mp end
 function isServer() return false end
+function isItemTransactionDone(id) return f.transactions[id] == "done" end
+function isItemTransactionRejected(id) return f.transactions[id] == "rejected" end
 function getCore() return {getOptionAutoDrink=function() return f.stock end} end
 local function container()
     local c = {items=list()}
@@ -39,6 +41,7 @@ end
 local function item(id)
     local x = {id=id, favorite=false}
     function x:getID() return self.id end
+    function x:getFullType() return self.fullType or "Base.WaterBottle" end
     function x:getContainer() return self.container end
     function x:getInventory() return self.contents end
     function x:isFavorite() return self.favorite end
@@ -51,6 +54,19 @@ package.loaded["TimedActions/ISInventoryTransferUtil"] = true
 ISInventoryTransferUtil = {newInventoryTransferAction=function(character, i, from, to)
     local action = {action={},item=i,from=from,to=to,character=character,srcContainer=from,destContainer=to}
     function action:isValid() return true end
+    function action:start()
+        if f.mp then
+            self.transactionId = #f.admitted
+            f.transactions[self.transactionId] = "pending"
+        end
+    end
+    function action:perform()
+        if self:isValid() then self.performed = true end
+        self.transactionId = 0
+        local q = f.queue
+        table.remove(q.queue,1)
+        q.current = q.queue[1]
+    end
     function action:transferItem(item) put(item,self.to) end
     function action:forceCancel() self.cancelled = true end
     function action:forceStop() self:stop() end
@@ -62,10 +78,11 @@ ISTimedActionQueue = {
     add=function(action)
         f.admitted[#f.admitted + 1] = action
         f.queue:addToQueue(action)
+        action:start()
     end,
 }
 local function init()
-    f = {now=0,thirst=.31,stock=true,admitted={},allow=true,mp=false}
+    f = {now=0,thirst=.31,stock=true,admitted={},allow=true,mp=false,transactions={},playerStock=true}
     f.main, f.pouch, f.bag, f.bottle = container(), container(), item(1), item(2)
     f.pouch.bag, f.bag.contents = f.bag, f.pouch
     put(f.bag,f.main); put(f.bottle,f.pouch)
@@ -77,6 +94,7 @@ local function init()
         getProperties=function() return {getThirstChange=function() return -.2 end} end}
     f.player = {
         getInventory=function() return f.main end,
+        getAutoDrink=function() return f.playerStock end,
         hasTimedActions=function() return f.queue.current ~= nil end,
         getStats=function() return {get=function() return f.thirst end} end,
         getWaterSource=function(_, items)
@@ -95,7 +113,7 @@ local function init()
         end,
     }
     f.guard = function(x, original, phase)
-        assert(x==f.bottle and original==f.pouch)
+        assert(x:getID()==f.bottle:getID() and original==f.pouch)
         return f.allow and (phase~="return" or not f.denyReturn)
     end
 end
@@ -110,7 +128,7 @@ local function complete()
     end
 end
 init()
-f.mp=true; assert(not begin() and #f.admitted==0)
+f.mp=true; f.playerStock=false; assert(not begin() and #f.admitted==0)
 f.mp=false; f.stock=false; assert(not begin() and #f.admitted==0)
 f.stock=true
 local native = item(3); native.fluid=f.bottle.fluid; put(native,f.main)
@@ -179,4 +197,108 @@ assert(ours.stopOnWalk and ours.stopOnAim and ours.stopOnRun and not ours:canMer
 f.queue:addToQueue(manual);loan:tick()
 assert(f.bottle.container==f.pouch and f.queue.current==manual and #f.queue.queue==1 and not manual.cancelled)
 
-print("PASS: exact vanilla water loan, no competing stock source, no MP, no unresolved or unsafe return")
+-- The client requests only ordinary stock transfer. Server and replica steps
+-- explicitly arrive at different times; the local transfer effect is never called.
+local function mpStart()
+    init(); f.mp=true
+    local result=assert(begin())
+    assert(f.transactions[1]=="pending" and f.bottle.container==f.pouch)
+    return result
+end
+local function ack(id)
+    f.transactions[id]="done"
+    f.queue.current:perform()
+end
+loan=mpStart()
+loan:tick(); assert(loan:isBusy() and #f.admitted==1 and loan.count==0)
+ack(1)
+loan:tick(); assert(loan:isBusy() and #f.admitted==1 and loan.count==0)
+put(f.bottle,f.main); f.now=f.now+250; loan:tick()
+f.bottle.fluid.quantity=.08; loan:tick()
+assert(loan.count==0 and #f.admitted==1)
+f.thirst=.06; loan:tick()
+assert(loan.count==1 and #f.admitted==2 and f.transactions[2]=="pending")
+put(f.bottle,f.pouch); loan:tick()
+assert(loan:isBusy())
+ack(2); loan:tick()
+assert(loan.state=="finished" and f.bottle.container==f.pouch)
+
+loan=mpStart(); put(f.bottle,f.main); ack(1); loan:tick()
+f.thirst=.06; loan:tick(); assert(loan.count==0 and #f.admitted==1)
+f.bottle.fluid.quantity=.08; loan:tick(); assert(loan.count==1 and #f.admitted==2)
+
+loan=mpStart(); put(f.bottle,f.main); ack(1); loan:tick()
+f.bottle.fluid.quantity=.08; f.now=8000; loan:tick()
+assert(loan.state=="failed" and loan.count==0 and #f.admitted==1 and f.bottle.container==f.main)
+
+loan=mpStart(); f.transactions[1]="rejected"; f.queue.current:stop(); loan:tick()
+assert(loan.state=="cancelled" and #f.admitted==1 and not begin())
+
+loan=mpStart(); f.now=31000; loan:tick()
+assert(loan.state=="cancelled" and #f.admitted==1)
+put(f.bottle,f.main); f.transactions[1]="done"; loan:tick()
+assert(#f.admitted==1 and loan.count==0, "late approval deterministically never triggers return or a retry")
+
+local function duplicate(original, target, remaining)
+    local replica = item(original.id)
+    replica.fluid = setmetatable({quantity=remaining or original.fluid.quantity}, {__index=original.fluid})
+    put(replica,target)
+    return replica
+end
+local function remove(x)
+    local c=x.container
+    for index,v in ipairs(c.items) do if v==x then table.remove(c.items,index); break end end
+    x.container=nil
+end
+
+loan=mpStart()
+local old = f.bottle
+local received=duplicate(old,f.main,.08)
+loan:tick(); assert(loan:isBusy() and loan.item==old and loan.count==0)
+ack(1); loan:tick()
+assert(loan:isBusy() and loan.item==old and f.queue.current==nil)
+remove(old); f.now=f.now+250; f.thirst=.06; loan:tick()
+assert(loan.item==received and loan.count==1 and #f.admitted==2 and f.admitted[2].item==received)
+remove(received); ack(2); loan:tick(); assert(loan:isBusy())
+local returned=duplicate(received,f.pouch)
+f.now=f.now+250; loan:tick()
+assert(loan.state=="finished" and loan.item==returned and f.pouch:contains(returned))
+
+loan=mpStart()
+remove(f.bottle); ack(1); loan:tick(); assert(loan:isBusy() and loan.count==0)
+received=duplicate(f.bottle,f.main); received.fullType="Base.NotWaterBottle"
+f.now=f.now+250; loan:tick()
+assert(loan.state=="cancelled" and #f.admitted==1 and loan.item==f.bottle)
+
+loan=mpStart()
+remove(f.bottle); ack(1)
+duplicate(f.bottle,f.main); duplicate(f.bottle,f.main)
+loan:tick()
+assert(loan.state=="cancelled" and #f.admitted==1)
+
+loan=mpStart()
+put(f.bottle,f.main); ack(1); loan:tick()
+local alternate=item(44)
+alternate.fluid=setmetatable({quantity=.8},{__index=f.bottle.fluid})
+f.bottle.fluid.quantity=0; f.thirst=.035
+put(alternate,f.main)
+loan:tick()
+assert(loan.state=="cancelled" and loan.count==0 and #f.admitted==1)
+
+loan=mpStart()
+put(f.bottle,f.main); ack(1); loan:tick()
+f.bottle.fluid.quantity=0; f.thirst=.035
+loan:tick()
+assert(loan.count==1 and #f.admitted==2, "verified empty bottle may no longer be picked by vanilla")
+
+loan=mpStart()
+for i=1,1025 do put(item(i+55),f.pouch) end
+loan:tick()
+assert(loan.state=="cancelled" and #f.admitted==1)
+
+loan=mpStart()
+remove(f.bottle); ack(1); loan:tick()
+f.allow=false; loan:tick()
+assert(loan.state=="cancelled" and #f.admitted==1)
+
+print("PASS: exact vanilla water loan, SP/MP exact water loan, MP rejection and timeout, no unresolved or unsafe return")
