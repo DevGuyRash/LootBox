@@ -258,7 +258,153 @@ local function missingSource(item)
     return "The selected item is no longer in an available container"
 end
 
-function Native:begin(item, kind, portion, atTarget, needSampler)
+local function checkAuto(self, state, phase, validateEffect)
+    local player, queue, item = self.player, queueFor(self), state.item
+    if state.reason or interrupted(player) or flag(player, "isPlayerMoving")
+        or (Keyboard and isKeyDown and isKeyDown(Keyboard.KEY_ESCAPE))
+        or not ISInventoryPaneContextMenu.getEatingMask
+        or ISInventoryPaneContextMenu.getEatingMask(player, false) then return false end
+    for _, action in ipairs(queue.queue) do if not state.owned[action] then return false end end
+    if queue.current and not state.owned[queue.current] then return false end
+    local source = item:getContainer()
+    local expected = phase == "prepare" and state.source or player:getInventory()
+    if source ~= expected or item:getID() ~= state.itemId
+        or (item.getWorldItem and item:getWorldItem()) then return false end
+    if state.autoGuard(phase, validateEffect) ~= true then return false end
+    if (phase == "consume" or phase == "open") and state.atTarget() then
+        state.reason = "Requested limit reached"
+        return false
+    end
+    return true
+end
+
+local function autoAllowed(self, state, phase, validateEffect)
+    local ok, accepted = pcall(checkAuto, self, state, phase, validateEffect)
+    return ok and accepted == true
+end
+
+local function dispatchAuto(self, state, phase)
+    if not autoAllowed(self, state, phase, true) then return nil, "Automatic intake yielded to a player action or unsafe item" end
+    local queue, player, item, main = queueFor(self), self.player, state.item, self.player:getInventory()
+    if queue.current or #queue.queue > 0 then return nil, "Finish the current player action first" end
+    local action
+    if phase == "open" then
+        local opening = require "LootBox/NeedsOpening"
+        local problem
+        action, problem = opening.action(player, state.openingPlan, function() return autoAllowed(self, state, "open") end)
+        if not action or action.Type ~= "ISHandcraftAction" or action.character ~= player then
+            return nil, problem or "Native opening could not bind one exact handcraft action"
+        end
+        state.openingAdapter = opening
+    elseif phase == "consume" then
+        local ctor = state.kind == "food" and ISEatFoodAction or ISDrinkFluidAction
+        if not ctor or type(ctor.new) ~= "function" then return nil, "Native consumption is unavailable" end
+        local expected = state.kind == "food" and "ISEatFoodAction" or "ISDrinkFluidAction"
+        action = ctor:new(player, item, state.portion)
+        if not action or action.Type ~= expected or action.item ~= item or action.character ~= player then
+            return nil, "Native consumption could not bind the exact selected item"
+        end
+        state.consume = action
+    else
+        local source, dest = state.source, main
+        if phase == "return" then source, dest = main, state.source end
+        if not ISInventoryTransferUtil or type(ISInventoryTransferUtil.newInventoryTransferAction) ~= "function" then
+            return nil, "Native inventory transfer is unavailable"
+        end
+        action = ISInventoryTransferUtil.newInventoryTransferAction(player, item, source, dest)
+        if not action or action.Type ~= "ISInventoryTransferAction" or action.item ~= item or action.character ~= player
+            or action.srcContainer ~= source or action.destContainer ~= dest then
+            return nil, "Native transfer could not bind the exact selected item"
+        end
+        -- Stock transfer can coalesce adjacent same-endpoint actions at start
+        -- and completion. An automatic action must remain exactly one item.
+        function action:canMergeAction() return false end
+    end
+    local hooked, problem = hook(self, state, action)
+    if not hooked then return nil, problem end
+    state.owned[action] = true
+    state.autoPhase, state.autoAction = phase, action
+    state.autoDone = nil
+    action.stopOnWalk, action.stopOnAim = true, true
+    local function emptyDrink()
+        return phase == "consume" and state.kind == "fluid" and action.fluidContainer and action.fluidContainer:isEmpty()
+    end
+    local function verify(allowEmpty, validateEffect)
+        local sameFluid = phase ~= "consume" or state.kind ~= "fluid" or action.fluidContainer == state.item:getFluidContainer()
+        if (phase == "open" or action.item == state.item) and sameFluid and autoAllowed(self, state, allowEmpty and emptyDrink() and "settle" or phase, validateEffect) then
+            return true
+        end
+        state.reason = state.reason or "Automatic intake yielded to a player action or unsafe item"
+        return false
+    end
+    local valid, validStart = action.isValid, action.isValidStart
+    local update, start, perform = action.update, action.start, action.perform
+    local complete = action.complete
+    if type(valid) ~= "function" or type(validStart) ~= "function" then return nil, "Unsupported native admission" end
+    function action:isValid()
+        -- Finish the native UI cleanup when our own progress drained a bottle.
+        if emptyDrink() and state.receipt and state.receipt.thirst > 0 then return verify(true) end
+        return verify(false, phase == "consume" and state.kind == "food") and valid(self)
+    end
+    function action:isValidStart() return verify() and validStart(self) end
+    if type(start) == "function" then
+        function action:start() if verify(false, false) then return start(self) end end
+    end
+    if type(update) == "function" then
+        function action:update() if not emptyDrink() and verify() then return update(self) end end
+    end
+    function action:perform()
+        -- perform also retires the native action. If it is too late to stop
+        -- normally, let that cleanup run but do not apply unsafe SP nutrition.
+        verify(true)
+        local ok = perform(self)
+        state.autoDone = ok == true
+        return ok
+    end
+    if phase == "open" then
+        local recipe = action.performRecipe
+        if type(recipe) ~= "function" then return nil, "Unsupported native recipe lifecycle" end
+        function action:performRecipe(...)
+            if not verify() or not state.openingAdapter.ready(player, state.openingPlan, self) then
+                return false
+            end
+            local result = pack(recipe(self, ...))
+            local checked, output = pcall(state.openingAdapter.output, player, state.openingPlan, self)
+            if checked then state.openOutput = output end
+            return unpack(result, 1, result.n)
+        end
+    elseif phase == "consume" then
+        if state.kind == "food" then
+            -- Vanilla can apply a partial bite on stop; automatic intake must
+            -- not do that after the owner/safety check has failed.
+            function action:serverStop() end
+        end
+        if type(complete) ~= "function" then return nil, "Unsupported native completion" end
+        if state.kind == "fluid" then
+            local updateEat = action.updateEat
+            if type(updateEat) ~= "function" then return nil, "Unsupported native drink lifecycle" end
+            function action:updateEat(...)
+                -- Exactly one deep check at each native liquid mutation, not
+                -- repeated samples in poll, isValid, and animation updates.
+                if not emptyDrink() and verify(false, true) then return updateEat(self, ...) end
+            end
+        end
+        function action:complete(...)
+            -- A drink that was exhausted by its own update has nothing left
+            -- for complete() to do, and no longer passes the safety sampler.
+            if emptyDrink() then return verify(true) end
+            if not verify(false, state.kind == "food") then return false end
+            return complete(self, ...)
+        end
+    end
+    if not action:isValidStart() then return nil, "The game refused automatic intake" end
+    if not verify() or queue.current or #queue.queue > 0 then return nil, "Another player action was queued" end
+    ISTimedActionQueue.add(action)
+    if not present(queue, action) then return nil, "The game did not queue the automatic action" end
+    return true
+end
+
+function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard)
     if self.active then return nil, "A consumption action is already active" end
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption kind" end
     if type(portion) ~= "number" or portion ~= portion or portion <= 0 or portion > 1 then
@@ -286,6 +432,16 @@ function Native:begin(item, kind, portion, atTarget, needSampler)
             and portion >= remaining / base
     end
     self.active = state
+    if autoGuard then
+        state.autoGuard, state.portion = autoGuard, portion
+        local phase = state.source == self.player:getInventory() and "consume" or "prepare"
+        local dispatched, admitted, reason = pcall(dispatchAuto, self, state, phase)
+        if dispatched and admitted then return true end
+        local problem = dispatched and reason or "Native automatic admission failed: " .. tostring(admitted)
+        if state.autoAction and present(queue, state.autoAction) then self:cancel(problem)
+        else self.active = nil end
+        return nil, problem
+    end
     local dispatched, err = pcall(function()
         if kind == "food" then
             ISInventoryPaneContextMenu.eatItem(item, portion, self.player:getPlayerNum())
@@ -310,6 +466,22 @@ function Native:begin(item, kind, portion, atTarget, needSampler)
     if not state.consume then state.reason = state.reason or "The game did not queue a consumption action" end
     if state.reason then self:cancel(state.reason); return nil, state.reason end
     return true
+end
+
+function Native:beginExactOpen(item, plan, atTarget, guard)
+    if self.active then return nil, "A consumption action is already active" end
+    if isClient() or isServer() or item:getContainer() ~= self.player:getInventory() then
+        return nil, "Automatic opening requires exact main-inventory inputs in single-player"
+    end
+    local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget, autoGuard = guard,
+        item = item, itemId = item:getID(), source = item:getContainer(), openingPlan = plan, kind = "food"}
+    self.active = state
+    local checked, ok, failure = pcall(dispatchAuto, self, state, "open")
+    if checked and ok then return true end
+    local problem = checked and failure or "Native automatic opening failed"
+    if state.autoAction and present(queueFor(self), state.autoAction) then self:cancel(problem)
+    else self.active = nil end
+    return nil, problem
 end
 
 function Native:beginOpen(item, kind, recipe, atTarget)
@@ -404,6 +576,69 @@ local function openedNetworkVessel(self, state)
     if found and not found:isSealed() and found:getFluidContainer() then return found end
 end
 
+local function pollAuto(self, state, queue)
+    if state.reason then self:cancel(state.reason) end
+    if state.autoAction and present(queue, state.autoAction) then
+        if not state.reason then
+            if now() - state.started >= TIMEOUT then self:cancel("Native automatic action timed out")
+            elseif not autoAllowed(self, state, state.autoPhase)
+                and not (state.autoPhase == "consume" and state.kind == "fluid" and state.receipt and state.receipt.thirst > 0
+                    and state.autoAction.fluidContainer:isEmpty() and autoAllowed(self, state, "settle"))
+                and (state.autoPhase ~= "consume" or not state.performed) then
+                self:cancel("Automatic intake yielded to a player action or unsafe item")
+            end
+        end
+        return nil
+    end
+    if state.reason or not state.autoDone then
+        self.active = nil
+        return false, state.reason or "Native automatic action ended without completion"
+    end
+    if state.autoPhase == "open" then
+        self.active = nil
+        if #queue.queue > 0 or queue.current then return false, "Another player action was queued" end
+        if not state.openOutput then return false, "The exact native opening output was not confirmed" end
+        return true, "opened", state.openOutput
+    end
+    if state.autoPhase == "prepare" then
+        if #queue.queue > 0 or queue.current then
+            self.active = nil
+            return false, "Another player action was queued"
+        end
+        if state.item:getContainer() ~= self.player:getInventory() then
+            -- A client transfer can retire before its authoritative update.
+            -- Wait briefly for this exact reference; do not choose a replacement.
+            state.transferUntil = state.transferUntil or now() + 2000
+            if state.item:getContainer() == state.source and now() < state.transferUntil then return nil end
+            self.active = nil
+            return false, "The exact carried item transfer was not confirmed"
+        end
+        local sampled, target = pcall(state.atTarget)
+        if not sampled or target then
+            self.active = nil
+            return false, sampled and "Requested limit reached" or "Could not read current fullness"
+        end
+        local checked, ok, failure = pcall(dispatchAuto, self, state, "consume")
+        if checked and ok then return nil end
+        state.reason = checked and failure or "Native automatic consumption failed"
+        if state.autoAction and present(queue, state.autoAction) then self:cancel(state.reason); return nil end
+        self.active = nil
+        return false, state.reason
+    end
+    if state.autoPhase == "consume" and state.source ~= self.player:getInventory()
+        and #queue.queue == 0 and not queue.current and state.item:getContainer() == self.player:getInventory()
+        and CharacterTrait and CharacterTrait.DISORGANIZED and self.player.hasTrait
+        and not self.player:hasTrait(CharacterTrait.DISORGANIZED) then
+        -- Only the original exact carried bag is a valid return. If a player
+        -- takes over or the bag changes, leave the item in carried inventory.
+        local checked, ok = pcall(dispatchAuto, self, state, "return")
+        if checked and ok then return nil end
+        if state.autoAction and present(queue, state.autoAction) then self:cancel("Native automatic return failed"); return nil end
+    end
+    self.active = nil
+    return true, "complete", nil, state.receipt
+end
+
 function Native:poll()
     local state = self.active
     if not state then return false, "No consumption action is active" end
@@ -411,6 +646,7 @@ function Native:poll()
     -- leave a detached return behind if completion did not arrive.
     settleReturn(self, state, false)
     local queue = queueFor(self)
+    if state.autoGuard then return pollAuto(self, state, queue) end
     if queue.current == state.consume then state.reachedConsumption = true end
     if not state.reason then
         -- Native consumption has already ended after perform. Its restoration

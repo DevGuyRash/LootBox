@@ -6,6 +6,7 @@ local Jobs = require "LootBox/Jobs"
 local Setups = require "LootBox/Setups"
 local Recovery = require "LootBox/Recovery"
 local TillFull = require "LootBox/TillFull"
+local AutoNeeds = require "LootBox/AutoNeeds"
 require "LootBox/CompletionHUD"
 
 local App = {}
@@ -14,6 +15,7 @@ Instance.__index = Instance
 local sessions, definitions, graph, loadError = {}, nil, nil, nil
 local nextCategoryId = 1
 local preferences, preferencesError
+local lastNeedsUpdate = {}
 
 local function copy(value)
     if type(value) ~= "table" then return value end
@@ -22,14 +24,19 @@ local function copy(value)
     return result
 end
 
-function App.getPreferences()
+local function currentPreferences()
     if not preferences then
         local data, err = Store.load("LootBox/preferences")
         preferences, preferencesError = Setups.preferences(data or {})
         preferencesError = err or preferencesError
         if not preferences then preferences = copy(Setups.defaults) end
     end
-    return copy(preferences), preferencesError
+    return preferences, preferencesError
+end
+
+function App.getPreferences()
+    local options, err = currentPreferences()
+    return copy(options), err
 end
 
 function App.reviewPreference(request, binReview)
@@ -51,7 +58,15 @@ function App.setPreferences(patch)
     end
     local ok
     ok, err = Store.save("LootBox/preferences", candidate)
-    if ok then preferences = candidate end
+    if ok then
+        if candidate.autoDrinkEquipped ~= preferences.autoDrinkEquipped or candidate.autoConsumeCarried ~= preferences.autoConsumeCarried
+            or candidate.autoConsumeNested ~= preferences.autoConsumeNested or candidate.autoConsumeRiskyOpen ~= preferences.autoConsumeRiskyOpen then
+            for _, instance in pairs(sessions) do
+                if instance.autoNeeds then instance.autoNeeds.stock, instance.autoNeeds.nativeAttempt, instance.autoNeeds.blocked = nil, nil, {} end
+            end
+        end
+        preferences = candidate
+    end
     return ok, err
 end
 
@@ -206,13 +221,16 @@ local function stateError(state)
     end
 end
 
-function App.get(playerIndex)
+function App.get(playerIndex, passiveNeeds)
     initialize()
     local player = getSpecificPlayer(playerIndex or 0)
     if not player then return nil, "Enter a game to move or label items" end
     local path = scope(player)
     local existing = sessions[playerIndex or 0]
-    if existing and existing.player == player and existing.path == path then return existing end
+    if existing and existing.player == player and existing.path == path then
+        if not passiveNeeds then existing.needsOnly = false end
+        return existing
+    end
     if existing then existing:cancel(true) end
     local state, err = Store.load(path)
     if state ~= nil then
@@ -226,7 +244,7 @@ function App.get(playerIndex)
             state[key] = {}
         end
     end
-    local instance = setmetatable({ player = player, state = state, path = path, error = err }, Instance)
+    local instance = setmetatable({ player = player, state = state, path = path, error = err, needsOnly = passiveNeeds == true }, Instance)
     instance.world = World.new(player, state)
     instance.world.graph = graph
     instance.jobs = Jobs.new(player, instance.world, graph)
@@ -585,6 +603,31 @@ function App.onKeyStartPressed(key)
     else instance:pause() end
 end
 
+-- OnPlayerUpdate also fires when the manager has never been opened. Defaults
+-- cost no inventory reads or session creation; each local player has its own clock.
+function App.onNeedsUpdate(player)
+    local options, err = currentPreferences()
+    if err or not (options.autoDrinkEquipped or options.autoConsumeCarried) or not player or not player:isLocalPlayer() then return end
+    local index, now = player:getPlayerNum(), getTimestampMs()
+    AutoNeeds.interruptObservation(sessions[index])
+    local activity = lastNeedsUpdate[index]
+    if not activity or activity.player ~= player then
+        activity = {player=player, quietAt=now + 1000}
+        lastNeedsUpdate[index] = activity
+    end
+    if player:isMoving() or player:isRunning() or player:isSprinting() or player:isAttacking()
+        or player:isAiming() or player:hasTimedActions() then
+        activity.quietAt = now + 1000
+        return
+    end
+    if now < activity.quietAt or (activity.checked and now - activity.checked < 4000) then return end
+    activity.checked = now
+    if player ~= getSpecificPlayer(index) or not player:getCurrentSquare() then return end
+    local instance = App.get(index, true)
+    if not instance or instance.error or loadError then return end
+    AutoNeeds.step(instance, options, currentPreferences, now)
+end
+
 function App.tick()
     -- Poll as well as subscribing: native UI may consume the key event first.
     local escapeDown = Keyboard and isKeyDown and isKeyDown(Keyboard.KEY_ESCAPE) or false
@@ -604,7 +647,7 @@ function App.tick()
         end
         instance.jobs:tick()
         instance:runReplacement()
-        if not instance.lastObserve or stamp - instance.lastObserve >= 1000 then
+        if not instance.needsOnly and (not instance.lastObserve or stamp - instance.lastObserve >= 1000) then
             instance.lastObserve = stamp
             if instance.world:observeNearby() and not instance.error then
                 local ok, err = instance:persist()
@@ -618,11 +661,12 @@ function App.reset()
     for _, instance in pairs(sessions) do instance:cancel(true) end
     sessions, definitions, graph, loadError = {}, nil, nil, nil
     preferences, preferencesError = nil, nil
-    App.escapeDown = false
+    App.escapeDown, lastNeedsUpdate = false, {}
 end
 
 if Events then
     Events.OnTick.Add(App.tick)
+    if Events.OnPlayerUpdate then Events.OnPlayerUpdate.Add(App.onNeedsUpdate) end
     if Events.OnKeyStartPressed then Events.OnKeyStartPressed.Add(App.onKeyStartPressed) end
     if Events.OnDisconnect then Events.OnDisconnect.Add(App.reset) end
     if Events.OnMainMenuEnter then Events.OnMainMenuEnter.Add(App.reset) end
