@@ -1547,6 +1547,19 @@ case("Smart Load groups native alias matches across bags then orders remaining s
     equal(destinations[3], strongStorage); equal(destinations[4], f.inventory)
 end)
 
+case("a staged pour rechecks the original accessible shelf even after native pickup", function(f)
+    local original=f.junk
+    original.items={} -- no chosen item is required to validate the return anchor
+    assert(f.world:pourShelfReachable(original) and not f.world:pourShelfReachable(f.inventory))
+    assert(not f.world:pourShelfReachable(f.remote))
+    local locked=original.isLockedToCharacter
+    original.isLockedToCharacter=function() return true end
+    assert(not f.world:pourShelfReachable(original))
+    original.isLockedToCharacter=locked
+    original.parent.storage=f.tools -- original slot is no longer on the live object
+    assert(not f.world:pourShelfReachable(original))
+end)
+
 case("consumption requires exact membership and current displayed nearby loot", function(f)
     getPlayerLoot = function() return {inventoryPane = {inventory = f.junk}, backpacks = {{inventory = f.tools}}} end
     equal(f.world:consumptionSource(f.inventory.items[1], f.inventory), true)

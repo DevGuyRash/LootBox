@@ -5,6 +5,7 @@ local App = require "LootBox/App"
 local Catalog = require "LootBox/Catalog"
 local Guides = require "LootBox/Guides"
 local Selection = require "LootBox/Selection"
+local PourMenu = require "LootBox/PourMenu"
 local Menus = {}
 local interface
 local containerCallbacks = setmetatable({}, { __mode = "k" })
@@ -628,6 +629,7 @@ function Menus.inventoryMenu(playerIndex, parent, items)
     if native(item, "InventoryContainer") then storageTargets(context, item:getInventory()) end
     local menu = rootMenu(parent)
     if preferences.inventoryShortcuts then
+        PourMenu.add(playerIndex, parent, menu, items, app, preferences, tooltip)
         itemMenu(menu, playerIndex, context, app, preferences)
         if native(item, "InventoryContainer") then
             local contents = item:getInventory()

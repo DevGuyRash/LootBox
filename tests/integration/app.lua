@@ -400,6 +400,37 @@ test("Escape pauses work and clears queued replacements even when native UI cons
     app.jobs.status, app.jobs.cancel = oldStatus, oldCancel
 end)
 
+test("Pour Into owns one cancellable job and never supersedes a job, recovery or other action", function()
+    local app=assert(App.get(0))
+    local old=package.loaded["LootBox/Pour"]
+    local status, made, pending={hasJob=true,canPreview=false},0,false
+    local oldStatus,oldRecovery=app.jobs.status,app.recovery.status
+    app.jobs.status=function() return status end
+    app.recovery.status=function() return {pending=pending} end
+    local source,targets,options={},{},{}
+    local running=true
+    local job={name="Pour Into",tick=function() end,isBusy=function() return running end,
+        cancel=function() running=false;return true end, status=function() return {state="running"} end}
+    package.loaded["LootBox/Pour"]={options=function()return options end,displayed=function()return "selected" end,
+        new=function(p,w,s,t,o,context)
+            assert(p==player and w==app.world and s==source and t==targets and o==options)
+            local saved,pane=context();assert(saved==options and pane=="selected")
+            made=made+1;return job
+        end}
+    assert(not app:startPour(source,targets,options))
+    status={hasJob=false,canPreview=true}
+    pending=true;assert(not app:startPour(source,targets,options));pending=false
+    app.replacement=function() end
+    assert(not app:startPour(source,targets,options) and app.replacement)
+    app.replacement=nil
+    assert(made==0 and app:startPour(source,targets,options))
+    assert(app.consumption==job and made==1 and not app:startPour(source,targets,options))
+    local ok,msg=app:preview({});assert(not ok and msg:find("Pour Into",1,true))
+    assert(app:cancel() and not running)
+    app.consumption=nil
+    app.jobs.status,app.recovery.status,package.loaded["LootBox/Pour"]=oldStatus,oldRecovery,old
+end)
+
 test("a validly encoded malformed category document remains read-only", function()
     assert(Store.save("LootBox/categories", { categories = false }))
     App.reset()
