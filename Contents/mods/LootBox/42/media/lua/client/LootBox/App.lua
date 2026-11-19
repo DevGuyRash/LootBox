@@ -591,16 +591,7 @@ function App.tick()
     App.escapeDown = escapeDown
     local stamp = getTimestampMs()
     for _, instance in pairs(sessions) do
-        local consumption = instance.consumption
-        if consumption then
-            consumption:tick()
-            if consumption.openedFoodPrompt then
-                local message = consumption.openedFoodPrompt
-                consumption.openedFoodPrompt = nil
-                if HaloTextHelper and HaloTextHelper.addGoodText then HaloTextHelper.addGoodText(instance.player, message)
-                else print("[LootBox] " .. message) end
-            end
-        end
+        if instance.consumption then instance.consumption:tick() end
         instance.jobs:tick()
         instance:runReplacement()
         if not instance.lastObserve or stamp - instance.lastObserve >= 1000 then

@@ -44,6 +44,8 @@ ISToolTip = { new = function()
 end }
 package.loaded["ISUI/ISContextMenu"] = true
 package.loaded["ISUI/ISToolTip"] = true
+package.loaded["TimedActions/ISTimedActionQueue"] = true
+package.loaded["ISUI/ISInventoryPaneContextMenu"] = true
 
 local registrations = { inventory = {}, world = {}, background = {}, refresh = {} }
 local eventDeclarations = 0
@@ -1301,12 +1303,73 @@ test("Til Full follows a native Open and Eat or Drink recipe without relying on 
     end
     isClient=function() return true end
     local parent,child=Menu:new(),Menu:new()
-    local root=parent:addOption("Open and eat",nil,nil);root.subOption=7
+    parent:addOption("Open and drink",nil,nil).subOption=7
     parent.getSubMenu=function() return child end
-    child:addOption("All",{f.apple},ISInventoryPaneContextMenu.onEatItems).param3=recipe
+    local original=child:addOption("All",f.apple,ISInventoryPaneContextMenu.onDrinkFluid)
+    original.param3,original.param4=recipe,f.apple
     Menus.inventoryMenu(0,parent,{f.apple})
-    assert(child.options[2].name=="Open first for Til Full")
-    assert(child.options[2].toolTip.description:find("without eating",1,true))
+    assert(#child.options==2 and child.options[1]==original)
+    local added=needed(child,"Til Full")
+    f.consumeKind=nil
+    assert(added.onSelect(added.target) and f.consumeKind=="fluid")
+    ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
+end)
+
+test("canned peaches keep vanilla Open and amounts; only a real Til Full is added", function(f)
+    local oldPane, oldManager, oldClient = ISInventoryPane, getScriptManager, isClient
+    ISInventoryPane = {getActualItems = function(rows) return rows end}
+    ISInventoryPaneContextMenu.onEatItems = function() end
+    local recipe = {}
+    getScriptManager = function() return {getCraftRecipe = function(_, name)
+        return name == "OpenCannedFood" and recipe or nil
+    end} end
+    f.preferences.tillFullEnabled = true
+    for _, client in ipairs({false, true}) do
+        isClient = function() return client end
+        for _, source in ipairs({f.inventory, f.crate, f.floor}) do
+            for _, closed in ipairs({true, false}) do
+                local peach = item(source, closed and "Base.CannedPeaches" or "Base.CannedPeachesOpen")
+                local opening = closed and recipe or nil
+                peach.getOpeningRecipe = function() return closed and "OpenCannedFood" or nil end
+                local selected = {peach}
+                local parent, amounts = Menu:new(), Menu:new()
+                local open = function() f.openedCan = peach end
+                local vanillaOpen = closed and parent:addOption("Open", peach, open)
+                local root = parent:addOption(closed and "Open and Eat" or "Eat", nil, nil)
+                root.subOption = 1
+                parent.getSubMenu = function(_, id) assert(id == 1); return amounts end
+                local originals = {}
+                for _, label in ipairs({"All", "Half", "Quarter"}) do
+                    local row = amounts:addOption(label, selected, ISInventoryPaneContextMenu.onEatItems)
+                    row.param3 = opening
+                    originals[#originals + 1] = row
+                end
+                Menus.inventoryMenu(0, parent, selected)
+                Menus.inventoryMenu(0, parent, selected)
+                for i, row in ipairs(originals) do
+                    assert(amounts.options[i] == row and row.onSelect == ISInventoryPaneContextMenu.onEatItems)
+                    assert(row.target == selected and row.param3 == opening)
+                end
+                if closed then
+                    assert(count(parent,"Open")==1 and needed(parent,"Open")==vanillaOpen)
+                    assert(vanillaOpen.onSelect==open and vanillaOpen.target==peach)
+                end
+                if client and closed then
+                    assert(#amounts.options==3, "MP sealed peaches must keep only the vanilla amounts")
+                    f.openedCan=nil; click(parent,"Open"); assert(f.openedCan==peach)
+                else
+                    assert(#amounts.options==4)
+                    local called = false
+                    f.app.tillFull = function(_,items,kind,actualRecipe,actualSource)
+                        assert(#items==1 and items[1]==peach and kind=="food")
+                        assert(actualRecipe==opening and actualSource==source)
+                        called=true; return true
+                    end
+                    click(amounts,"Til Full"); assert(called)
+                end
+            end
+        end
+    end
     ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
 end)
 

@@ -312,10 +312,18 @@ function Native:begin(item, kind, portion, atTarget, needSampler)
     return true
 end
 
+-- A food opening recipe creates a new item on the MP server. The client
+-- completion callback has no exact output ID; leave opening to the vanilla menu.
+function Native.openingProblem(kind)
+    if kind == "food" and isClient() then return "Use Open, then choose Eat > Til Full on the opened food." end
+end
+
 function Native:beginOpen(item, kind, recipe, atTarget)
     if self.active then return nil, "A consumption action is already active" end
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption kind" end
     if type(atTarget) ~= "function" then return nil, "A live stop predicate is required" end
+    local problem = Native.openingProblem(kind)
+    if problem then return nil, problem end
     local sourceProblem = missingSource(item)
     if sourceProblem then return nil, sourceProblem end
     if not recipe
@@ -333,7 +341,7 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     if target then return nil, "Already at the requested limit" end
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget,
         opening = true, kind = kind, item = item, itemId = item:getID(), fullType = item:getFullType(), source = item:getContainer(),
-        wasSealed = item:isSealed(), chooseOpened = kind == "food" and isClient()}
+        wasSealed = item:isSealed()}
     self.active = state
     -- Zero means opening only. Native Open-and-Eat percentages enqueue a
     -- separate, unowned consumption action, including through the MP server.
@@ -431,10 +439,6 @@ function Native:poll()
     if state.reason then self.active = nil; return false, state.reason end
     if not state.performed then self.active = nil; return false, "Native consumption ended without completion" end
     if state.opening then
-        if state.chooseOpened then
-            self.active = nil
-            return true, "chooseOpened"
-        end
         local item = state.output or state.item
         if isClient() and state.kind == "fluid" then
             local problem

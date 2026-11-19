@@ -447,24 +447,15 @@ test("MP fluid opening waits for exact item unseal not client perform",function(
     local done,reason,item=f.native:poll()
     assert(done and reason=="opened" and item==f.item)
 end)
-test("MP food opens only and asks the user to choose the actual result",function(f)
-    openingFixture(f);f.client=true
-    assert(f:open());assert(f.native:poll()==nil);f:finish()
-    local done,reason,item=f.native:poll()
-    assert(done and reason=="chooseOpened" and item==nil and #f.calls==1 and f.calls[1][2]==0)
-    assert(not f.native:isBusy() and #f.queue.queue==0)
-    assert(f.item.sealed) -- client perform is not an acknowledgement of server output.
-end)
-test("MP food fallback never reports a choice after target or cancellation stops opening",function()
-    for _,mode in ipairs({"target","cancel","timeout","missing"}) do
-        local f=fixture();openingFixture(f);f.client=true;assert(f:open())
-        if mode=="target" then f.target=true
-        elseif mode=="cancel" then f.native:cancel("User cancelled")
-        elseif mode=="timeout" then f.time=120001
-        else f.queue.queue={};f.queue.current=nil end
-        f.native:poll();f:finish()
-        local done,reason,item=f.native:poll()
-        assert(done==false and reason~="chooseOpened" and item==nil and #f.calls==1)
+test("MP food open requests never start a craft, move the opener, or change the queue",function(f)
+    openingFixture(f); f.client=true
+    for _,queued in ipairs({false,true}) do
+        local foreign
+        if queued then foreign=f:action("Foreign"); f.queue:addToQueue(foreign) end
+        local ok,reason=f:open()
+        assert(not ok and reason:find("Open",1,true) and not f.native:isBusy())
+        assert(#f.calls==0 and #f.queue.queue==(queued and 1 or 0) and f.item.sealed)
+        assert(f.queue.current==foreign and ISEntityUI.HandcraftStart==f.originalHandcraftStart)
     end
 end)
 test("opening requires current recipe and empty queue before native dispatch",function(f)
