@@ -871,6 +871,34 @@ test("all four automatic supplies settings are independent and off until saved",
     assert(not f.preferences.autoDrinkEquipped and not f.preferences.autoConsumeRiskyOpen)
 end)
 
+test("pour progress reports paired liters not moved inventory items", function(f)
+    local window=progressWindow(f)
+    f.jobStatus={state="running",intent="pour",done=1,total=3,pourLiters=0.5,reasons={}}
+    window:update()
+    assert(window.statusLabel.text=="Pouring" and window.countLabel.text:find("1 of 3 vessels | 0.500 L confirmed",1,true))
+end)
+
+test("four Pour Into controls save independently; main only does not change individual choices", function(f)
+    local window = managerWindow(f, "settings", {})
+    local seen={}
+    local keys={pourLootToLoot=true,pourMostRoomFirst=true,pourEquippedFirst=true,pourMainOnly=true}
+    for _,row in ipairs(window.preferenceViewport.items) do
+        local key=row.item.key
+        if keys[key] then
+            assert(not seen[key] and window.preferenceSelection[key]==false)
+            seen[key]=true
+            if key=="pourMainOnly" then
+                assert(row.item.description:find("individual targets remain available",1,true))
+                window.preferenceViewport.callback(window.preferenceViewport.target,row.item)
+            end
+        end
+    end
+    for key in pairs(keys) do assert(seen[key]) end
+    press(window.body,"Save preferences")
+    assert(f.preferences.pourMainOnly and not f.preferences.pourLootToLoot
+        and not f.preferences.pourMostRoomFirst and not f.preferences.pourEquippedFirst)
+end)
+
 test("Settings keeps every preference reachable above Save across native font sizes", function()
     local originalModule, originalH = package.loaded["LootBox/UI"], Widgets.H
     for _, rowHeight in ipairs({28, 31, 38, 45, 50}) do
@@ -885,7 +913,7 @@ test("Settings keeps every preference reachable above Save across native font si
         local viewport, choices = window.preferenceViewport, window.preferenceSelection
         local rows, save = viewport.items
         for _, widget in ipairs(window.body.controls) do if widget.text == "Save preferences" then save = widget end end
-        assert(#rows == 28 and save and viewport.height >= rowHeight)
+        assert(#rows == 33 and save and viewport.height >= rowHeight)
         assert(viewport.y + viewport.height < save.y)
         local preferences, sections, lastY = 0, 0, 0
         for _, row in ipairs(rows) do
@@ -898,7 +926,7 @@ test("Settings keeps every preference reachable above Save across native font si
             else sections = sections + 1; assert(row.item.selectable == false) end
             lastY = lastY + row.height
         end
-        assert(preferences == 24 and sections == 4)
+        assert(preferences == 28 and sections == 5)
         viewport.callback(viewport.target, rows[1].item)
         assert(choices.contextMenus == true and viewport.selected == 0)
         viewport.callback(viewport.target, rows[2].item)
@@ -934,7 +962,7 @@ test("Settings changes only persist through its fixed Save control", function(f)
     assert(saves.contextMenus == false and saves.showTips == false)
     local count = 0
     for _, value in pairs(saves) do assert(type(value) == "boolean"); count = count + 1 end
-    assert(count == 24 and window.preferenceSelection == choices)
+    assert(count == 28 and window.preferenceSelection == choices)
     assert(window.messagePanel.text:find("Preferences saved", 1, true) and not f.cancelled and f.starts == 0)
     App.setPreferences = previous
 end)

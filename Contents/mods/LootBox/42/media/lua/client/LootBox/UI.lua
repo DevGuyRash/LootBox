@@ -1344,6 +1344,10 @@ local preferenceRows = {
     { key = "autoConsumeCarried", title = "Eat and drink from carried supplies", description = "When hungry or thirsty and safe to stop, use one unprotected supply in your inventory or directly inside a carried bag. Drinking requires the game's Auto-Drink setting." },
     { key = "autoConsumeNested", title = "Carried supplies: search bags inside bags", description = "Only affects Eat and drink from carried supplies. Off searches one bag deep; on also checks bags nested inside your carried bags. Never searches the ground or nearby storage." },
     { key = "autoConsumeRiskyOpen", title = "Carried supplies: allow risky can opening", description = "If no eligible can opener is available, allow the game's sharp-tool recipe at a reachable work surface. It can damage the tool and cut your hand. Only affects automatic eating." },
+    { key = "pourLootToLoot", title = "Pour Into: display loot-to-loot targets", description = "Off by default. When pouring from the selected reachable loot pane, also offer compatible vessels in that exact pane. Never searches nearby storage." },
+    { key = "pourMostRoomFirst", title = "Fill All: most room left first", description = "Off fills the vessels with least room left first. On fills those with most room left first. Each inventory group is sorted separately." },
+    { key = "pourEquippedFirst", title = "Fill All: equipped storage first", description = "Off fills main inventory first, then worn or held vessels and contents of equipped bags. On reverses these groups. Optional displayed loot destinations come last." },
+    { key = "pourMainOnly", title = "Fill All: main inventory only", description = "Off includes equipped items and bags. On limits the batch to loose main-inventory vessels. Explicit individual targets remain available." },
     { key = "condenseButton", title = "Show Condense before Transfer All", description = "Add a Condense button to the inventory footer. It uses main inventory and eligible carried bags, independently of the pane you are viewing." },
     { key = "condenseRebalance", title = "Condense: optimize bag contents", description = "Off packs main-inventory items heaviest first into the best useful bags and leaves existing contents alone. On also redistributes contents and considers useful multi-item exchanges. Weight reduction comes first; at equal carried weight it groups matching types into fewer bags. It searches for an improvement, without promising a global optimum." },
     { key = "condenseUseUnequipped", title = "Condense: include unequipped bags", description = "Off leaves unequipped loot bags and their contents alone. On makes other carried bags eligible too. They are never automatically equipped, and their printed reduction does not apply while unequipped." },
@@ -1381,6 +1385,7 @@ function Window:buildSettings()
     for index, row in ipairs(preferenceRows) do
         if index == 7 then viewport:addItem("Review and reuse", {selectable = false, tone = "custom"}) end
         if row.key == "autoDrinkEquipped" then viewport:addItem("Automatic food and drink", {selectable = false, tone = "custom"}) end
+        if row.key == "pourLootToLoot" then viewport:addItem("Pour Into", {selectable = false, tone = "custom"}) end
         if row.key == "condenseButton" then viewport:addItem("Condense", {selectable = false, tone = "custom", condenseSection = true}) end
         rows[#rows + 1] = viewport:addItem(row.title, {key = row.key, description = row.description},
             row.title .. "\n" .. row.description)
@@ -1759,13 +1764,16 @@ function Progress:update()
     local status = app:status()
     local condense = status.condense
     self.statusLabel:setName(status.waiting and "Waiting for your action"
-        or (condense and status.state == "running" and "Condensing" or states[status.state] or "Working"))
+        or (status.intent == "pour" and status.state == "running" and "Pouring"
+            or condense and status.state == "running" and "Condensing" or states[status.state] or "Working"))
     local color = status.state == "failed" and C.danger
         or ((status.state == "pausing" or status.state == "paused" or status.state == "cancelled" or status.state == "needs_review" or status.waiting) and C.warning)
         or (status.state == "running" and C.accent or C.success)
     self.statusLabel.r, self.statusLabel.g, self.statusLabel.b = color.r, color.g, color.b
     local counts = tostring(status.done or 0) .. ((status.cleared or 0) > 0 and " processed of " or " moved of ") .. tostring(status.total or 0)
-    if condense then
+    if status.intent == "pour" then
+        counts = string.format("%d of %d vessels | %.3f L confirmed",status.done or 0,status.total or 0,status.pourLiters or 0)
+    elseif condense then
         counts = tostring(condense.itemsMoved or 0) .. " items reorganized   " .. tostring(condense.transfers or 0) .. " transfers"
     elseif (status.cleared or 0) > 0 then
         counts = counts .. "   " .. tostring(status.moved or 0) .. " moved, " .. tostring(status.cleared) .. " cleared in place"
