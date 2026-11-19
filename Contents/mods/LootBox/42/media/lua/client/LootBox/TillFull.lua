@@ -1,4 +1,5 @@
 local Adapter = require "LootBox/TillFullNative"
+local Completion = require "LootBox/CompletionFeedback"
 local TillFull = {}
 TillFull.__index = TillFull
 
@@ -227,9 +228,13 @@ function TillFull:alreadySatisfied()
     return portion ~= nil and portion <= 0
 end
 
-function TillFull:finish(state, reason)
+function TillFull:finish(state, reason, outcome)
+    if not self:isBusy() then return end
     self.state, self.reason = state, reason
     self.records, self.inflight, self.confirmation, self.opening = nil, nil, nil, nil
+    if self.launched and outcome ~= "open_only" and (outcome ~= "target" or self.count > 0) then
+        Completion.consume(self.player, state, reason, outcome, self.count, getTimestampMs() - self.startedAt)
+    end
 end
 
 function TillFull:isBusy() return self.state == "running" or self.state == "cancelling" end
@@ -238,7 +243,8 @@ function TillFull:status()
         moved = 0, skipped = 0, reasons = {}, hasJob = self:isBusy(), canPreview = not self:isBusy(), canResume = false, canPause = false,
         action = "consume", intent = "consume:" .. self.kind}
 end
-function TillFull:cancel()
+function TillFull:cancel(silent)
+    if silent then self.launched = nil end
     if not self:isBusy() then return true end
     self.state, self.reason = "cancelling", "Til Full cancelled"
     if self.native:isBusy() then self.native:cancel() else self:finish("cancelled", self.reason) end
@@ -262,6 +268,7 @@ end
 
 function TillFull:step()
     if not self:isBusy() then return end
+    self.startedAt = self.startedAt or getTimestampMs()
     self.total = self.total or #self.records
     local hunger, thirst = needs(self.player)
     if self.inflight then
@@ -277,18 +284,18 @@ function TillFull:step()
         if done == nil then return end
         if self.state == "cancelling" then self:finish("cancelled", self.reason); return end
         if self.stopReason then self:finish("cancelled", self.stopReason); return end
-        if self.targetReached then self:finish("finished", "The selected need target is satisfied"); return end
+        if self.targetReached then self:finish("finished", "The selected need target is satisfied", "target"); return end
         if not done then self:finish("cancelled", reason or "Native consumption was interrupted"); return end
         if self.opening then
             self.opening = nil
             if reason == "chooseOpened" and not opened and self.kind == "food" and self.openingRecipe
                 and isClient and isClient() and self.count == 0 then
-                if hunger <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
+                if hunger <= 0 then self:finish("finished", "The selected need target is satisfied", "target"); return end
                 if self.player:isDead() or self.player:isAsleep() then
                     self:finish("cancelled", "The player cannot consume now"); return
                 end
                 self.openedFoodPrompt = "When the opened food appears, right-click it and choose Eat > Til Full."
-                self:finish("finished", self.openedFoodPrompt)
+                self:finish("finished", self.openedFoodPrompt, "open_only")
                 return
             end
             if reason ~= "opened" or not opened then
@@ -393,7 +400,7 @@ function TillFull:step()
                 and not record.identityUnresolved and finite(quantity) and quantity > 0
                 and quantity < before.expectedRemaining and self:inspect(record) then
                 if math.floor((before.expectedRemaining - quantity) * 100 + 0.5) == 0 and substantial then
-                    self:finish("finished", "The selected drink has slightly less left than planned; no second sip was queued.")
+                    self:finish("finished", "The selected drink has slightly less left than planned; no second sip was queued.", "different_amount")
                     return
                 end
                 self:finish("failed", "The selected drink has a different volume than planned; no second sip was queued.")
@@ -424,7 +431,7 @@ function TillFull:step()
         if depleted then self.index = self.index + 1 end
     end
     local record = self.records[self.index]
-    if not record then self:finish("finished", "The selected stack is exhausted"); return end
+    if not record then self:finish("finished", "The selected stack is exhausted", "exhausted"); return end
     local effects, reason = self:inspect(record)
     if not effects then self:finish("cancelled", reason); return end
     local planHunger = math.min(hunger, self.needCap and self.needCap.hunger or hunger)
@@ -433,7 +440,13 @@ function TillFull:step()
     local portion = effects.opening and self.kind == "food" and (planHunger > 0 and 1 or 0)
         or TillFull.portion(planHunger, planThirst, effects.hunger, effects.thirst, self.both, self.kind)
     if portion == nil then self:finish("cancelled", "This item cannot restore the need selected by Eat or Drink"); return end
-    if portion <= 0 then self:finish("finished", "The selected need target is satisfied"); return end
+    if portion <= 0 then
+        local actual = effects.opening and self.kind == "food" and (hunger > 0 and 1 or 0)
+            or TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both, self.kind)
+        if actual == 0 then self:finish("finished", "The selected need target is satisfied", "target")
+        else self:finish("finished", "Requested portion consumed; no more items were queued") end
+        return
+    end
     if self.attempts >= 256 then self:finish("cancelled", "Til Full reached its bounded action limit"); return end
     if effects.opening then
         self.opening = true
@@ -451,6 +464,7 @@ function TillFull:step()
             return self.targetReached
         end)
         self.attempts = self.attempts + 1
+        self.launched = self.launched or ok or self.native:isBusy()
         if not ok then
             self.reason = failure or "The native opening action could not start"
             if self.native:isBusy() then self.state = "cancelling" else self:finish("cancelled", self.reason) end
@@ -507,6 +521,7 @@ function TillFull:step()
         return self.targetReached
     end, function() return needs(self.player) end)
     self.attempts = self.attempts + 1
+    self.launched = self.launched or ok or self.native:isBusy()
     if not ok then
         self.reason = failure or "The native action could not start"
         if self.native:isBusy() then self.state = "cancelling" else self:finish("cancelled", self.reason) end
