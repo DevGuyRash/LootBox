@@ -137,7 +137,7 @@ function Inventory.eligible(player, options, kind, world, item, plan)
     return ok and valid == true
 end
 
-local function selectItem(player, options, kind, world, excluded, allowed)
+local function selectItem(player, options, kind, world, excluded, allowed, readyOnly)
     local carried, equipped, depthLimit = optionsFor(options, kind)
     if not world or not carried and not equipped then return nil end
     local main = call(player, "getInventory")
@@ -164,7 +164,7 @@ local function selectItem(player, options, kind, world, excluded, allowed)
                     if call(item, "isSealed") == false and hasSafeEffects(item, kind) and (not allowed or allowed(item,source)) then
                         if gear or source ~= main or not equipped then return item end
                         fallback = item
-                    elseif source == main and #openings < MAX_OPENINGS then
+                    elseif not readyOnly and source == main and #openings < MAX_OPENINGS then
                         local recipe = call(item, "getOpeningRecipe")
                         if type(recipe) == "string" and recipe ~= "" then openings[#openings + 1] = item end
                     end
@@ -194,8 +194,8 @@ local function selectItem(player, options, kind, world, excluded, allowed)
     return riskyItem, riskyPlan
 end
 
-function Inventory.select(player, options, kind, world, excluded, allowed)
-    local ok, item, plan = pcall(selectItem, player, options, kind, world, excluded, allowed)
+function Inventory.select(player, options, kind, world, excluded, allowed, readyOnly)
+    local ok, item, plan = pcall(selectItem, player, options, kind, world, excluded, allowed, readyOnly)
     if ok then return item, plan end
 end
 

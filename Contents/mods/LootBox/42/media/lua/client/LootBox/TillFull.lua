@@ -362,6 +362,12 @@ function TillFull:step()
         if not done then self:finish("cancelled", reason or "Native consumption was interrupted"); return end
         if self.opening then
             self.opening = nil
+            if reason == "mpOpenSettled" and not opened and self.automatic and self.kind == "food"
+                and self.automatic.openingPlan and isClient() then
+                self.mpOpenedInputRetired = true
+                self:finish("finished", "Server opening action ended; no food was queued or counted.", "open_only")
+                return
+            end
             if reason == "chooseOpened" and not opened and self.kind == "food" and self.openingRecipe
                 and isClient and isClient() and self.count == 0 then
                 if hunger <= 0 then self:finish("finished", "The selected need target is satisfied", "target"); return end

@@ -74,10 +74,17 @@ end)
 run('an unchanged need in a paused simulation is not a missed vanilla sip',function()
  options.autoDrinkEquipped=true;stats.t=.4;source=object;selected.fluid=object;step(0);step(30000);assert(sips==0 and attempts==0)
 end)
-run('SP nested pure water lends to vanilla, MP never queues a duplicate; missing native proof declines',function()
+run('SP and MP nested pure water use a single observational loan, never a second drink; unknown stock proof declines',function()
  options.autoConsumeCarried=true;stats.t=.4;object.holder=bag;object.water=true;selected.fluid=object;step(0)
  assert(loans==1 and attempts==0);assert(guard(object,bag,'return'));bag.dropped=true;assert(not guard(object,bag,'return'))
- reset();client=true;options.autoConsumeCarried=true;stats.t=.4;object.holder=bag;object.water=true;selected.fluid=object;step(0);assert(loans==0 and attempts==0)
+ reset();client=true;options.autoConsumeCarried=true;stats.t=.4;object.holder=bag;object.water=true;selected.fluid=object;step(0)
+ assert(loans==1 and attempts==0 and sips==0)
+ step(6000);step(32000);assert(loans==1 and attempts==0 and sips==0)
+ first.state='failed';step(39000);step(68000);assert(loans==1 and attempts==0 and sips==0)
+ reset();client=true;p.synced=false;options.autoConsumeCarried=true;stats.t=.4;object.holder=bag;object.water=true;selected.fluid=object
+ step(0);step(30000);assert(loans==0 and attempts==0 and sips==0)
+ reset();client=true;options.autoConsumeCarried=true;stats.t=.4;object.holder=bag;object.water=true;selected.fluid=object;object.refused=true
+ step(0);step(30000);assert(loans==0 and attempts==0 and sips==0)
  reset();options.autoDrinkEquipped=true;p.getWaterSource=nil;stats.t=.37;selected.fluid=object;step(0);assert(loans==0 and attempts==0)
 end)
 run('manual queue, native timed action, visible zombies, vehicle, movement, preserved paused job block automation',function()
@@ -123,4 +130,18 @@ run('an ineligible pure-water loan cannot hide a later carried beverage',functio
  local tiny={holder=bag,water=true,refused=true,isWaterOnlySource=function()return true end}
  object.holder=bag;selected.fluid=tiny;selected.backup=object
  step(0);assert(loans==0 and attempts==1 and kindSeen=='fluid')
+end)
+
+run('MP native can settlement starts no bite; later hunger reselects only safe ready food',function()
+ client=true;options.autoConsumeCarried=true;stats.h=.51;seal={source=main};selected.food=object;step(0)
+ assert(attempts==1);first.state='finished';first.count=0;first.mpOpenedInputRetired=true
+ step(5000);step(10000);assert(attempts==1)
+ step(20000);assert(attempts==1,'a second can in this hunger episode is never opened')
+ seal=nil;step(26000);assert(attempts==2 and kindSeen=='food')
+ first.state='finished';first.count=1;stats.h=.1;step(30000);seal={source=main};stats.h=.52;step(50000)
+ assert(attempts==3,'a later distinct need can open a can again')
+end)
+run('rejected MP craft blocks even ready food in the same unresolved hunger episode',function()
+ client=true;options.autoConsumeCarried=true;stats.h=.55;seal={source=main};selected.food=object;step(0)
+ first.state='failed';seal=nil;step(5000);step(30000);assert(attempts==1)
 end)

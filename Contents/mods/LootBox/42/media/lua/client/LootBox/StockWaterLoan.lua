@@ -1,13 +1,18 @@
 local Loan = {}
 Loan.__index = Loan
-local SIP_TIMEOUT, MOVE_TIMEOUT = 3000, 30000
+local SIP_TIMEOUT, MP_SIP_TIMEOUT, MOVE_TIMEOUT = 3000, 7000, 30000
+local REPLICA_INTERVAL, MAX_ENDPOINT_ITEMS = 225, 1024
+local blocked = setmetatable({}, {__mode="k"})
 local function amount(fluid) return fluid:getAmount() end
 local function thirst(player) return player:getStats():get(CharacterStat.THIRST) end
-local function localGame()
-    return isClient and isServer and not isClient() and not isServer()
+local function stockOn(player)
+    if not isClient or not isServer or isServer() or getCore():getOptionAutoDrink() ~= true then return false end
+    return not isClient() or (player:getAutoDrink() == true and type(isItemTransactionDone) == "function"
+        and type(isItemTransactionRejected) == "function")
 end
-local function stockOn()
-    return localGame() and getCore():getOptionAutoDrink() == true
+local function declined(player, item)
+    local ids = blocked[player]
+    return ids and ids[item:getID()] == true
 end
 local function queueFor(player) return ISTimedActionQueue.getTimedActionQueue(player) end
 local function idle(player, queue)
@@ -28,16 +33,58 @@ local function pathFrom(cont, main)
     return path
 end
 
-function Loan:valid(phase, source)
-    if self.item:getID() ~= self.id or self.item:isFavorite() ~= false
-        or self.item:getContainer() ~= source or not source:contains(self.item)
-        or self.item:getFluidContainer() ~= self.fluid or self.player:getInventory() ~= self.main then return false end
+function Loan:samePath()
+    if self.player:getInventory() ~= self.main then return false end
     for _, link in ipairs(self.path) do
         if link.bag:getID() ~= link.id or link.bag:isFavorite() ~= false or link.bag:getInventory() ~= link.container
             or link.bag:getContainer() ~= link.parent or not link.parent:contains(link.bag) then return false end
     end
-    return self.guard(self.item, self.source, phase) == true
+    return true
 end
+
+function Loan:valid(phase, source)
+    return self.item:getID() == self.id and self.item:getFullType() == self.fullType
+        and self.item:isFavorite() == false and self.item:getContainer() == source and source:contains(self.item)
+        and self.item:getFluidContainer() == self.fluid and self:samePath()
+        and self.guard(self.item, self.source, phase) == true
+end
+
+local function replica(self, endpoint)
+    local items = endpoint:getItems()
+    local count = items:size()
+    if type(count) ~= "number" or count < 0 or count > MAX_ENDPOINT_ITEMS then return nil, false end
+    local found
+    for index = 0, count - 1 do
+        local item = items:get(index)
+        if item and item:getID() == self.id then
+            if found or item:getFullType() ~= self.fullType or item:getContainer() ~= endpoint
+                or item:isFavorite() ~= false or not endpoint:contains(item) then return nil, false end
+            found = item
+        end
+    end
+    return found, true
+end
+
+function Loan:replicas(phase, from, to)
+    if not self:samePath() then return nil, nil, false end
+    local origin, validFrom = replica(self, from)
+    local target, validTo = replica(self, to)
+    if not validFrom or not validTo then return nil, nil, false end
+    if origin and (origin ~= self.item or not self.guard(origin, self.source, phase)) then return nil, nil, false end
+    if target and not self.guard(target, self.source, phase) then return nil, nil, false end
+    return origin, target, true
+end
+
+function Loan:replicaCheck(phase, from, to)
+    local now = getTimestampMs()
+    if not self:samePath() or self.guard(self.item, self.source, "waitWater") ~= true then return false end
+    if not self.nextReplicaCheck or now >= self.nextReplicaCheck then
+        local _, _, valid = self:replicas(phase, from, to)
+        self.nextReplicaCheck, self.replicasValid = now + REPLICA_INTERVAL, valid
+    end
+    return self.replicasValid == true
+end
+
 local function stockSource(self, items)
     return self.player:getWaterSource(items)
 end
@@ -50,7 +97,7 @@ end
 
 function Loan.canOffer(player, item)
     local ok, eligible = pcall(function()
-        if not stockOn() or not item:isWaterOnlySource() then return false end
+        if not stockOn(player) or declined(player,item) or not item:isWaterOnlySource() then return false end
         local main = player:getInventory()
         if not main:isItemAllowed(item) or not main:hasRoomFor(player, item) then return false end
         local one = ArrayList.new()
@@ -64,7 +111,11 @@ function Loan:transfer(from, to, phase)
     local queue = queueFor(self.player)
     if not self:valid(phase, from) or not idle(self.player, queue)
         or not to:isItemAllowed(self.item) or not to:hasRoomFor(self.player, self.item) then return false end
-    if phase == "outbound" and (not stockOn() or stockSource(self, self.main:getItems())
+    if self.multiplayer then
+        local origin, target, exact = self:replicas(phase, from, to)
+        if not exact or origin ~= self.item or target then return false end
+    end
+    if phase == "outbound" and (not stockOn(self.player) or stockSource(self, self.main:getItems())
             or stockSource(self, self.candidate) ~= self.item or not drinkable(self)) then return false end
     require "TimedActions/ISInventoryTransferUtil"
     local action = ISInventoryTransferUtil.newInventoryTransferAction(self.player, self.item, from, to)
@@ -77,13 +128,16 @@ function Loan:transfer(from, to, phase)
     local function allowed(native, item, committing)
         local q = queueFor(self.player)
         if native ~= action or self.action ~= action or native.srcContainer ~= from or native.destContainer ~= to
-            or native.character ~= self.player or item ~= self.item or native.item ~= item or not localGame() then return false end
+            or native.character ~= self.player or item ~= self.item or native.item ~= item or isServer() or isClient() ~= self.multiplayer then return false end
         if q.current ~= action then
             if committing or not idle(self.player, q) then return false end
         elseif #q.queue ~= 1 or q.queue[1] ~= action then return false end
+        if self.multiplayer and self.sent and not committing then
+            return getTimestampMs() < self.deadline and self:replicaCheck(phase, from, to)
+        end
         return getTimestampMs() < self.deadline and self:valid(phase, from)
             and to:isItemAllowed(item) and to:hasRoomFor(self.player,item)
-            and (phase ~= "outbound" or stockOn() and not stockSource(self, self.main:getItems())
+            and (phase ~= "outbound" or stockOn(self.player) and not stockSource(self, self.main:getItems())
                 and stockSource(self, self.candidate) == item and drinkable(self))
     end
     local function checked(native, item, committing)
@@ -95,7 +149,33 @@ function Loan:transfer(from, to, phase)
         return checked(native, native.item) and baseValid(native, ...)
     end
     action.transferItem = function(native, item, ...)
-        if checked(native, item, true) and baseValid(native) then return baseTransfer(native, item, ...) end
+        if not self.multiplayer and checked(native, item, true) and baseValid(native) then return baseTransfer(native, item, ...) end
+    end
+    if self.multiplayer then
+        local baseStart, basePerform = action.start, action.perform
+        if type(baseStart) ~= "function" or type(basePerform) ~= "function" then return false end
+        action.start = function(native, ...)
+            if not checked(native, native.item, true) or not baseValid(native) then
+                native:forceStop()
+                return
+            end
+            baseStart(native, ...)
+            local id = native.transactionId
+            if type(id) == "number" and id ~= 0 then
+                self.sent = id
+            else
+                self.interrupted = true
+            end
+        end
+        action.perform = function(native, ...)
+            local id = native.transactionId
+            local ack = self.sent and id == self.sent
+                and isItemTransactionDone(id) and not isItemTransactionRejected(id)
+            -- Stock perform clears the transaction ID. Keep its queue and cleanup
+            -- intact, and require observed movement as a second independent gate.
+            basePerform(native, ...)
+            self.acked = ack == true
+        end
     end
     action.stop = function(native)
         local q = queueFor(self.player)
@@ -117,6 +197,7 @@ function Loan:transfer(from, to, phase)
         if not ok then error(err, 0) end
     end
     self.action, self.deadline = action, getTimestampMs() + MOVE_TIMEOUT
+    self.sent, self.acked, self.stopRequested, self.nextReplicaCheck, self.nextArrivalCheck = nil, false, false, nil, nil
     ISTimedActionQueue.add(action)
     return queue.current == action or (self.item:getContainer() == to and to:contains(self.item))
 end
@@ -137,6 +218,10 @@ function Loan:stopAction()
 end
 
 function Loan:finish(state, reason)
+    if self.multiplayer and state ~= "finished" then
+        blocked[self.player] = blocked[self.player] or {}
+        blocked[self.player][self.id] = true
+    end
     self.state, self.reason, self.action = state, reason, nil
 end
 
@@ -157,27 +242,59 @@ function Loan:step()
     if phase == "outbound" or phase == "returning" then
         local from = phase == "outbound" and self.source or self.main
         local to = phase == "outbound" and self.main or self.source
-        local arrived = self:valid(phase, to)
-        if queue.current == self.action then
-            if #queue.queue ~= 1 or now >= self.deadline
-                or phase == "outbound" and not stockOn()
-                or not arrived and not self:valid(phase, from) then self:cancel() end
-            return
+        local arrived
+        if self.multiplayer then
+            if now >= self.deadline or not self:samePath()
+                or self.guard(self.item, self.source, "waitWater") ~= true
+                or phase == "outbound" and not stockOn(self.player) then self:cancel(); return end
+            if queue.current == self.action then
+                if #queue.queue ~= 1 or not self:replicaCheck(phase, from, to) then self:cancel() end
+                return
+            end
+            if not self.acked or not idle(self.player, queue) then self:cancel(); return end
+            if self.nextArrivalCheck and now < self.nextArrivalCheck then return end
+            local origin, target, endpointsValid = self:replicas(phase, from, to)
+            if not endpointsValid then self:cancel(); return end
+            -- Done and remove/add replication are separate; do not adopt until
+            -- reciprocal direct membership resolves to a single exact item.
+            if origin or not target then self.nextArrivalCheck=now + REPLICA_INTERVAL; return end
+            local fluid = target:getFluidContainer()
+            if not fluid then self:cancel(); return end
+            self.item, self.fluid, arrived = target, fluid, true
+            item = target
+        else
+            arrived = self:valid(phase, to)
+            if queue.current == self.action then
+                if #queue.queue ~= 1 or now >= self.deadline
+                    or phase == "outbound" and not stockOn(self.player)
+                    or not arrived and not self:valid(phase, from) then self:cancel() end
+                return
+            end
+            if not arrived or not idle(self.player, queue) then self:cancel(); return end
         end
-        if not arrived or not idle(self.player, queue) then self:cancel(); return end
         if phase == "returning" then
             self:finish(self.count == 1 and "finished" or "failed",
                 self.count == 1 and "Vanilla auto-drank water; bottle returned." or "Vanilla did not drink; bottle returned.")
             return
         end
-        self.action, self.phase, self.deadline = nil, "observe", now + SIP_TIMEOUT
+        self.action, self.phase, self.deadline = nil, "observe", now + (self.multiplayer and MP_SIP_TIMEOUT or SIP_TIMEOUT)
         phase = self.phase
     end
     if phase == "observe" then
-        if not self:valid(phase, self.main) or not idle(self.player, queue) or not stockOn() then self:cancel(); return end
-        local consumed = amount(self.fluid) < self.beforeAmount - 0.00001
+        if not self:valid(phase, self.main) or not idle(self.player, queue) or not stockOn(self.player) then self:cancel(); return end
+        local current = amount(self.fluid)
+        local selected = stockSource(self,self.main:getItems())
+        if (selected and selected ~= item) or self.fluid:isPoisonous() or self.fluid:isTainted()
+            or (current > 0.00001 and not drinkable(self)) then self:cancel(); return end
+        local consumed = current < self.beforeAmount - 0.00001
         if consumed and thirst(self.player) < self.beforeThirst - 0.00001 then self.count = 1 end
-        if not consumed and now < self.deadline and stockSource(self, self.main:getItems()) == item and drinkable(self) then return end
+        if self.multiplayer then
+            if self.count ~= 1 then
+                if now < self.deadline then return end
+                self:finish("failed", "Server hydration could not be confirmed; bottle left in the main inventory.")
+                return
+            end
+        elseif not consumed and now < self.deadline and selected == item then return end
         if self:transfer(self.main, self.source, "return") then
             self.phase = "returning"
         else
@@ -199,13 +316,13 @@ function Loan:status()
 end
 
 local function new(player, item, guard)
-    if not stockOn() or type(guard) ~= "function" then return nil end
+    if not stockOn(player) or declined(player,item) or type(guard) ~= "function" then return nil end
     local main, source = player:getInventory(), item:getContainer()
     if not source or source == main then return nil end
     local path = pathFrom(source, main)
     if not path then return nil end
-    local loan = setmetatable({player=player, item=item, id=item:getID(), fluid=item:getFluidContainer(),
-        main=main, source=source, path=path, guard=guard, state="running", phase="outbound", count=0,
+    local loan = setmetatable({player=player, item=item, id=item:getID(), fullType=item:getFullType(), fluid=item:getFluidContainer(),
+        main=main, source=source, path=path, guard=guard, multiplayer=isClient(), state="running", phase="outbound", count=0,
         deadline=getTimestampMs() + MOVE_TIMEOUT}, Loan)
     if not loan.fluid or not loan:valid("admit", source) or not drinkable(loan) then return nil end
     loan.candidate = ArrayList.new()
