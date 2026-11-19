@@ -505,7 +505,8 @@ function Instance:startPour(source,targets,options)
         local p,err=currentPreferences()
         if err or not p.contextMenus or not p.inventoryShortcuts or self.error or self.replacement
             or self.recovery:status().pending then return nil end
-        return Pour.options(p),Pour.displayed(self.player:getPlayerNum())
+        return Pour.options(p),Pour.displayed(self.player:getPlayerNum(),
+            source and source.scope=="loot" and source.container or nil)
     end
     local controller,why=Pour.new(self.player,self.world,source,targets,options,context)
     if not controller then return nil,why end

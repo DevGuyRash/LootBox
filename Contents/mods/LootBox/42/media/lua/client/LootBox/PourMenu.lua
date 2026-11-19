@@ -34,6 +34,22 @@ local function builtinIcon(option, key, fallback)
     option.itemForTexture=not option.iconTexture and fallback or nil
 end
 
+local function entrances(parent,branded,render)
+    if not otherPourMenu(parent) then render(parent) end
+    render(branded)
+end
+
+local function unavailable(parent,branded,item,tooltip,reason)
+    entrances(parent,branded,function(host)
+        local root=host:addOption("Pour Into",marker,nil)
+        if not root then return end
+        root.notAvailable=true
+        builtinIcon(root,"Item_WaterDrop",item)
+        tooltip(root,"Pour Into",reason)
+    end)
+    return true
+end
+
 local function run(pick)
     if pick.click.used then return nil,"Reopen the inventory menu to start another pour." end
     pick.click.used=true
@@ -60,23 +76,41 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
     for _,member in ipairs(members) do if hasFluid(member) then anyFluid=true;break end end
     if not anyFluid then return end
     local options=Pour.options(prefs)
-    local snapshot=Inventory.snapshot(getSpecificPlayer(index),instance.world,members[1]:getContainer(),Pour.displayed(index))
+    local holder=members[1]:getContainer()
+    local viewed=Pour.displayed(index,holder)
+    local snapshot=Inventory.snapshot(getSpecificPlayer(index),instance.world,holder,viewed)
     -- A collapsed row delegates the choice; an expanded individual never does.
-    local plan
-    if #members==1 then plan=Inventory.plan(snapshot,members[1],options,true)
-    else plan=Inventory.choose(snapshot,members,options) end
-    if not plan or #plan.targets==0 then return end
+    local plan,reason
+    if #members==1 then plan,reason=Inventory.plan(snapshot,members[1],options,true)
+    else plan,reason=Inventory.choose(snapshot,members,options) end
+    if not plan then
+        -- For an exact non-empty loot row explain a source failure rather than
+        -- leaving an ambiguous invisible shortcut. Never authorize the row.
+        if #members==1 and viewed and holder==viewed then
+            local candidate=members[1]
+            local ok,hasContents=pcall(function()
+                local fluid=candidate:getFluidContainer()
+                if not fluid then
+                    local world=candidate:getWorldItem()
+                    fluid=world and world:getFluidContainer()
+                end
+                return fluid and fluid:getAmount()>0
+            end)
+            if ok and hasContents then
+                return unavailable(parent,branded,candidate,tooltip,reason or "That vessel cannot pour from here.")
+            end
+        end
+        return
+    end
     local item=plan.source.item
     if plan.source.scope=="loot" and plan.source.container:getType()~="floor" then
         plan.source.pourAnchor=instance.world:pourShelfAnchor(plan.source.container)
-        if not plan.source.pourAnchor then return end
+        if not plan.source.pourAnchor then
+            return unavailable(parent,branded,item,tooltip,"The selected storage is out of reach or cannot return this vessel. Move closer or carry the source.")
+        end
     end
     local targets,fill=plan.targets,plan.fill
 
-    local host=otherPourMenu(parent) and branded or parent
-    local root=host:addOption("Pour Into",marker,nil)
-    if not root then return end
-    builtinIcon(root,"Item_WaterDrop",item) -- stock ISFluidContainerMenu icon
     local source=string.format("%s | %.3f L available",plan.source.label,plan.source.amount)
     if #members>1 then
         local ok,fluidName=pcall(function() return plan.source.fluid:getUiName() end)
@@ -84,36 +118,52 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
         source=source..string.format(" (%.1f%% full; least-filled eligible vessel in this stack)",
             100*plan.source.amount/plan.source.capacity)
     end
-    tooltip(root,"Pour Into",source)
-    local child=ISContextMenu:getNew(host)
-    host:addSubMenu(root,child)
-
     local app,click=require "LootBox/App",{}
-    local function choice(title,list)
-        return child:addOption(title,{app=app,click=click,index=index,instance=instance,source=plan.source,
-            targets=list,prefs=options},run)
-    end
-    if #fill>0 then
-        local batch=choice("Fill All",fill)
-        builtinIcon(batch,"media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",item)
-        local groups=options.pourFillScope=="main-only" and "main inventory only" or
-            options.pourFillScope=="equipped-first" and "equipped first" or "main inventory first"
-        tooltip(batch,"Fill All",string.format("%s. %d destination(s), %s; %s room left first within each group.",
-            source,#fill,groups,options.pourFillOrder=="largest-first" and "most" or "least"))
-    end
-    -- A direct choice from one native destination stack binds one exact
-    -- vessel. The independent Fill All callback above still owns the full list.
-    for _,group in ipairs(Stacks.targets({targets=targets},index)) do
-        local e=group.entry
-        local title=e.label
-        if group.count>1 then title=title.." ("..group.count.." stacked)" end
-        local row=choice(title,{e})
-        if row then
-            row.iconTexture,row.itemForTexture=nil,e.item
-            local detail=group.count>1 and " Uses the least-filled compatible vessel in this stack." or ""
-            tooltip(row,"Pour Into",source..". Destination: "..e.label.."."..detail.." Starts one native pour.")
+    local groups=Stacks.targets({targets=targets},index)
+    local function render(host)
+        local root=host:addOption("Pour Into",marker,nil)
+        if not root then return end
+        builtinIcon(root,"Item_WaterDrop",item)
+        if #targets==0 then
+            root.notAvailable=true
+            local help="No compatible destination with space. Carry an empty or compatible vessel."
+            if plan.source.scope=="loot" and not options.pourLootToLoot then
+                help=help.." Enable loot-to-loot in LootBox settings to use targets in this same loot pane."
+            end
+            tooltip(root,"Pour Into",source..". "..help)
+            return
+        end
+        tooltip(root,"Pour Into",source)
+        local child=ISContextMenu:getNew(host)
+        host:addSubMenu(root,child)
+        local function choice(title,list)
+            return child:addOption(title,{app=app,click=click,index=index,instance=instance,source=plan.source,
+                targets=list,prefs=options},run)
+        end
+        if #fill>0 then
+            local batch=choice("Fill All",fill)
+            builtinIcon(batch,"media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",item)
+            local order=options.pourFillScope=="main-only" and "main inventory only" or
+                options.pourFillScope=="equipped-first" and "equipped first" or "main inventory first"
+            tooltip(batch,"Fill All",string.format("%s. %d destination(s), %s; %s room left first within each group.",
+                source,#fill,order,options.pourFillOrder=="largest-first" and "most" or "least"))
+        end
+        -- A direct stack entry binds one exact vessel; Fill All uses the whole list.
+        for _,group in ipairs(groups) do
+            local e=group.entry
+            local title=e.label
+            if group.count>1 then title=title.." ("..group.count.." stacked)" end
+            local row=choice(title,{e})
+            if row then
+                row.iconTexture,row.itemForTexture=nil,e.item
+                local detail=group.count>1 and " Uses the least-filled compatible vessel in this stack." or ""
+                tooltip(row,"Pour Into",source..". Destination: "..e.label.."."..detail.." Starts one native pour.")
+            end
         end
     end
+    -- The two entrances share the same frozen plan and one dispatch latch.
+    -- Never replace a different mod's top-level action.
+    entrances(parent,branded,render)
     return true
 end
 

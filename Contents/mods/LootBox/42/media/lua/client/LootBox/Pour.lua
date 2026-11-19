@@ -11,15 +11,13 @@ function Pour.options(p)
         pourFillOrder=p.pourMostRoomFirst and "largest-first" or "smallest-first"}
 end
 
-function Pour.displayed(index)
-    local page = getPlayerLoot and getPlayerLoot(index)
-    if not page or not page.inventoryPane then return nil end
-    local visible = page.getIsVisible or page.isVisible
-    if type(visible)~="function" or not visible(page) then return nil end
-    return page.inventoryPane.inventory
+function Pour.displayed(index,holder)
+    return require("LootBox/PourStacks").displayedLoot(index,holder)
 end
 
-local function shelved(entry) return entry.scope=="loot" and entry.container:getType()~="floor" end
+local function loanable(entry)
+    return entry.scope=="loot" and (entry.container:getType()~="floor" or entry.groundAnchor~=nil)
+end
 local function mobile(p)
     return p:isLocalPlayer() and p:getCurrentSquare() and not p:isDead() and not p:isAsleep()
         and not p:isMoving() and not p:isRunning() and not p:isSprinting() and not p:isAiming()
@@ -61,6 +59,10 @@ function Pour:allowed()
     if not prefs or not mobile(self.player) or self.cancelReason then return false end
     if self.shelf and pane~=self.shelf then return false end
     if self.shelf and self.shelf:getType()~="floor" and not self.world:pourShelfReachable(self.shelf,self.anchor) then return false end
+    for _,s in ipairs({self.source,self.target or false}) do
+        if s and s.selected.groundAnchor
+            and not require("LootBox/PourGround").reachable(self.player,s.selected.groundAnchor) then return false end
+    end
     return self.options.pourLootToLoot==prefs.pourLootToLoot and self.options.pourFillScope==prefs.pourFillScope
         and self.options.pourFillOrder==prefs.pourFillOrder
 end
@@ -154,8 +156,12 @@ end
 
 function Pour:transfer(s,returning)
     local p,original=self.player,s.selected
-    if not shelved(original) or not self:allowed() or not self:unchanged(s) or not safeToMove(self,s.live.item) then
-        self:unwind("The original shelf or vessel is no longer available.",s);return
+    if not loanable(original) or not self:allowed() or not self:unchanged(s) or not safeToMove(self,s.live.item) then
+        self:unwind("The original location or vessel is no longer available.",s);return
+    end
+    if original.groundAnchor and not self.groundMove then
+        self.move=require("LootBox/PourGround").new(p)
+        self.groundMove=true -- all loans in a captured floor pane use this route
     end
     local from=s.live.container
     local to=returning and original.container or p:getInventory()
@@ -164,7 +170,7 @@ function Pour:transfer(s,returning)
         if not self:allowed() then return false end
         if phase=="admit" then return self:unchanged(s) and safeToMove(self,item) end
         return true -- receipt may precede the mirrored remove/add
-    end)
+    end,original.groundAnchor)
     if not ok then self.moving,self.returning=nil,nil;self:unwind(why or "The game refused to move this vessel.",s);return end
     self.launched=true
 end
@@ -235,8 +241,8 @@ function Pour:step()
         self:unwind("A selected destination changed; no further pour was requested.",self.target);return
     end
     self.target.live=dst
-    if shelved(self.source.selected) and not held(self.source) then self:transfer(self.source,false);return end
-    if shelved(self.target.selected) and not held(self.target) then self:transfer(self.target,false);return end
+    if loanable(self.source.selected) and not held(self.source) then self:transfer(self.source,false);return end
+    if loanable(self.target.selected) and not held(self.target) then self:transfer(self.target,false);return end
     self.targetStart=dst.amount
     local checkedMix
     local ok,why=self.pour:start(src.item,dst.item,nil,function(_,_,phase)
