@@ -238,6 +238,43 @@ test("failed receipts and unrelated player work never start another action",func
         j.pour.pending.reply={false,"cancelled"};j:tick();assert(j.state=="cancelled")
     end
 end)
+test("a frozen least-filled stack source cannot be replaced after its contents change",function()
+    local f=fixture()
+    local first=item(f.main,80,"Bottle",1,.8)
+    local picked=item(f.main,78,"Bottle",2,.9)
+    local target=item(f.main,90,"Jar",2,0)
+    local frozen=Inventory.snapshot(f.player,f.world,f.main,f.pane)
+    local plan=assert(Inventory.choose(frozen,{first,picked},f.options))
+    assert(plan.source.item==picked and Pour.capture(plan.source))
+    local dest
+    for _,entry in ipairs(plan.targets)do if entry.item==target then dest=entry end end
+    local j=assert(Pour.new(f.player,f.world,plan.source,{assert(dest)},f.options,function()return f.options,f.pane end))
+    picked.fluid.amount=.2 -- a sibling is still safe, but never silently used
+    j:tick()
+    assert(j.state=="cancelled" and #f.calls==0 and first.fluid.amount==.8 and target.fluid.amount==0)
+end)
+
+test("source or target capacity drift after menu capture never dispatches or substitutes",function()
+    for _,which in ipairs({"source","target"}) do
+        local f=fixture()
+        local sibling=item(f.main,80,"Bottle",1,.8)
+        local source=item(f.main,78,"Bottle",2,.9)
+        local target=item(f.main,90,"Jar",.5,0)
+        local spare=item(f.main,91,"Jar",2,0)
+        local frozen=Inventory.snapshot(f.player,f.world,f.main,f.pane)
+        local plan=assert(Inventory.choose(frozen,{sibling,source},f.options))
+        assert(plan.source.item==source and Pour.capture(plan.source))
+        local dest
+        for _,entry in ipairs(plan.targets) do if entry.item==target then dest=entry end end
+        assert(dest and Pour.capture(dest))
+        if which=="source" then source.fluid.capacity=1 else target.fluid.capacity=.25 end
+        local j=Pour.new(f.player,f.world,plan.source,{dest},f.options,function() return f.options,f.pane end)
+        if j then j:tick(); assert(j.state=="cancelled",which.." capacity drift did not cancel") end
+        assert(#f.calls==0 and source.fluid.amount==.9 and sibling.fluid.amount==.8
+            and target.fluid.amount==0 and spare.fluid.amount==0,which)
+    end
+end)
+
 local function twoShelfLoans()
     local f=fixture(); f.options.pourLootToLoot=true
     local a=item(f.shelf,71,"Milk Carton",3,2)
@@ -271,6 +308,23 @@ test("independently changed shelved source stays in main after exact untouched t
     assert(returned.container==f.shelf and returned.fluid.amount==0 and source.container==f.main
         and source.fluid.species==water and source.fluid.amount==2)
     assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Milk Carton",1,true) and j.reason:find("[ID 71]",1,true),j.reason)
+end)
+
+test("changed capacity of either staged replica leaves it reported while the other loan returns",function()
+    for _,which in ipairs({"source","target"}) do
+        local f,j,source,target,spare=twoShelfLoans()
+        local changed,unchanged=source,target
+        if which=="target" then changed,unchanged=target,source end
+        local amount=changed.fluid.amount
+        changed.fluid.capacity=changed.fluid.capacity+.5
+        j:tick(); isCall(f,3,"move",unchanged.id,f.main)
+        local returned=moveAck(f,true);j:tick();j:tick()
+        assert(#f.calls==3 and j.count==0 and j.state=="cancelled",which)
+        assert(returned.container==f.shelf and changed.container==f.main and changed.fluid.amount==amount
+            and spare.container==f.shelf and spare.fluid.amount==0,which)
+        assert(j.reason:find("Check main inventory",1,true) and j.reason:find(changed.name,1,true)
+            and j.reason:find("[ID "..changed.id.."]",1,true),j.reason)
+    end
 end)
 
 test("denied first unwind return is not retried and both held vessels are reported",function()

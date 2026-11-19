@@ -1394,9 +1394,13 @@ end)
 local function pourFixture(f)
     local old={ISInventoryPane,FluidContainer,FluidUtil,getActivatedMods,getTexture}
     ISInventoryPane={getActualItems=function(rows)
-        local flat={}
+        local flat,seen={},{}
+        local function push(candidate)
+            if not seen[candidate] then seen[candidate]=true;flat[#flat+1]=candidate end
+        end
         for _,row in ipairs(rows) do
-            for _,candidate in ipairs(row.items or {row}) do flat[#flat+1]=candidate end
+            if row.items then for i=2,#row.items do push(row.items[i]) end
+            else push(row) end
         end
         return flat
     end}
@@ -1415,6 +1419,10 @@ local function pourFixture(f)
         function container_:isLockedToCharacter() return false end
         function container_:getItems()
             return {size=function() return #self.contents end,get=function(_,i) return self.contents[i+1] end}
+        end
+        function container_:contains(candidate)
+            for _,entry in ipairs(self.contents) do if entry==candidate then return true end end
+            return false
         end
     end
     local milk={}
@@ -1441,6 +1449,12 @@ local function pourFixture(f)
     f.inventory.contents[#f.inventory.contents+1]=ready
     function f.player:getPrimaryHandItem() return ready end
     f.lootPage.getIsVisible=function() return f.visible~=false end
+    f.inventoryPage.getIsVisible=function() return true end
+    for _,page in ipairs({f.inventoryPage,f.lootPage}) do
+        page.inventoryPane.player=0
+        page.inventoryPane.getIsVisible=page.getIsVisible
+        page.inventoryPane.itemslist={}
+    end
     f.app.world.consumptionSource=function(_,i,c) return c==f.crate and i.source==c end
     f.app.world.pourShelfAnchor=function(_,c) return c==f.crate and {} or nil end
     local a=vessel(f.inventory,10,"Base.Milk","Milk",2,1.5)
@@ -1453,7 +1467,7 @@ local function pourFixture(f)
         calls[#calls+1]={source=source,targets=targets,options=options}
         return true
     end
-    return a,b,d,shelf,shelfTarget,calls,restore
+    return a,b,d,shelf,shelfTarget,calls,restore,vessel
 end
 
 local function pourDestination(menu,item_)
@@ -1469,7 +1483,7 @@ test("Pour Into renders a separate native-spanning menu and dispatches one froze
         local nativeChild=Menu:new()
         local vanilla=parent:addOption("Fluid",nil,function() end)
         parent:addSubMenu(vanilla,nativeChild)
-        local rows={{items={src,src}}}
+        local rows={src}
         Menus.inventoryMenu(0,parent,rows)
         assert(parent.options[1]==vanilla and vanilla.child==nativeChild and #nativeChild.options==0)
         local root=needed(parent,"Pour Into")
@@ -1483,7 +1497,7 @@ test("Pour Into renders a separate native-spanning menu and dispatches one froze
         assert(m.name:find("1 L free",1,true) and e.name:find("2 L free",1,true))
         local fill=needed(root.child,"Fill All")
         assert(icon(fill))
-        rows[1].items={main,equipped} -- callbacks must not re-flatten new UI rows
+        rows[1]=main; rows[2]=equipped -- callbacks must not re-flatten new UI rows
         fill.onSelect(fill.target);fill.onSelect(fill.target)
         assert(#calls==1 and calls[1].source.item==src and #calls[1].targets==2)
         assert(calls[1].targets[1].item==equipped and calls[1].targets[2].item==main)
@@ -1520,7 +1534,7 @@ test("Pour Into rejects two real selections and hidden loot; shortcut flags and 
         local function render(rows)
             local p=Menu:new();Menus.inventoryMenu(0,p,rows);return option(p,"Pour Into")
         end
-        assert(not render({{items={src,main}}}))
+        assert(not render({{items={src,src,main}}}))
         assert(not render({src,main}))
         f.preferences.contextMenus=false;assert(not render({src}))
         f.preferences.contextMenus=true
@@ -1560,6 +1574,149 @@ test("unstacked shelf milk lists the exact two same-name empty buckets only when
             and b.name:find("Empty Bucket | Displayed Kitchen Shelf",1,true))
         b.onSelect(b.target)
         assert(#calls==1 and calls[1].source.item==milk and calls[1].targets[1].item==other)
+    end)
+    restore();assert(ok,err)
+end)
+
+local function stockPourRow(pane,key,representative,...)
+    pane.itemindex=pane.itemindex or {}
+    pane.collapsed=pane.collapsed or {}
+    local row={invPanel=pane,name=key,items={representative,...}}
+    pane.itemindex[key],pane.collapsed[key]=row,true
+    pane.itemslist[#pane.itemslist+1]=row
+    return row
+end
+
+test("collapsed native source picks the least filled eligible exact vessel and freezes it",function(f)
+    local src,main,_,_,_,calls,restore,vessel=pourFixture(f)
+    local ok,err=pcall(function()
+        local pane=f.inventoryPage.inventoryPane
+        local small=vessel(f.inventory,30,"Base.Milk","Milk",1,.4)
+        local winner,winnerFluid=vessel(f.inventory,25,"Base.Milk","Milk",10,2)
+        local higherId=vessel(f.inventory,26,"Base.Milk","Milk",10,2)
+        local sealed=vessel(f.inventory,21,"Base.Milk","Milk",10,.01)
+        sealed.isSealed=function() return true end
+        local empty=vessel(f.inventory,20,"Base.Milk","Milk",1,0)
+        local incompatible,incompatibleFluid=vessel(f.inventory,22,"Base.Milk","Milk",10,.02)
+        FluidContainer.CanTransfer=function(from,to) return from~=to and from~=incompatibleFluid end
+        local row=stockPourRow(pane,"Milk",main,empty,sealed,incompatible,higherId,small,winner,src)
+        local function render(items)
+            local menu=Menu:new()
+            local stockMenu=Menu:new()
+            local stock=menu:addOption("Fluid",nil,function() end)
+            menu:addSubMenu(stock,stockMenu)
+            Menus.inventoryMenu(0,menu,items)
+            assert(stock.child==stockMenu and #stockMenu.options==0)
+            return option(menu,"Pour Into")
+        end
+        assert(not render({row,main}),"mixed selection is not a single stack")
+        assert(not render({{name=row.name,invPanel=pane,items=row.items}}),"unregistered row is not native")
+        pane.collapsed.Milk=false
+        assert(not render({row}),"expanded group is not permission to pick a sibling")
+        assert(not render({empty}),"expanded singleton must stay exact")
+        local exact=assert(render({small}))
+        assert(exact.toolTip.description:find("0.400 L available",1,true))
+        pane.collapsed.Milk=true
+        local root=assert(render({row}))
+        assert(root.toolTip.description:find("2.000 L available",1,true))
+        local fill=needed(root.child,"Fill All")
+        winnerFluid.amount=0
+        row.items={main,small}
+        fill.onSelect(fill.target)
+        assert(#calls==1 and calls[1].source.item==winner,"click must retain exact preview even after change")
+    end)
+    restore();assert(ok,err)
+end)
+
+test("collapsed source skips unreadable mixture and never reselects on click",function(f)
+    local src,main,_,_,_,calls,restore,vessel=pourFixture(f)
+    local ok,err=pcall(function()
+        local bad,badFluid=vessel(f.inventory,21,"Base.Milk","Milk",2,.1)
+        local winner,fluid=vessel(f.inventory,22,"Base.Milk","Milk",2,.5)
+        local sampled,badSampled,unreadable=0,0,false
+        local sample=fluid.createFluidSample
+        function fluid:createFluidSample()
+            sampled=sampled+1
+            if not unreadable then return sample(self) end
+        end
+        function badFluid:createFluidSample() badSampled=badSampled+1 end
+        local stock=stockPourRow(f.inventoryPage.inventoryPane,"Milk",bad,bad,winner,src)
+        local menu=Menu:new();Menus.inventoryMenu(0,menu,{stock})
+        local root=needed(menu,"Pour Into")
+        assert(root.toolTip.description:find("0.500 L available",1,true))
+        assert(sampled==1 and badSampled==1,"sample each candidate mixture once within this menu")
+        local direct=assert(pourDestination(root.child,main))
+        unreadable=true
+        direct.onSelect(direct.target)
+        assert(#calls==1 and calls[1].source.item==winner,"never substitute after menu capture")
+        assert(sampled==1 and badSampled==1,"menu callback must not rebuild the captured plan")
+    end)
+    restore();assert(ok,err)
+end)
+
+test("collapsed source moves past native-compatible targets whose mixtures cannot be captured",function(f)
+    local src,main,_,_,_,calls,restore,vessel=pourFixture(f)
+    local ok,err=pcall(function()
+        local first,firstFluid=vessel(f.inventory,21,"Base.Milk","Milk",2,.1)
+        local second,secondFluid=vessel(f.inventory,22,"Base.Milk","Milk",2,.2)
+        local badTarget,targetFluid=vessel(f.inventory,30,"Base.Bottle","Bottle",2,.25)
+        local mainFluid=main:getFluidContainer()
+        local srcFluid=src:getFluidContainer()
+        local sampled,targetSampled={},0
+        for _,fluid in ipairs({firstFluid,secondFluid,srcFluid}) do
+            local sample=fluid.createFluidSample
+            function fluid:createFluidSample()
+                sampled[self]=(sampled[self] or 0)+1
+                return sample(self)
+            end
+        end
+        function targetFluid:createFluidSample() targetSampled=targetSampled+1 end
+        FluidContainer.CanTransfer=function(from,to)
+            if from==firstFluid or from==secondFluid then return to==targetFluid end
+            return from==srcFluid and to==mainFluid
+        end
+        local row=stockPourRow(f.inventoryPage.inventoryPane,"Milk",first,first,second,src)
+        local menu=Menu:new();Menus.inventoryMenu(0,menu,{row})
+        local root=needed(menu,"Pour Into")
+        assert(root.toolTip.description:find("1.500 L available",1,true))
+        assert(targetSampled==1,"cache a failed mixture capture across candidate plans")
+        for _,n in pairs(sampled) do assert(n==1,"never resample a mixture within one menu") end
+        assert(not pourDestination(root.child,badTarget))
+        local fill=needed(root.child,"Fill All")
+        fill.onSelect(fill.target)
+        assert(#calls==1 and calls[1].source.item==src and #calls[1].targets==1 and calls[1].targets[1].item==main)
+    end)
+    restore();assert(ok,err)
+end)
+
+test("visible native destination stack renders one direct least-filled row but Fill All retains each vessel",function(f)
+    local src,main,equipped,_,_,calls,restore,vessel=pourFixture(f)
+    local ok,err=pcall(function()
+        local fuller=vessel(f.inventory,16,"Base.Bottle","Bottle",5,.3)
+        local large=vessel(f.inventory,18,"Base.Bottle","Bottle",10,.2)
+        local mainFluid=main:getFluidContainer()
+        mainFluid.amount=.1 -- smaller absolute amount, larger fill percentage
+        stockPourRow(f.inventoryPage.inventoryPane,"Bottle",main,main,fuller,large)
+        local function render()
+            local menu=Menu:new();Menus.inventoryMenu(0,menu,{src})
+            return needed(menu,"Pour Into").child
+        end
+        local menu=render()
+        assert(not pourDestination(menu,main) and not pourDestination(menu,fuller))
+        local direct=assert(pourDestination(menu,large))
+        assert(not direct.child and pourDestination(menu,equipped),"same name in another holder is independent")
+        direct.onSelect(direct.target)
+        assert(#calls==1 and #calls[1].targets==1 and calls[1].targets[1].item==large)
+        local fill=needed(render(),"Fill All")
+        fill.onSelect(fill.target)
+        assert(#calls[2].targets==4)
+        assert(calls[2].targets[1].item==main and calls[2].targets[2].item==fuller
+          and calls[2].targets[3].item==large and calls[2].targets[4].item==equipped)
+        f.preferences.pourEquippedFirst=true
+        f.preferences.pourMostRoomFirst=true
+        fill=needed(render(),"Fill All");fill.onSelect(fill.target)
+        assert(#calls[3].targets==4 and calls[3].targets[1].item==equipped and calls[3].targets[2].item==large
+          and calls[3].targets[3].item==fuller and calls[3].targets[4].item==main)
     end)
     restore();assert(ok,err)
 end)
