@@ -860,7 +860,7 @@ test("all four automatic supplies settings are independent and off until saved",
             keys[row.item.key] = nil
         end
     end
-    assert(next(keys) == nil)
+    for key in pairs(keys) do error("Missing automatic supply preference: " .. key) end
     for _, row in ipairs(window.preferenceViewport.items) do
         if row.item.key == "autoConsumeNested" then
             window.preferenceViewport.callback(window.preferenceViewport.target, row.item)
