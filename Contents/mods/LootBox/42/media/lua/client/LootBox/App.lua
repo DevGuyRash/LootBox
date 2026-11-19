@@ -6,6 +6,7 @@ local Jobs = require "LootBox/Jobs"
 local Setups = require "LootBox/Setups"
 local Recovery = require "LootBox/Recovery"
 local TillFull = require "LootBox/TillFull"
+require "LootBox/CompletionHUD"
 
 local App = {}
 local Instance = {}
@@ -212,7 +213,7 @@ function App.get(playerIndex)
     local path = scope(player)
     local existing = sessions[playerIndex or 0]
     if existing and existing.player == player and existing.path == path then return existing end
-    if existing then existing:cancel() end
+    if existing then existing:cancel(true) end
     local state, err = Store.load(path)
     if state ~= nil then
         local invalid = stateError(state)
@@ -542,10 +543,10 @@ function Instance:runReplacement()
     elseif not result and problem then self.replacementProblem = tostring(problem) end
 end
 
-function Instance:cancel()
+function Instance:cancel(silent)
     self.replacement = nil
-    if self.consumption and self.consumption:isBusy() then return self.consumption:cancel() end
-    return self.jobs:cancel()
+    if self.consumption and self.consumption:isBusy() then return self.consumption:cancel(silent) end
+    return self.jobs:cancel(silent)
 end
 function Instance:pause()
     self.replacement = nil
@@ -614,7 +615,7 @@ function App.tick()
 end
 
 function App.reset()
-    for _, instance in pairs(sessions) do instance:cancel() end
+    for _, instance in pairs(sessions) do instance:cancel(true) end
     sessions, definitions, graph, loadError = {}, nil, nil, nil
     preferences, preferencesError = nil, nil
     App.escapeDown = false

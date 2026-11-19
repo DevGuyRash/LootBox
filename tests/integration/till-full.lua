@@ -395,12 +395,16 @@ function isClient() return multiplayer end
 test('multiplayer opening hands back exact choice without consuming or opening stack peers',function()
  multiplayer=true
  local first,second=can(1),can(2)
- local c=assert(Full.new(player(.3,0),world,{first,first,second},'food',false,recipe));c:tick()
+ local p=player(.3,0);function p:getPlayerNum() return 0 end
+ local cards=0
+ PZActionCompletionHUD={duration=function() return '1s' end,show=function() cards=cards+1 end}
+ local c=assert(Full.new(p,world,{first,first,second},'food',false,recipe));c:tick()
  assert(#created.opens==1 and #c.records==2)
  created.reason='chooseOpened';c:tick()
  assert(c.state=='finished' and c.count==0 and c.records==nil and #created.calls==0 and #created.opens==1)
  assert(c.openedFoodPrompt=='When the opened food appears, right-click it and choose Eat > Til Full.')
- c.openedFoodPrompt=nil;c:tick();assert(c.openedFoodPrompt==nil and #created.opens==1)
+ c.openedFoodPrompt=nil;c:tick();assert(c.openedFoodPrompt==nil and #created.opens==1 and cards==0)
+ PZActionCompletionHUD=nil
  multiplayer=false
 end)
 test('opening fallback never prompts after cancellation refusal or satisfied hunger',function()
@@ -870,6 +874,38 @@ test('MP small drink overshoot is terminal observation only and never another si
   else assert(c.state=='failed',mode) end
   assert(#created.calls==1);endMP()
  end
+end)
+test('Til Full shows the confirmed stack outcome once, not fullness or intermediate actions', function()
+ local cards={}
+ PZActionCompletionHUD={duration=function(seconds) return tostring(math.floor(seconds))..'s' end,
+  show=function(index,card) assert(index==1); cards[#cards+1]=card end}
+ local p=player(.5,0); function p:getPlayerNum() return 1 end
+ local a,b=food(1,.2),food(2,.2)
+ local c=assert(Full.new(p,world,{a,b},'food')); c:tick()
+ a.source=nil; p.h=.3; c:tick(); assert(#cards==0)
+ now=now+4500; b.source=nil; p.h=.1; c:tick(); c:tick()
+ assert(#cards==1 and cards[1].title=='Selected stack exhausted')
+ assert(cards[1].detail:find('2 portions confirmed',1,true) and cards[1].detail:find('4s',1,true))
+ local idle=assert(Full.new(player(0,0),world,{food(3,.5)},'food'))
+ idle.player.getPlayerNum=p.getPlayerNum; idle:tick(); assert(#cards==1)
+ PZActionCompletionHUD=nil
+end)
+
+test('Til Full bounded partial and no-progress outcomes do not claim full', function()
+ local cards={}
+ PZActionCompletionHUD={duration=function() return '2s' end,
+  show=function(_,card) cards[#cards+1]=card end}
+ local p=player(.1,0); function p:getPlayerNum() return 0 end
+ local a=food(1,.2)
+ local c=assert(Full.new(p,world,{a},'food')); c:tick()
+ c:tick(); assert(#cards==0)
+ a.h=.1;p.h=0;c:tick();c:tick()
+ assert(#cards==1 and cards[1].title=='Requested portion consumed')
+ local d=assert(Full.new(p,world,{food(2,.4)},'food')); p.h=.1; d:tick(); d:tick()
+ now=now+2001;d:tick()
+ assert(#cards==2 and cards[2].title=='Til Full stopped' and cards[2].status=='stopped')
+ assert(cards[2].detail=='2s' and cards[2].note:find('not fully confirmed',1,true))
+ PZActionCompletionHUD=nil
 end)
 print('Til Full controller: '..count..' scenarios passed')
 
