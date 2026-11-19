@@ -3,6 +3,7 @@ local Categories = require "LootBox/Categories"
 local Routing = require "LootBox/Routing"
 local Carry = require "LootBox/Carry"
 local Condense = require "LootBox/Condense"
+local Completion = require "LootBox/CompletionFeedback"
 local Jobs = {}
 Jobs.__index = Jobs
 
@@ -350,6 +351,7 @@ function Jobs:start(plan, options)
     if not reviewed or reviewed.token ~= plan or reviewed.revision ~= self.revision then
         return nil, "Preview this job again before starting" end
     self.reviewed = nil
+    self.completion = {startedAt = now(), movedWeight = 0}
     self.plan, self.cancelled, self.ending, self.hauled, self.suspended = reviewed, false, nil, {}, nil
     self.activeGraph, self.diagnostics = reviewed.graph, {count = 0, seen = {}}
     if reviewed.action == "condense" then
@@ -1260,7 +1262,7 @@ function Jobs:pickup(record)
                     self.view.carried = self.view.carried + 1
                 else
                     record.settled = true
-                    self.view.done, self.view.moved = self.view.done + 1, self.view.moved + 1
+                    self:recordMove(record)
                 end
             elseif failureCode == "capacity" and hauling then
                 if #execution.batch > 0 then self:startDelivery("source"); return end
@@ -1272,9 +1274,14 @@ function Jobs:pickup(record)
     end)
 end
 
+function Jobs:recordMove(record)
+    self.view.done, self.view.moved = self.view.done + 1, self.view.moved + 1
+    if self.completion then self.completion.movedWeight = self.completion.movedWeight + weight(record.item) end
+end
+
 function Jobs:nextDelivery(record, ok, reason, destination)
     if ok then
-        self.view.done, self.view.moved = self.view.done + 1, self.view.moved + 1
+        self:recordMove(record)
         record.delivered, record.settled = true, true
         if not self.world:owns(destination) then self:capacityChanged() end
         if record.hauled then self.view.carried = self.view.carried - 1 end
@@ -1715,6 +1722,8 @@ function Jobs:carriedCount()
 end
 
 function Jobs:complete(state, reason)
+    local recoveryOnly = self.execution and self.execution.recoveryOnly
+    local completion, plan = self.completion, self.plan
     if self.execution and self.execution.condense then
         self.view.condense = self.execution.condense:status()
         if (self.view.condense.buffered or 0) > 0 then
@@ -1735,6 +1744,7 @@ function Jobs:complete(state, reason)
     if self.operation and self.operation.completed and self.operation.op.kind == "trash" then self:settleTrash(self.operation) end
     if state == "paused" and self.execution then
         self.suspended = {execution = self.execution, operation = self.operation, graph = self.activeGraph, binReview = self.binReview, stoppedAt = now()}
+        if completion and not recoveryOnly then completion.pausedAt = self.suspended.stoppedAt end
         if self.binReview then self.binReview.token, self.binReview.approved = nil, nil end
         for _, target in ipairs(self.plan.bins or {}) do target.approved, target.needsInspection = {}, true end
         self.view.reason = (self.view.reason or "Stopped") .. ". Choose Resume job to continue."
@@ -1750,7 +1760,10 @@ function Jobs:complete(state, reason)
     if not self.suspended then
         -- Terminal status is a display snapshot, not an owner of planning graphs.
         -- A failed recovery may still own a paused checkpoint and must retain it.
-        self.reviewed, self.plan, self.carry, self.hauled = nil, nil, nil, nil
+        self.reviewed, self.plan, self.carry, self.hauled, self.completion = nil, nil, nil, nil, nil
+    end
+    if completion and state ~= "paused" and (not recoveryOnly or state == "cancelled") then
+        Completion.job(self.player, plan, self.view, completion, now())
     end
 end
 
@@ -1865,7 +1878,12 @@ function Jobs:resume()
     if self.operation and not self.operation.completed then
         self.operation.retry, self.operation.sourcePrepared, self.operation.walk = true, nil, nil
     end
-    local elapsed = now() - saved.stoppedAt
+    local stamp = now()
+    local elapsed = stamp - saved.stoppedAt
+    if self.completion and not self.execution.recoveryOnly and self.completion.pausedAt then
+        self.completion.startedAt = self.completion.startedAt + math.max(0, stamp - self.completion.pausedAt)
+        self.completion.pausedAt = nil
+    end
     for _, state in pairs({self.execution.binInspection, self.execution.discovery, self.execution.section}) do
         if state and state.deadline then state.deadline = state.deadline + elapsed end
     end
@@ -1900,7 +1918,8 @@ function Jobs:pause()
     return true
 end
 
-function Jobs:cancel()
+function Jobs:cancel(silent)
+    if silent then self.completion = nil end
     if self.ending then
         -- Cancel supersedes an in-flight Pause without issuing native cleanup twice.
         self.ending.state, self.ending.reason = "cancelled", "Cancelled"

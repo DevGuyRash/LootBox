@@ -3018,4 +3018,41 @@ test("terminal jobs release planning graphs but retain display summaries", funct
     assert(g.jobs.plan == nil and g.jobs.carry == nil and g.jobs.hauled == nil)
 end)
 
+test("terminal job feedback counts confirmed deliveries once and stays quiet across Pause", function()
+    local cards = {}
+    PZActionCompletionHUD = {duration = function(seconds) return tostring(math.floor(seconds)) .. "s" end,
+        show = function(player, card) assert(player == 0); cards[#cards + 1] = card end}
+    local f = fixture(3)
+    item(f.source, "Test.A", 1.2)
+    item(f.source, "Test.B", 1.3)
+    start(f, request("inventory"))
+    awaitOperation(f, function(op) return op.kind == "transfer" end)
+    assert(#cards == 0)
+    stopJob(f)
+    assert(#cards == 0)
+    f.now = f.now + 1000000
+    assert(f.jobs:resume())
+    assert(finish(f).moved == 2)
+    tick(f)
+    assert(#cards == 1 and cards[1].title == "Loot run complete")
+    assert(cards[1].detail:find("2 items moved", 1, true) and cards[1].detail:find("2.5 weight", 1, true))
+    assert(not cards[1].detail:find("100", 1, true), "Paused time should not be counted")
+    PZActionCompletionHUD = nil
+end)
+
+test("cancelling a paused job shows one stopped card and no planned moves", function()
+    local cards = {}
+    PZActionCompletionHUD = {duration = function() return "2s" end,
+        show = function(_, card) cards[#cards + 1] = card end}
+    local f = fixture(3)
+    item(f.source)
+    start(f, request("inventory"))
+    stopJob(f)
+    assert(#cards == 0 and f.jobs:cancel() and f.jobs:cancel())
+    tick(f)
+    assert(#cards == 1 and cards[1].title == "Loot run cancelled" and cards[1].status == "stopped")
+    assert(cards[1].detail == "2s" and cards[1].note == "Cancelled")
+    PZActionCompletionHUD = nil
+end)
+
 print("PASS " .. tests .. " Jobs integration scenarios")
