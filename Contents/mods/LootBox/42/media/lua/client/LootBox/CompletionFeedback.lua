@@ -10,7 +10,7 @@ local function show(player, title, detail, elapsed, status, note)
     local ok, failure = pcall(function()
         detail[#detail + 1] = hud.duration(math.max(0, elapsed) / 1000)
         hud.show(player:getPlayerNum(), {brand = "LOOTBOX", theme = "loot", title = title,
-            detail = table.concat(detail, " \226\128\162 "), status = status, note = note})
+            detail = table.concat(detail, " | "), status = status, note = note})
     end)
     if not ok then print("[LootBox] Completion card unavailable: " .. tostring(failure)) end
 end
