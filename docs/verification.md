@@ -17,6 +17,12 @@ Run the ordinary verifier for inventory and equipped-bag enumeration, stock comp
 lua5.1 tests/integration/pour-native.lua "$STOCK_FLUIDS_DIR" "$STOCK_FLUID_UTIL"
 ```
 
+For collapsed versus expanded inventory selections, optionally supply the stock pane module too. This runs the unmodified pane refresh, right-click and physical item flattening with UI/Java boundaries doubled. It checks least-percent source choice and no fluid change on menu discovery, not rendered or live multiplayer behavior:
+
+```sh
+lua5.1 tests/stock/pour-stacks.lua "$STOCK_MEDIA_LUA_DIR/client/ISUI/ISInventoryPane.lua"
+```
+
 An additional stock inventory lane loads the game's unchanged `client/TimedActions/ISInventoryTransferAction.lua` and `shared/TimedActions/ISInventoryTransferUtil.lua` beneath the same vanilla `media/lua` directory. It checks normal submission, native acceptance/rejection, and Add-before-Remove observation:
 
 ```sh
