@@ -10,6 +10,7 @@ local function container(parent)
     local c={items={},parent=parent}
     function c:contains(x) return self.items[x]==true end
     function c:getContainingItem() return self.parent end
+    function c:getType() return self.kind or "inventory" end
     return c
 end
 local function put(item,dest)
@@ -198,6 +199,32 @@ assert(f.completed==0, "foreign input makes the native completion unsafe")
 f.now=1
 local completed=f.native:poll()
 assert(completed==false and f.queue.current==first and f.queue.queue[2]==second)
+
+f=setup(false)
+local floor=container()
+floor.kind="floor"
+put(f.src,floor)
+local square={getZ=function() return 0 end,getX=function() return 10 end,getY=function() return 10 end}
+f.player.getSquare=function() return square end
+local wrapper={getItem=function() return f.src end, getSquare=function() return square end,
+    isExistInTheWorld=function(self) return not self.stale end}
+f.src.world=wrapper
+local nativeComponent={amount=.7,capacity=1,signature="petrol"}
+setmetatable(nativeComponent,{__index=f.src.fluid})
+function nativeComponent:getOwner() return wrapper end
+function nativeComponent:isMultiTileMoveable() return self.multi end
+function wrapper:getFluidContainer() return nativeComponent end
+local floorPlan=assert(Native.inspect(f.src,f.dst))
+assert(floorPlan.sourceFluid==nativeComponent and floorPlan.sourceOwner==wrapper and floorPlan.sourceBefore==.7)
+assert(f.native:start(f.src,f.dst,.2))
+action=f.queue.current
+assert(not action:waitToStart()); action:perform(); action:complete()
+local poured,_,quantity=f.native:poll()
+assert(poured and math.abs(quantity-.2)<.000001 and f.src.fluid.amount==.9)
+wrapper.stale=true; assert(not Native.inspect(f.src,f.dst)); wrapper.stale=false
+nativeComponent.multi=true; assert(not Native.inspect(f.src,f.dst)); nativeComponent.multi=false
+f.src.world=nil; assert(not Native.inspect(f.src,f.dst), "plain floor item cannot be silently borrowed")
+put(f.src,nil); f.src.world=wrapper; assert(not Native.inspect(f.src,f.dst), "detached world-only wrapper is not a clicked floor item")
 
 print("PASS stock pour: exact owned vessels, native compatibility, SP completion, MP paired replication, partial and cancellation")
 

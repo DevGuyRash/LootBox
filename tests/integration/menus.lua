@@ -1442,6 +1442,7 @@ local function pourFixture(f)
     function f.player:getPrimaryHandItem() return ready end
     f.lootPage.getIsVisible=function() return f.visible~=false end
     f.app.world.consumptionSource=function(_,i,c) return c==f.crate and i.source==c end
+    f.app.world.pourShelfAnchor=function(_,c) return c==f.crate and {} or nil end
     local a=vessel(f.inventory,10,"Base.Milk","Milk",2,1.5)
     local b=vessel(f.inventory,11,"Base.Bottle","Bottle",1,0)
     local d=vessel(pouch,12,"Base.Bottle","Bottle",2,0)
@@ -1533,6 +1534,32 @@ test("Pour Into rejects two real selections and hidden loot; shortcut flags and 
         local targetOption=assert(pourDestination(menu,target)); targetOption.onSelect(targetOption.target)
         assert(#calls==1 and calls[1].source.item==shelf and calls[1].targets[1].item==target
             and calls[1].options.pourLootToLoot==true)
+    end)
+    restore();assert(ok,err)
+end)
+
+test("unstacked shelf milk lists the exact two same-name empty buckets only when allowed",function(f)
+    local _,main,_,milk,other,calls,restore=pourFixture(f)
+    local ok,err=pcall(function()
+        milk.name="Animal's Milk (Bucket)"
+        main.name,other.name="Empty Bucket","Empty Bucket"
+        f.app.world.name=function(_,c) return c==f.crate and "Kitchen Shelf" or nil end
+        local function openMilk()
+            local parent=Menu:new()
+            Menus.inventoryMenu(0,parent,{milk})
+            return needed(parent,"Pour Into")
+        end
+        local defaults=openMilk()
+        assert(defaults.toolTip.description:find("Animal's Milk (Bucket)",1,true))
+        assert(defaults.toolTip.description:find("1.000 L available",1,true))
+        assert(pourDestination(defaults.child,main) and not pourDestination(defaults.child,other))
+        f.preferences.pourLootToLoot=true
+        local both=openMilk()
+        local a,b=assert(pourDestination(both.child,main)),assert(pourDestination(both.child,other))
+        assert(a~=b and a.name:find("Empty Bucket | Main inventory",1,true)
+            and b.name:find("Empty Bucket | Displayed Kitchen Shelf",1,true))
+        b.onSelect(b.target)
+        assert(#calls==1 and calls[1].source.item==milk and calls[1].targets[1].item==other)
     end)
     restore();assert(ok,err)
 end)

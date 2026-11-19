@@ -23,6 +23,7 @@ end
 local function equipped(player, item)
     return item == call(player, "getPrimaryHandItem") or item == call(player, "getSecondaryHandItem")
         or call(player, "isEquippedClothing", item) == true or call(player, "isAttachedItem", item) == true
+        or call(player, "isEquipped", item) == true
         or call(call(player, "getWornItems"), "contains", item) == true
         or call(call(player, "getAttachedItems"), "contains", item) == true
 end
@@ -48,15 +49,16 @@ local function entryFor(player, item, container, scope, path)
     if not finite(id) or call(item, "isSealed") ~= false then return nil end
     local fluid=call(item,"getFluidContainer")
     if call(container, "getType") == "floor" then
-        -- Stock input resolution is item-first. Item-owned fluid cannot be
-        -- operated on while on the Floor, and this route never picks it up.
+        -- The stock inventory context gives the eligible world component
+        -- precedence here. We do not borrow floor items to reach item-owned fluid.
         local floorObject=call(item,"getWorldItem")
-        if fluid then return nil end
         local component=call(floorObject,"getFluidContainer")
-        if not component or call(floorObject,"getItem")~=item or not adjacentFloor(player,floorObject) then return nil end
+        if not component or call(component,"isMultiTileMoveable")~=false
+            or call(floorObject,"getItem")~=item or not adjacentFloor(player,floorObject) then return nil end
         object,fluid=floorObject,component
     end
-    if not fluid or call(fluid, "getOwner") ~= object or call(fluid, "canPlayerEmpty") ~= true then return nil end
+    if not fluid or call(fluid,"isMultiTileMoveable")==true or call(fluid, "getOwner") ~= object
+        or call(fluid, "canPlayerEmpty") ~= true then return nil end
     local capacity, amount, free = call(fluid, "getCapacity"), call(fluid, "getAmount"), call(fluid, "getFreeCapacity")
     if not finite(capacity) or capacity <= 0 or not finite(amount) or amount < 0 or not finite(free) or free < 0 then return nil end
     local where=path or (scope=="main" and "Main inventory" or scope=="equipped" and "Equipped" or "Displayed loot")

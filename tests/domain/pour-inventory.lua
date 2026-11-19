@@ -87,18 +87,24 @@ do
     source.sealed=false;source.fluid.cannotEmpty=true;assert(not Pour.collect(p,w,source,loot,opt))
     source.fluid.cannotEmpty=false;loot.floor=true
     local function wrapper(i)
-        local component=i.fluid
+        local component={}
+        for k,v in pairs(i.fluid) do component[k]=v end
+        function component:isMultiTileMoveable() return self.multitile==true end
         local native={getItem=function() return i end,getFluidContainer=function() return component end,
             getSquare=function() return p.square end,isExistInTheWorld=function(self) return not self.stale end}
+        component.owner=native
         return native,component
     end
     local so,sf=wrapper(source)
     local to,tf=wrapper(target)
+    assert(not Pour.collect(p,w,source,loot,opt), "item-only floor fluid is never offered or borrowed")
     source.wrapper,target.wrapper=so,to
-    assert(not Pour.collect(p,w,source,loot,opt), "item-owned floor fluid is never offered or borrowed")
-    sf.owner,tf.owner=so,to
+    sf.multitile=true
+    assert(not Pour.collect(p,w,source,loot,opt), "stock rejects multi-tile world fluid even with an item component")
+    sf.multitile=false
+    r=assert(Pour.collect(p,w,source,loot,opt));assert(r.source.object==so and r.source.fluid==sf and sf~=source.fluid)
     source.fluid,target.fluid=nil,nil
-    r=assert(Pour.collect(p,w,source,loot,opt));assert(r.source.object==so)
+    r=assert(Pour.collect(p,w,source,loot,opt));assert(r.source.object==so and r.source.fluid==sf)
     assert(#r.targets==1 and r.targets[1].item==other, "native world-to-world is unavailable")
     assert(Pour.revalidate(p,w,r.targets[1],loot,opt,r.source))
     so.stale=true
@@ -116,6 +122,7 @@ do
     local a,b=item(p.main,"A",1,0),item(p.main,"B",1,0)
     local duplicate=item(p.main,"Duplicate",1,0);duplicate.id=a.id
     local ghost=item(p.main,"Ghost",1,0);ghost.fluid.owner=b
+    local multi=item(p.main,"MultiTile",1,0);function multi.fluid:isMultiTileMoveable() return true end
     local tiny=item(p.main,"Tiny",1,.99999)
     local r=assert(Pour.collect(p,w,source,loot,{}))
     assert(#r.targets==1 and r.targets[1].item==b)
@@ -185,5 +192,18 @@ do
     for _=1,513 do item(p.main,"Bottle",1,0) end
     local plan=assert(Pour.collect(p,w,source,loot,{}))
     assert(plan.truncated and #plan.fill==0 and #plan.targets==512)
+end
+do
+    local p,w,loot=fixture()
+    local source=item(p.main,"Source",2,1)
+    local custom=bag(p.main,"Custom modded tote")
+    local held=item(custom.bag,"Bottle",1,0)
+    function p:isEquipped(i) return i==custom end
+    local plan=assert(Pour.collect(p,w,source,loot,{}))
+    assert(#plan.targets==1 and plan.targets[1].item==held and plan.targets[1].scope=="equipped")
+    custom.container=loot -- capability alone cannot make a stale bag part of main inventory
+    assert(not Pour.stillHere(p,w,plan.targets[1],loot,{}))
+    plan=assert(Pour.collect(p,w,source,loot,{}))
+    assert(#plan.targets==0)
 end
 print("PASS PourInventory scope, order, exact endpoints and native suitability")

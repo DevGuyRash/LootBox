@@ -4,10 +4,18 @@ local SETTLE, MOVE_MAX = 7000, 120000
 
 local function finite(n) return type(n) == "number" and n == n and math.abs(n) < math.huge end
 local function fluidOf(item)
-    local component = item:getFluidContainer()
-    if component then return component, item end
-    local world = item:getWorldItem()
-    if world then return world:getFluidContainer(), world end
+    local direct=item:getContainer()
+    if not direct or not direct:contains(item) then return nil end
+    if direct:getType()=="floor" then
+        local world=item:getWorldItem()
+        if not world or world:getItem()~=item or not world:isExistInTheWorld() then return nil end
+        local component=world:getFluidContainer()
+        if component and component:getOwner()==world and not component:isMultiTileMoveable() then
+            return component,world
+        end
+        return nil
+    end
+    return item:getFluidContainer(),item
 end
 
 local function inspect(source, target, requested)

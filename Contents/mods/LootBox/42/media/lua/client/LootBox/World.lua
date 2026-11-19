@@ -162,34 +162,100 @@ function World:canAccess(container)
         and call(container, "isLockedToCharacter", self.player) ~= true
 end
 
--- A borrowed shelf vessel may no longer be in this container. Retain its
--- exact original object and independently recheck native access and reach.
-function World:pourShelfReachable(container)
-    if not container or call(container,"getType")=="floor" or self:owns(container) or not self:canAccess(container) then return false end
-    local part=call(container,"getVehiclePart")
-    if part then
-        local v,index=call(part,"getVehicle"),call(part,"getIndex")
-        return v~=nil and nativeInteger(index) and index>=0 and call(v,"getPartByIndex",index)==part
-            and call(part,"getItemContainer")==container and call(v,"canAccessContainer",index,self.player)==true
+local function directMember(container, item)
+    local items=call(container,"getItems")
+    local found=call(items,"contains",item)
+    if type(found)=="boolean" then return found end
+    local count=size(items)
+    if count>4096 then return false end
+    for i=0,count-1 do if at(items,i)==item then return true end end
+    return false
+end
+
+-- A borrowed vessel has left its shelf. Capture the original endpoint and
+-- its exact native holders so a later return cannot follow a moved bag.
+function World:pourShelfAnchor(container)
+    local player=self.player
+    local main=call(player,"getInventory")
+    local here=call(player,"getCurrentSquare")
+    if not here or not container then return nil end
+    local function nearby(square)
+        local p,q=position(here),position(square)
+        return loaded(square) and p and q and nativeInteger(p.x) and nativeInteger(p.y)
+            and nativeInteger(q.x) and nativeInteger(q.y) and q.z==p.z
+            and math.abs(p.x-q.x)<=1 and math.abs(p.y-q.y)<=1
+            and (here==square or call(here,"canReachTo",square)==true) and permitted(player,square)
     end
-    local a,b=call(self.player,"getCurrentSquare"),self:square(container)
-    return a~=nil and loaded(b) and call(a,"getZ")==call(b,"getZ")
-        and math.abs(a:getX()-b:getX())<=1 and math.abs(a:getY()-b:getY())<=1
-        and (a==b or call(a,"canReachTo",b)==true) and permitted(self.player,b)
+    local anchor,seen={},{}
+    local current=container
+    local function add(value) anchor[#anchor+1]=value end
+    for _=1,9 do
+        if not current or current==main or seen[current] or call(current,"getType")=="floor"
+            or call(current,"isLockedToCharacter",player)~=false then return nil end
+        seen[current]=true;add(current)
+        local parent=call(current,"getParent")
+        if parent==player or instance(parent,"IsoGameCharacter") or instance(parent,"IsoPlayer")
+            or instance(parent,"IsoZombie") then return nil end
+        local bag=call(current,"getContainingItem")
+        if bag then
+            local id=call(bag,"getID")
+            if not nativeInteger(id) or call(bag,"getInventory")~=current then return nil end
+            add(bag);add(id)
+            local holder=call(bag,"getContainer")
+            if holder and call(holder,"getType")~="floor" then
+                if not directMember(holder,bag) then return nil end
+                current=holder
+            else
+                local object=call(bag,"getWorldItem")
+                local square=call(object,"getSquare")
+                local index=call(object,"getWorldObjectIndex")
+                if not object or call(object,"getItem")~=bag or not nativeInteger(index) or index<0
+                    or not nearby(square) or at(call(square,"getWorldObjects"),index)~=object
+                    or holder and (not self:valid(holder) or not directMember(holder,bag)) then return nil end
+                add("ground");add(holder or false);add(object);add(square)
+                return anchor
+            end
+        else
+            local part=call(current,"getVehiclePart")
+            if part then
+                local v,index=call(part,"getVehicle"),call(part,"getIndex")
+                local square=call(v,"getSquare")
+                if not v or not loaded(square) or call(v,"isRemovedFromWorld")==true
+                    or not nativeInteger(index) or index<0 or call(v,"getPartByIndex",index)~=part
+                    or call(part,"getItemContainer")~=current or call(v,"canAccessContainer",index,player)~=true
+                    or not permitted(player,square) then return nil end
+                -- Native access uses the actual compartment, not the vehicle
+                -- center square, which may be far away on long vehicles.
+                add("vehicle");add(v);add(part);add(index)
+                return anchor
+            end
+            local square=call(parent,"getSquare")
+            local slot=call(parent,"getContainerIndex",current)
+            if not nearby(square) or not nativeInteger(slot) or slot<0
+                or call(parent,"getContainerByIndex",slot)~=current then return nil end
+            local corpse=instance(parent,"IsoDeadBody")
+            local index=call(parent,corpse and "getStaticMovingObjectIndex" or "getObjectIndex")
+            if not nativeInteger(index) or index<0
+                or at(call(square,corpse and "getStaticMovingObjects" or "getObjects"),index)~=parent then return nil end
+            add("fixture");add(parent);add(square);add(slot)
+            return anchor
+        end
+    end
+end
+
+function World:pourShelfReachable(container, captured)
+    local live=self:pourShelfAnchor(container)
+    if not live then return false end
+    if captured~=nil then
+        if type(captured)~="table" or #captured~=#live then return false end
+        for index,value in ipairs(live) do if captured[index]~=value then return false end end
+    end
+    return true
 end
 
 -- Consumption authorizes one exact item, not a container search or a walk-to job.
 function World:consumptionSource(item, source)
-    local function member(container, value)
-        local items = call(container, "getItems")
-        -- This is the direct item list, not ItemContainer's recursive/type lookup.
-        local present = call(items, "contains", value)
-        if type(present) == "boolean" then return present end
-        local count = size(items)
-        if count > 4096 then return false end
-        for index = 0, count - 1 do if at(items, index) == value then return true end end
-        return false
-    end
+    local member=directMember
     local function nearby(square)
         local current = call(self.player, "getCurrentSquare")
         return current and loaded(square) and call(current, "getZ") == call(square, "getZ")

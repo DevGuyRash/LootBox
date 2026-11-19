@@ -82,7 +82,7 @@ local function fixture()
     function p:getPrimaryHandItem() return f.held end
     for _,name in ipairs({"isDead","isAsleep","isRunning","isSprinting","isAiming","isAttacking","isShoving",
         "isClimbing","isKnockedDown","hasTimedActions"}) do p[name]=function() return false end end
-    f.world={protected=function(_,i) return i.keep==true end, pourShelfReachable=function(_,c) return c==f.shelf and not f.blocked end,
+    f.world={pourShelfAnchor=function(_,c) return c==f.shelf and {c} or nil end,protected=function(_,i) return i.keep==true end, pourShelfReachable=function(_,c) return c==f.shelf and not f.blocked end,
         consumptionSource=function(_,i,c) return i.container==c and c==f.shelf and not f.blocked end}
     ISTimedActionQueue={getTimedActionQueue=function() return f.queue end}
     FluidContainer={CanTransfer=function(_,b) return not b.rejected end}
@@ -238,4 +238,64 @@ test("failed receipts and unrelated player work never start another action",func
         j.pour.pending.reply={false,"cancelled"};j:tick();assert(j.state=="cancelled")
     end
 end)
+local function twoShelfLoans()
+    local f=fixture(); f.options.pourLootToLoot=true
+    local a=item(f.shelf,71,"Milk Carton",3,2)
+    local b=item(f.shelf,72,"Glass Bottle",1,0)
+    local c=item(f.shelf,73,"Spare Bottle",1,0)
+    local j=f:start(a,{b,c})
+    j:tick(); isCall(f,1,"move",71,f.shelf)
+    local liveSource=moveAck(f,true)
+    j:tick(); isCall(f,2,"move",72,f.shelf)
+    local liveTarget=moveAck(f,true)
+    return f,j,liveSource,liveTarget,c
+end
+
+test("independently changed shelved target stays in main and is reported after exact source return",function()
+    local f,j,source,target,spare=twoShelfLoans()
+    target.fluid.amount=.2; target.fluid.species=water
+    j:tick(); isCall(f,3,"move",source.id,f.main)
+    local returned=moveAck(f,true);j:tick();j:tick()
+    assert(#f.calls==3 and j.count==0 and j.state~="finished")
+    assert(returned.container==f.shelf and returned.fluid.amount==2 and target.container==f.main
+        and target.fluid.amount==.2 and spare.container==f.shelf and spare.fluid.amount==0)
+    assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Glass Bottle",1,true) and j.reason:find("[ID 72]",1,true),j.reason)
+end)
+
+test("independently changed shelved source stays in main after exact untouched target returns",function()
+    local f,j,source,target=twoShelfLoans()
+    source.fluid.species=water
+    j:tick(); isCall(f,3,"move",target.id,f.main)
+    local returned=moveAck(f,true);j:tick();j:tick()
+    assert(#f.calls==3 and j.count==0 and j.state~="finished")
+    assert(returned.container==f.shelf and returned.fluid.amount==0 and source.container==f.main
+        and source.fluid.species==water and source.fluid.amount==2)
+    assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Milk Carton",1,true) and j.reason:find("[ID 71]",1,true),j.reason)
+end)
+
+test("denied first unwind return is not retried and both held vessels are reported",function()
+    local f,j,source,target=twoShelfLoans()
+    source.fluid.amount=1.75
+    j:tick(); isCall(f,3,"move",target.id,f.main)
+    moveAck(f,true,false); j:tick(); j:tick()
+    assert(#f.calls==3 and j.count==0 and j.state~="finished")
+    assert(source.container==f.main and target.container==f.main)
+    assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Milk Carton",1,true)
+        and j.reason:find("Glass Bottle",1,true) and j.reason:find("[ID 72]",1,true),j.reason)
+end)
+
+test("a changed original shelf holder causes no return retry or relocation",function()
+    local f,j,source,target=twoShelfLoans()
+    source.fluid.amount=1.5
+    j:tick(); isCall(f,3,"move",target.id,f.main)
+    f.pane=container("counter")
+    local move=assert(j.move.pending)
+    assert(not move.guard("admit",target))
+    move.reply={false,"original shelf changed"};j:tick();j:tick()
+    assert(#f.calls==3 and j.count==0 and j.state~="finished")
+    assert(source.container==f.main and target.container==f.main and #f.pane.items==0)
+    assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Milk Carton",1,true)
+        and j.reason:find("Glass Bottle",1,true) and j.reason:find("[ID 72]",1,true),j.reason)
+end)
+
 print("PASS "..tests.." Pour controller scenarios")
