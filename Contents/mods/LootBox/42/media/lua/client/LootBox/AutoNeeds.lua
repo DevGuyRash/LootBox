@@ -68,6 +68,18 @@ local function guardFor(instance, kind, read, policyItem, plan, loan)
             if err or not opts or not free(instance) or not safe(p) then return false end
             if kind == "food" and not opts.autoConsumeCarried then return false end
             if kind == "fluid" and (not (opts.autoDrinkEquipped or opts.autoConsumeCarried) or not waterEnabled(p)) then return false end
+            if phase == "waitWater" then
+                -- The two network endpoints can briefly show no replica. A
+                -- pending transaction still yields to the player and to the
+                -- original bag's ownership, settings and protection.
+                return loan and kind == "fluid" and Inventory.sourceAccessible(p,opts,world,source)
+            end
+            if phase == "waitOpening" then
+                -- The server can remove the exact can before reporting Done. Only
+                -- the other safety/intent checks still make sense after removal.
+                return plan ~= nil and kind == "food" and item == policyItem and plan.source == source
+                    and source == p:getInventory() and (not plan.risky or opts.autoConsumeRiskyOpen == true)
+            end
             local opening = plan and item == policyItem and plan or nil
             if not Inventory.sourceAccessible(p,opts,world,source)
                 or not Inventory.accessible(p,opts,kind,world,item,opening) then return false end
@@ -89,16 +101,15 @@ local function start(instance,s,opts,read,kind,before,now)
     local p, w = instance.player, instance.world
     local permitted
     if kind == "fluid" then
-        local main, multiplayer = p:getInventory(), isClient()
+        local main = p:getInventory()
         permitted = function(value, source)
-            return source == main or not value:isWaterOnlySource() or (not multiplayer and Loan.canOffer(p,value))
+            return source == main or not value:isWaterOnlySource() or Loan.canOffer(p,value)
         end
     end
-    local item, plan = Inventory.select(p,opts,kind,w,nil,permitted)
-    if not item or not Inventory.eligible(p,opts,kind,w,item,plan) then return false end
+    local item, plan = Inventory.select(p,opts,kind,w,nil,permitted,kind == "food" and s.readyOnly)
+    if not item or (plan and s.readyOnly) or not Inventory.eligible(p,opts,kind,w,item,plan) then return false end
     local pureWater = kind == "fluid" and item:isWaterOnlySource()
     local loan = pureWater and item:getContainer() ~= p:getInventory()
-    if loan and isClient() then return false end -- no speculative move or second server drink
     local guard = guardFor(instance,kind,read,item,plan,loan)
     local active
     if loan then
@@ -125,7 +136,12 @@ local function step(instance, opts, read, now)
         if c:isBusy() then return end
         if instance.consumption == c then instance.consumption = nil end
         local after = need(p,pending.kind)
-        if c.state ~= "finished" or (c.count or 0) < 1 or not finite(after) or after >= pending.before - 0.0001 then
+        if c.state == "finished" and c.mpOpenedInputRetired and pending.kind == "food" then
+            -- Stock did not name a food output. A later *new* needs assessment
+            -- may choose any already-edible, allowed carried food. Never open
+            -- another can in this hunger episode, even if there is no food.
+            s.readyOnly = true
+        elseif c.state ~= "finished" or (c.count or 0) < 1 or not finite(after) or after >= pending.before - 0.0001 then
             -- A manual cancellation, rejected action or uncertain acknowledgement
             -- never authorizes a retry in the same episode.
             s.blocked[pending.kind] = true
@@ -137,7 +153,7 @@ local function step(instance, opts, read, now)
     if not q or q.current or not q.queue or #q.queue ~= 0 or p:hasTimedActions() then s.stock=nil;return end
     local hunger, thirst = need(p,"food"), need(p,"fluid")
     if not finite(hunger) or not finite(thirst) then s.stock=nil;return end
-    if hunger < thresholds.food then s.blocked.food = nil end
+    if hunger < thresholds.food then s.blocked.food, s.readyOnly = nil, nil end
     if thirst < thresholds.fluid then s.blocked.fluid, s.nativeAttempt = nil, nil end
     if s.notBefore and now < s.notBefore then return end
     local knownSetting, enabled = pcall(waterEnabled,p)
