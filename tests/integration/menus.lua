@@ -1492,6 +1492,8 @@ test("Pour Into renders a separate native-spanning menu and dispatches one froze
         for _,o in ipairs(parent.options) do if o.name=="Pour Into" then occurrences=occurrences+1 end end
         assert(occurrences==1 and needed(parent,"Pour Into")==root)
         assert(root.child and icon(root)=="Item_WaterDrop")
+        local branded=needed(needed(parent,"LootBox").child,"Pour Into")
+        assert(branded.child and branded.child~=root.child and icon(branded)=="Item_WaterDrop")
         local m,e=pourDestination(root.child,main),pourDestination(root.child,equipped)
         assert(m and e and m.name:find("Main inventory",1,true) and e.name:find("Field Bag",1,true))
         assert(m.name:find("1 L free",1,true) and e.name:find("2 L free",1,true))
@@ -1499,6 +1501,8 @@ test("Pour Into renders a separate native-spanning menu and dispatches one froze
         assert(icon(fill))
         rows[1]=main; rows[2]=equipped -- callbacks must not re-flatten new UI rows
         fill.onSelect(fill.target);fill.onSelect(fill.target)
+        local mirrored=needed(branded.child,"Fill All")
+        mirrored.onSelect(mirrored.target)
         assert(#calls==1 and calls[1].source.item==src and #calls[1].targets==2)
         assert(calls[1].targets[1].item==equipped and calls[1].targets[2].item==main)
         assert(calls[1].options.pourFillScope=="equipped-first" and calls[1].options.pourFillOrder=="largest-first")
@@ -1578,6 +1582,43 @@ test("unstacked shelf milk lists the exact two same-name empty buckets only when
     restore();assert(ok,err)
 end)
 
+test("oven and other loot sources explain missing targets without enabling loot-to-loot",function(f)
+    local carried,main,equipped,milk,ovenTarget,calls,restore=pourFixture(f)
+    local ok,err=pcall(function()
+        f.app.world.name=function(_,c) return c==f.crate and "Oven" or nil end
+        local kind=f.crate.getType
+        f.crate.getType=function() return "stove" end
+        local m,e=main:getFluidContainer(),equipped:getFluidContainer()
+        m.amount,e.amount=m:getCapacity(),e:getCapacity()
+        local inMain=carried:getFluidContainer()
+        inMain.amount=inMain:getCapacity()
+        local function open()
+            local parent=Menu:new()
+            Menus.inventoryMenu(0,parent,{milk})
+            local root=needed(parent,"Pour Into")
+            local branded=needed(needed(parent,"LootBox").child,"Pour Into")
+            return root,branded
+        end
+        local top,branded=open()
+        assert(top.notAvailable and branded.notAvailable and not top.child and not top.onSelect)
+        assert(top.toolTip.description:find("loot-to-loot",1,true) and #calls==0)
+        f.preferences.pourLootToLoot=true
+        top,branded=open()
+        assert(not top.notAvailable and pourDestination(top.child,ovenTarget))
+        assert(pourDestination(branded.child,ovenTarget))
+        f.preferences.pourLootToLoot=false
+        m.amount=0
+        top=open()
+        assert(pourDestination(top.child,main) and not pourDestination(top.child,ovenTarget))
+        f.app.world.pourShelfAnchor=function() return nil end
+        assert(open().toolTip.description:find("out of reach",1,true))
+        f.app.world.consumptionSource=function() return false end
+        assert(open().toolTip.description:find("cannot pour from here",1,true))
+        f.crate.getType=kind
+    end)
+    restore();assert(ok,err)
+end)
+
 local function stockPourRow(pane,key,representative,...)
     pane.itemindex=pane.itemindex or {}
     pane.collapsed=pane.collapsed or {}
@@ -1586,6 +1627,51 @@ local function stockPourRow(pane,key,representative,...)
     pane.itemslist[#pane.itemslist+1]=row
     return row
 end
+
+test("a visible composite loot section authorizes only the actual clicked holder",function(f)
+    local carried,main,_,milk,_,calls,restore,vessel=pourFixture(f)
+    local ok,err=pcall(function()
+        local pane=f.lootPage.inventoryPane
+        local oven=f.crate
+        pane.inventory=f.inventory -- UI retains an unrelated backing holder
+        local button={inventory=oven}
+        f.lootPage.backpacks={button}
+        local row=stockPourRow(pane,"Milk",milk,milk)
+        pane.items={row}
+        pane.itemindex.Milk={} -- overwritten by the last rendered group
+        local function open(rows)
+            local parent=Menu:new()
+            Menus.inventoryMenu(0,parent,rows)
+            return option(parent,"Pour Into")
+        end
+        local generic=assert(open({row}))
+        assert(pourDestination(generic.child,main))
+        local section={index=1,container=oven,button=button,folded=false}
+        pane.ninvSections,pane.ninvSectionOf,pane.ninvCombinedBuilt={section},{[oven]=section},false
+        row.ninvSection=1
+        -- A retained section allows restoration after borrowing its last item.
+        pane.items={}
+        assert(require("LootBox/Pour").displayed(0,oven)==oven)
+        assert(not open({row}),"stale row not currently rendered")
+        pane.items={row}
+        local grouped=assert(open({row}))
+        local picked=assert(pourDestination(grouped.child,main))
+        picked.onSelect(picked.target)
+        assert(calls[1].source.container==oven)
+        row.items={milk,milk,carried}
+        assert(not open({row}),"a merged cross-holder row is not a single stack")
+        row.items={milk,milk}
+        section.folded=true
+        pane.items={}
+        assert(not open({row}) and not open({milk}))
+        assert(require("LootBox/Pour").displayed(0,oven)==nil)
+        section.folded=false
+        pane.items={row}
+        f.lootPage.backpacks={}
+        assert(not open({row}) and not open({milk}),"view cannot authorize a detached native holder")
+    end)
+    restore();assert(ok,err)
+end)
 
 test("collapsed native source picks the least filled eligible exact vessel and freezes it",function(f)
     local src,main,_,_,_,calls,restore,vessel=pourFixture(f)

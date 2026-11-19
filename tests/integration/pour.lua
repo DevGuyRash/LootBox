@@ -6,11 +6,11 @@ local function adapter(kind)
     function a:cancel()
         if self.pending then context.cancels=context.cancels+1;self.pending.cancelled=true end
     end
-    function a:start(item,dst,third,validate)
+    function a:start(item,dst,third,validate,anchor)
         if self.pending then return nil,"busy" end
-        local req={kind=kind,item=item,target=dst,third=third}
+        local req={kind=kind,item=item,target=dst,third=third,anchor=anchor}
         req.guard=validate
-        local ok=kind=="move" and validate("admit",item) or kind=="pour" and validate(item,dst,"admit")
+        local ok=kind~="pour" and validate("admit",item) or kind=="pour" and validate(item,dst,"admit")
         if not ok or context.reject==kind then return nil,"stock refused "..kind end
         self.pending=req
         context.calls[#context.calls+1]=req
@@ -26,6 +26,12 @@ local function adapter(kind)
 end
 package.loaded["LootBox/PourMove"]={new=function() return adapter("move") end}
 package.loaded["LootBox/PourNative"]={new=function() return adapter("pour") end}
+package.loaded["LootBox/PourGround"]={
+    new=function() return adapter("ground") end,
+    capture=function(_,item,floor) return item.groundAnchor and item.groundAnchor.floor==floor and item.groundAnchor or nil end,
+    reachable=function(_,anchor) return not anchor.blocked end,
+    sameAnchor=function(a,b) return a==b end
+}
 local Pour=require "LootBox/Pour"
 local Inventory=require "LootBox/PourInventory"
 
@@ -148,6 +154,45 @@ test("shelf milk stages one exact replica, pours and returns to the captured she
     local returned=moveAck(f,true);j:tick()
     assert(returned~=replica and returned.container==f.shelf and returned.fluid.amount==.5)
     assert(j.state=="finished" and j.count==1 and j.liters==1)
+end)
+
+local function markGround(f,i,origin)
+    f.shelf.kind="floor"
+    local anchor={floor=f.shelf,square=origin}
+    i.groundAnchor=anchor
+    function i:getWorldItem()
+        if self.container~=f.shelf then return nil end
+        return {getItem=function() return self end,getSquare=function() return f.square end,
+            getFluidContainer=function() return self.fluid end,isExistInTheWorld=function() return true end}
+    end
+    function f.player:getSquare() return f.square end
+    f.square=f.square or {}
+    return anchor
+end
+
+test("Ground item-owned fluid uses the exact placement adapter for both moves",function()
+    local f=fixture()
+    local src,dst=item(f.shelf,1,"Animal's Milk (Bucket)",2,1.5),item(f.main,2,"Empty Bucket",1,0)
+    local origin=markGround(f,src,{kind="adjacent"})
+    local j=f:start(src)
+    j:tick();isCall(f,1,"ground",1,f.shelf);assert(f.calls[1].anchor==origin)
+    moveAck(f,false)
+    j:tick();isCall(f,2,"pour",1,dst);fluidAck(f,1)
+    j:tick();isCall(f,3,"ground",1,f.main);assert(f.calls[3].anchor==origin)
+    moveAck(f,false);j:tick()
+    assert(j.state=="finished" and src.container==f.shelf and src.fluid.amount==.5 and dst.fluid.amount==1)
+end)
+
+test("Ground source blocked after pickup cannot redirect the pour",function()
+    local f=fixture()
+    local src=item(f.shelf,1,"Animal's Milk (Bucket)",2,1)
+    item(f.main,2,"Empty Bucket",1,0)
+    local origin=markGround(f,src,{})
+    local j=f:start(src)
+    j:tick();moveAck(f,false)
+    origin.blocked=true
+    j:tick()
+    assert(j.state=="cancelled" and #f.calls==1 and src.container==f.main and j.reason:find("main inventory",1,true))
 end)
 
 test("opt-in shelf target stages and returns before source return",function()
