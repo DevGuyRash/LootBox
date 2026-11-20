@@ -1,7 +1,7 @@
 LootBox 0.9.12
 
-Pour Into and Fill All move liquids between compatible vessels in your inventory, carried bags, and visible nearby loot. Ordinary dropped vessels use the game's pickup and Place Item actions to return to their original position. Collapsed stacks use the least-filled eligible vessel. Loot-to-loot targets are optional and off by default.
+Pour Into and Fill All move liquids between compatible vessels in your inventory, carried bags, and visible nearby loot. Stock dropped vessels pour in place. Collapsed stacks use the least-filled eligible vessel. Loot-to-loot targets are optional and off by default.
 
 Adds opt-in automatic drinking from equipped reservoirs and safe food/drinks from carried bags. Nested bags and risky opening are separate settings. Automatic intake never starts during combat or while another action is queued.
 
-Fixes fluid menu compatibility with the game's Lua interpreter and combined loot panes.
+Fixes fluid menu compatibility with the game's Lua interpreter and combined loot panes, corrects single-player transfer completion, and keeps an in-progress Ground pour from being misreported as cancelled when the game refreshes the loot tab.
