@@ -83,8 +83,20 @@ local function setup(mp)
     f.bag.nested=container(f.bag)
     f.src,f.dst=item(10,"petrol",.9,1),item(11,"petrol",.2,1)
     put(f.bag,f.main); put(f.src,f.bag.nested); put(f.dst,f.main)
+    -- The Java stack and its animation flag are independent of the Lua queue.
+    -- Fixtures below explicitly model the installed native callback boundary.
+    f.javaHandles={}
+    local stack={}
+    function stack:size() return #f.javaHandles end
+    function stack:isEmpty() return #f.javaHandles==0 end
+    function stack:get(i) return f.javaHandles[i+1] end
+    function stack:contains(handle)
+        for _,entry in ipairs(f.javaHandles) do if entry==handle then return true end end
+        return false
+    end
     f.player={getInventory=function() return f.main end,
-        hasTimedActions=function() return f.queue.current ~= nil end,
+        getCharacterActions=function() return stack end,
+        hasTimedActions=function() return not stack:isEmpty() or f.actionAnimation==true end,
         isLocalPlayer=function() return true end, isDead=function() return false end, isAsleep=function() return false end}
     for _,state in ipairs({"Moving","Running","Sprinting","Aiming","Attacking","Shoving","Climbing","KnockedDown","bFalling","PerformingGrappleAnimation"}) do
         local key="is"..state
@@ -101,12 +113,49 @@ f.dst.fluid.locked=true; assert(not Native.inspect(f.src,f.dst)); f.dst.fluid.lo
 f.dst.fluid.signature="water"; assert(not Native.inspect(f.src,f.dst)); f.dst.fluid.signature="petrol"
 assert(f.native:start(f.src,f.dst,.4) and f.queued==1 and f.src.direct==f.bag.nested)
 local action=f.queue.current
+-- Installed B42 SP calls perform, then complete, then removes the exact
+-- BaseAction from the Java stack. Stock perform already drained the Lua head.
+f.javaHandles={action.action}
 assert(not action:waitToStart())
 action:update()
 action:perform()
+assert(f.queue.current==nil and #f.queue.queue==0 and f.player:hasTimedActions())
+assert(f.player:getCharacterActions():size()==1 and f.player:getCharacterActions():contains(action.action))
 action:complete()
+assert(f.completed==1 and math.abs(f.src.fluid.amount-.5)<1e-6 and math.abs(f.dst.fluid.amount-.6)<1e-6,
+    "SP complete must transfer the exact outstanding amount while Java still owns the finishing action")
+f.javaHandles={}
 local ok,reason,amount=f.native:poll()
 assert(ok and reason==nil and math.abs(amount-.4)<.001 and f.completed==1 and f.src.direct==f.bag.nested)
+
+-- No blanket relaxation of the SP terminal guard: a different Java action,
+-- an additional native action, or an owned-looking handle without a preceding
+-- successful Lua perform cannot authorize writes or replace foreign work.
+for _,shape in ipairs({"foreign-only","own-plus-foreign","never-performed"}) do
+    f=setup(false)
+    assert(f.native:start(f.src,f.dst,.4))
+    action=f.queue.current
+    f.javaHandles={action.action}
+    assert(not action:waitToStart())
+    local foreign={}
+    if shape=="never-performed" then
+        f.queue.current=nil; f.queue.queue={}
+    else
+        action:perform()
+        f.javaHandles=shape=="foreign-only" and {foreign} or {action.action,foreign}
+    end
+    local held=f.javaHandles
+    local n=f.player:getCharacterActions():size()
+    local first,last=held[1],held[n]
+    action:complete()
+    assert(f.completed==0 and f.src.fluid.amount==.9 and f.dst.fluid.amount==.2,
+        "non-owned or unperformed terminal must not transfer: "..shape)
+    assert(f.queued==1 and f.stopped==0 and #f.queue.queue==0 and f.javaHandles==held
+        and #held==n and held[1]==first and held[n]==last,
+        "terminal guard changed queue/foreign Java actions: "..shape)
+    f.javaHandles={}
+    assert(f.native:poll()~=true, "unconfirmed terminal cannot be reported complete: "..shape)
+end
 
 f=setup(false)
 assert(f.native:start(f.src,f.dst,.4))
@@ -286,15 +335,32 @@ if arg and arg[1] and arg[2] then
     f.src.fluid.amount,f.dst.fluid.amount=.25,.75
     assert(f.native:start(f.src,f.dst,.25))
     action=f.queue.current
+    f.javaHandles={action.action}
     assert(not action:waitToStart())
     action:start()
     action.progress=.5; action:update()
     assert(math.abs(f.src.fluid.amount-.125)<1e-6 and math.abs(f.dst.fluid.amount-.875)<1e-6)
     action.progress=1; action:update()
     assert(not FluidContainer.CanTransfer(f.src.fluid,f.dst.fluid) and action:isValid())
-    action:perform(); assert(action:complete())
+    action:perform(); assert(not f.queue.current and f.player:hasTimedActions()); assert(action:complete())
+    f.javaHandles={}
     local ok,_,volume=f.native:poll()
     assert(ok and volume==.25 and f.dst.fluid.amount==1)
+
+    -- Also leave real quantity outstanding for the unmodified stock complete.
+    -- The saturated prior case alone does not prove the actual final write.
+    f=actualSetup(false)
+    f.src.fluid.amount,f.dst.fluid.amount=.25,.75
+    assert(f.native:start(f.src,f.dst,.25)); action=f.queue.current
+    f.javaHandles={action.action}
+    assert(not action:waitToStart()); action:start(); action.progress=.5; action:update()
+    assert(math.abs(f.src.fluid.amount-.125)<1e-6 and math.abs(f.dst.fluid.amount-.875)<1e-6)
+    action:perform()
+    assert(not f.queue.current and f.player:getCharacterActions():get(0)==action.action)
+    assert(action:complete() and f.src.fluid.amount==0 and f.dst.fluid.amount==1,
+        "stock SP complete did not move the remaining half with its own Java handle still present")
+    f.javaHandles={}
+    ok,_,volume=f.native:poll(); assert(ok and volume==.25)
     f=actualSetup(true)
     assert(f.native:start(f.src,f.dst,.25))
     action=f.queue.current; assert(not action:waitToStart()); action:start(); action.progress=.5; action:update()

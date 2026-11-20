@@ -45,6 +45,16 @@ end
 
 local function queueFor(player) return ISTimedActionQueue.getTimedActionQueue(player) end
 local function emptyQueue(player,q) return not q.current and #q.queue == 0 and not player:hasTimedActions() end
+-- In SP the engine calls Lua perform (which drains the Lua queue), then
+-- complete, then removes the completed Java action from the character stack.
+-- Only the very same Java handle may remain for that synchronous callback.
+local function finishingQueue(player,q,s)
+    if q.current or #q.queue ~= 0 or s.deferredTail then return false end
+    if not player:hasTimedActions() then return true end
+    local actions=player:getCharacterActions()
+    local owned=s.action.action
+    return owned~=nil and actions~=nil and actions:size()==1 and actions:get(0)==owned
+end
 local function member(q, action)
     for _, entry in ipairs(q.queue) do if entry == action then return true end end
     return false
@@ -193,7 +203,8 @@ function PourNative:start(source,target,requested,validate)
             local queue=queueFor(player)
             if queue.current == action then
                 if #queue.queue ~= 1 or queue.queue[1] ~= action then return false end
-            elseif not ((phase == "admit" or phase == "complete" and s.performed) and emptyQueue(player,queue)) then return false end
+            elseif not ((phase == "admit" and emptyQueue(player,queue))
+                or (phase == "complete" and not s.mp and s.performed and finishingQueue(player,queue,s))) then return false end
             local loss,gain=quantities(s,src,dst)
             if not loss then return false end
             if phase == "admit" or not s.preflight then

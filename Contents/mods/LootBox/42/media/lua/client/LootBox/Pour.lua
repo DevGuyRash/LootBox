@@ -43,6 +43,7 @@ function Pour.new(player,world,source,targets,options,read)
         seen[e.id],frozen[#frozen+1]=true,slot(e)
     end
     local shelf=source.scope=="loot" and source.container or nil
+    local inPlaceGround=shelf and shelf:getType()=="floor" and source.object and source.object~=source.item
     local anchor=source.pourAnchor
     if shelf and shelf:getType()~="floor" then
         anchor=anchor or world:pourShelfAnchor(shelf)
@@ -50,14 +51,23 @@ function Pour.new(player,world,source,targets,options,read)
     end
     local Fluid, Move = require "LootBox/PourNative", require "LootBox/PourMove"
     return setmetatable({player=player, world=world, source=slot(source), targets=frozen, read=read, options=options,
-        shelf=shelf,anchor=anchor,expected=source.amount, index=1,count=0,liters=0,
+        shelf=shelf,anchor=anchor,inPlaceGround=inPlaceGround,expected=source.amount, index=1,count=0,liters=0,
         move=Move.new(player), pour=Fluid.new(player), state="running", name="Pour Into"}, Pour)
 end
 
 function Pour:allowed()
     local prefs, pane = self.read()
     if not prefs or not mobile(self.player) or self.cancelReason then return false end
-    if self.shelf and pane~=self.shelf then return false end
+    if self.shelf and pane~=self.shelf then
+        -- A stock ground pour turns the character; the game may automatically
+        -- select a different loot tab. Let the already-owned action settle
+        -- against the same reachable world item, but never start another
+        -- destination because of a stale view. Loans still require that tab.
+        local owned=self.inPlaceGround and self.pour:isBusy() and self.target and self.target.selected.scope~="loot"
+        local done=self.inPlaceGround and not self.target and not self.moving and not self.endReason and self.count>0
+            and (self.index>#self.targets or FluidUtil.roundTransfer(self.expected)<=0)
+        if not owned and not done then return false end
+    end
     if self.shelf and self.shelf:getType()~="floor" and not self.world:pourShelfReachable(self.shelf,self.anchor) then return false end
     for _,s in ipairs({self.source,self.target or false}) do
         if s and s.selected.groundAnchor

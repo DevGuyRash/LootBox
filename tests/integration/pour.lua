@@ -195,6 +195,57 @@ test("Ground source blocked after pickup cannot redirect the pour",function()
     assert(j.state=="cancelled" and #f.calls==1 and src.container==f.main and j.reason:find("main inventory",1,true))
 end)
 
+local function stockGround(f,source)
+    f.shelf.kind="floor"
+    local square={}
+    local fluid=source.fluid
+    local world={getItem=function() return source end,getSquare=function() return square end,
+        getFluidContainer=function() return fluid end,isExistInTheWorld=function() return true end}
+    function f.player:getSquare() return square end
+    function fluid:isMultiTileMoveable() return false end
+    function source:getFluidContainer() return nil end
+    function source:getWorldItem() return world end
+    fluid.owner=world
+end
+
+test("stock facing refresh does not cancel the owned Ground action or its terminal receipt",function()
+    local f=fixture()
+    local src,dst=item(f.shelf,1,"Ground Bucket",2,1.5),item(f.main,2,"Bottle",1,0)
+    stockGround(f,src)
+    local j=f:start(src,{dst})
+    j:tick();isCall(f,1,"pour",1,dst)
+    f.pane=container("counter")
+    fluidAck(f,1)
+    j:tick()
+    assert(j.state=="finished" and j.count==1 and #f.calls==1 and f.cancels==0)
+    assert(src.fluid.amount==.5 and dst.fluid.amount==1)
+end)
+
+test("a stale Ground tab cannot authorize a new pour or hide player interruption",function()
+    for _,mode in ipairs({"before", "batch", "moving", "unreachable"}) do
+        local f=fixture()
+        local src=item(f.shelf,1,"Ground Bucket",3,2.5)
+        local dst,other=item(f.main,2,"Bottle",1,0),item(f.main,3,"Other Bottle",1,0)
+        stockGround(f,src)
+        local j=f:start(src,{dst,other})
+        if mode~="before" then j:tick();isCall(f,1,"pour",1,dst) end
+        f.pane=container("counter")
+        if mode=="batch" then
+            fluidAck(f,1)
+        elseif mode=="moving" then
+            f.moving=true;j:tick();assert(f.cancels==1)
+        elseif mode=="unreachable" then
+            f.blocked=true
+            local q=assert(j.pour.pending)
+            assert(not q.guard(q.item,q.target,"active"))
+            q.reply={false,"out of reach",0}
+        end
+        j:tick()
+        assert(#f.calls==(mode=="before" and 0 or 1) and other.fluid.amount==0)
+        assert(j.state~="finished",mode)
+    end
+end)
+
 test("opt-in shelf target stages and returns before source return",function()
     local f=fixture();f.options.pourLootToLoot=true
     local a,b=item(f.shelf,1,"Carton",3,2),item(f.shelf,2,"Bottle",1,0)
