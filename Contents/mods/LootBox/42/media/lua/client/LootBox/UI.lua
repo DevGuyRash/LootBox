@@ -2047,6 +2047,7 @@ function UI.install()
     if Events.OnMainMenuEnter then Events.OnMainMenuEnter.Add(UI.closeAll) end
     local options = PZAPI.ModOptions:getOptions("LootBox") or PZAPI.ModOptions:create("LootBox", "LootBox")
     options:addTitle("LootBox")
+    require("LootBox/ContainerFocus").register(options)
     options:addDescription("Loot, sort, haul and clean with reusable setups, contextual shortcuts and complete workflow guides.")
     options:addButton("openManager", "Open LootBox", "Choose a task or continue a saved setup.", function() UI.open(0) end)
     options:addButton("manageCategories", "Manage categories", "Browse every active item category and create nested custom groups.", function() UI.open(0, nil, "categories") end)

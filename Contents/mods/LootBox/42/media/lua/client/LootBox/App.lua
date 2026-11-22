@@ -515,6 +515,48 @@ function Instance:startPour(source,targets,options)
     if not controller:isBusy() and controller.state~="finished" then return nil,controller.reason end
     return true
 end
+function Instance:worldPour(anchor,take,entries,origin,options)
+    local job=self.jobs:status()
+    if self.error or loadError or self.replacement or self.recovery:status().pending or job.hasJob
+        or not job.canPreview or self.consumption and self.consumption:isBusy() then return nil,"Finish or recover the current action first." end
+    local function enabled()
+        local prefs,why=currentPreferences()
+        if why or not prefs or not prefs.contextMenus or not prefs[origin] or self.replacement or self.error or self.recovery:status().pending then return false end
+        local now=require("LootBox/Pour").options(prefs)
+        return now.pourFillOrder==options.pourFillOrder and now.pourFillScope==options.pourFillScope
+    end
+    if not enabled() then return nil,"World fluid shortcuts or fill preferences changed." end
+    local controller,why=require("LootBox/WorldFluidJob").new(self.player,self.world,anchor,take,entries,enabled)
+    if not controller then return nil,why end
+    self.consumption=controller
+    controller:tick()
+    if controller.state~="running" and controller.state~="finished" then return nil,controller.reason end
+    return true
+end
+function Instance:refillDispenser(anchor, donor, bottle)
+    if self.error or loadError or self.replacement or self.recovery:status().pending then
+        return nil,"Finish or recover the current job before refilling."
+    end
+    local job=self.jobs:status()
+    if job.hasJob or not job.canPreview or self.consumption and self.consumption:isBusy() then
+        return nil,"Finish the current action before refilling."
+    end
+    local function allowed()
+        local prefs,problem=currentPreferences()
+        return not problem and prefs and prefs.contextMenus==true and prefs.worldShortcuts==true
+            and not self.error and not self.replacement and not self.recovery:status().pending
+    end
+    if not allowed() then return nil,"World shortcuts are disabled." end
+    local feature=require "LootBox/MountedDispenser"
+    local ok,controller,why=pcall(feature.new,self.player,self.world,anchor,donor,bottle,allowed)
+    if not ok then return nil,"The game did not expose the selected dispenser." end
+    if not controller then return nil,why end
+    self.consumption=controller
+    controller:tick()
+    if not controller:isBusy() and controller.state~="finished" then return nil,controller.reason end
+    return true
+end
+
 function Instance:tillFull(items, kind, openingRecipe, menuSource)
     if self.error or loadError then return nil, self.error or loadError end
     local options, err = App.getPreferences()

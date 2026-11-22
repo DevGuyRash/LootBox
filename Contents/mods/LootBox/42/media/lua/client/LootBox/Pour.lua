@@ -57,7 +57,9 @@ end
 
 function Pour:allowed()
     local prefs, pane = self.read()
-    if not prefs or not mobile(self.player) or self.cancelReason then return false end
+    if not prefs then return false,"Pour controls or the current context are unavailable." end
+    if not mobile(self.player) then return false,"Character moved, aimed, or could not continue the action." end
+    if self.cancelReason then return false,"Cancellation was already requested." end
     if self.shelf and pane~=self.shelf then
         -- A stock ground pour turns the character; the game may automatically
         -- select a different loot tab. Let the already-owned action settle
@@ -66,15 +68,22 @@ function Pour:allowed()
         local owned=self.inPlaceGround and self.pour:isBusy() and self.target and self.target.selected.scope~="loot"
         local done=self.inPlaceGround and not self.target and not self.moving and not self.endReason and self.count>0
             and (self.index>#self.targets or FluidUtil.roundTransfer(self.expected)<=0)
-        if not owned and not done then return false end
+        if not owned and not done then return false,"The selected loot pane changed or closed." end
     end
-    if self.shelf and self.shelf:getType()~="floor" and not self.world:pourShelfReachable(self.shelf,self.anchor) then return false end
+    if self.shelf and self.shelf:getType()~="floor" and not self.world:pourShelfReachable(self.shelf,self.anchor) then
+        return false,"The original loot container is no longer accessible."
+    end
     for _,s in ipairs({self.source,self.target or false}) do
         if s and s.selected.groundAnchor
-            and not require("LootBox/PourGround").reachable(self.player,s.selected.groundAnchor) then return false end
+            and not require("LootBox/PourGround").reachable(self.player,s.selected.groundAnchor) then
+            return false,"The original ground position is no longer accessible."
+        end
     end
-    return self.options.pourLootToLoot==prefs.pourLootToLoot and self.options.pourFillScope==prefs.pourFillScope
-        and self.options.pourFillOrder==prefs.pourFillOrder
+    if self.options.pourLootToLoot~=prefs.pourLootToLoot or self.options.pourFillScope~=prefs.pourFillScope
+        or self.options.pourFillOrder~=prefs.pourFillOrder then
+        return false,"Pour settings changed."
+    end
+    return true
 end
 
 function Pour:isBusy() return self.state=="running" or self.state=="cancelling" end
@@ -86,34 +95,54 @@ end
 function Pour:finish(state, reason)
     if not self:isBusy() then return end
     self.state,self.reason=state,reason
+    -- Log only the stock adapter/controller's fixed reason, before appending
+    -- any exact item names, locations or IDs for the player's local UI.
+    pcall(function()
+        local diagnostic=self.endReason or self.cancelDiagnostic or reason or "Reason unavailable."
+        print(string.format("[LootBox] action=pour event=terminal state=%s nativeStarted=%s completed=%d confirmedLitres=%.3f phase=%s reason=%s",
+            state,tostring(self.launched==true),self.count,self.liters,self.stopPhase or self.phase or "prepare",diagnostic))
+    end)
     -- The active target may have been retired. Audit every original lease,
     -- not just the current target, including an unconfirmed in-flight move.
-    local remaining={}
+    local remaining, places = {}, {main=0, original=0, unknown=0}
     local function report(s)
-        if not (held(s) or s.uncertain or self.moving==s) then return end
-        local where="location unconfirmed; check the original displayed storage as well"
+        if not (held(s) or s.retained or s.uncertain or self.moving==s) then return end
+        local place,where="unknown","location unconfirmed; check main inventory and the original storage"
         -- A changed capacity invalidates the action, not the exact location
-        -- of an otherwise identified vessel when reporting an outstanding loan.
-        local ok,known,live=pcall(Inventory.accessible,self.player,self.world,s.live,self.shelf,true)
-        if ok and known then
-            if live.container==self.player:getInventory() then where="confirmed in main inventory"
-            elseif live.container==s.selected.container then where="confirmed in original displayed storage" end
+        -- of an otherwise identified vessel. A pending native receipt is
+        -- different: a local replica alone cannot resolve a disputed loan.
+        if not s.uncertain and self.moving~=s then
+            local ok,known,live=pcall(Inventory.accessible,self.player,self.world,s.live,self.shelf,true)
+            if ok and known then
+                if live.container==self.player:getInventory() then place,where="main","confirmed in main inventory"
+                elseif live.container==s.selected.container then place,where="original","confirmed in original displayed storage" end
+            end
         end
+        places[place]=places[place]+1
         remaining[#remaining+1]=s.selected.label.." [ID "..tostring(s.selected.id).."]: "..where
     end
     report(self.source)
     for _,e in ipairs(self.targets) do report(e) end
-    if #remaining>0 then self.reason=(self.reason or "Stopped.").." Check main inventory: "..table.concat(remaining,"; ").."." end
+    if #remaining>0 then self.reason=(self.reason or "Stopped.").." Vessel locations: "..table.concat(remaining,"; ").."." end
     if self.launched and not self.silent and PZActionCompletionHUD then
-        pcall(function() PZActionCompletionHUD.show(self.player:getPlayerNum(),{brand="LOOTBOX",theme="loot",
-            title=state=="finished" and "Pour complete" or "Pour stopped",status=state~="finished" and "stopped" or nil,
-            detail=string.format("%d vessel%s | %.3f L confirmed",self.count,self.count==1 and "" or "s",self.liters),
-            note=state~="finished" and self.reason or nil}) end)
+        pcall(function()
+            local note = ""
+            if places.main>0 then note=note.."In main inventory: "..places.main..". " end
+            if places.unknown>0 then note=note.."Location unconfirmed: "..places.unknown..". Check Current job. " end
+            if places.original>0 then note=note.."In original storage: "..places.original..". " end
+            note=note..(reason or "Stopped.")
+            PZActionCompletionHUD.show(self.player:getPlayerNum(),{brand="LOOTBOX",theme="loot",
+                title=state=="finished" and "Pour complete" or "Pour stopped",status=state~="finished" and "stopped" or nil,
+                detail=string.format("%d vessel%s | %.3f L confirmed",self.count,self.count==1 and "" or "s",self.liters),
+                note=state~="finished" and note or nil})
+        end)
     end
 end
 
-function Pour:cancel(silent)
+function Pour:cancel(silent, diagnostic)
     if not self:isBusy() then return true end
+    self.cancelDiagnostic=self.cancelDiagnostic or diagnostic or (silent and "Session cleanup." or "Cancel requested.")
+    self.stopPhase=self.stopPhase or self.phase
     self.silent,self.cancelReason,self.state=silent,"Pour cancelled or interrupted.","cancelling"
     if self.pour:isBusy() then self.pour:cancel() end
     if self.move:isBusy() then self.move:cancel() end
@@ -152,6 +181,7 @@ end
 -- idle, offer each other unchanged shelf loan ONE ordinary return, target
 -- before source. Cancellation, foreign work or lost visibility start no moves.
 function Pour:unwind(reason,blocked)
+    self.stopPhase=self.stopPhase or self.phase or "prepare"
     self.endReason=self.endReason or reason
     if blocked then blocked.noReturn=true end
     if not self:allowed() or not idle(self.player) then self:finish("cancelled",self.endReason);return end
@@ -165,6 +195,7 @@ function Pour:unwind(reason,blocked)
 end
 
 function Pour:transfer(s,returning)
+    self.phase=(s==self.source and "source-" or "target-")..(returning and "return" or "pickup")
     local p,original=self.player,s.selected
     if not loanable(original) or not self:allowed() or not self:unchanged(s) or not safeToMove(self,s.live.item) then
         self:unwind("The original location or vessel is no longer available.",s);return
@@ -186,12 +217,13 @@ function Pour:transfer(s,returning)
 end
 
 function Pour:tickMove()
-    local ok,why,item=self.move:poll()
+    local ok,why,item,retained=self.move:poll()
     if ok==nil then return end
     local s,returning=self.moving,self.returning
     self.moving,self.returning=nil,nil
     if not ok then
-        s.uncertain=true
+        local stayed=retained~=nil and retained==s.live.item
+        s.uncertain,s.retained=not stayed,stayed and not returning
         if self.cancelReason then self:finish("cancelled",self.cancelReason)
         else self:unwind(why or "The exact inventory move was not confirmed.",s) end
         return
@@ -202,12 +234,13 @@ function Pour:tickMove()
         s.uncertain=true
         self:unwind("The received vessel did not match the selected item.",s);return
     end
-    s.live,s.borrowed,s.uncertain=fresh,not returning,false
+    s.live,s.borrowed,s.uncertain,s.retained=fresh,not returning,false,false
     if self.cancelReason then self:finish("cancelled",self.cancelReason);return end
     if not sameAmount(fresh.capacity,s.selected.capacity) then
         self:unwind("The received vessel capacity changed; no further pour was requested.",s);return
     end
     if returning and s==self.target and not self.endReason then self.index,self.target=self.index+1,nil end
+    self.phase="prepare"
 end
 
 function Pour:tickFluid()
@@ -225,16 +258,19 @@ function Pour:tickFluid()
     if held(self.target) then
         self.target.hasSettled,self.target.settledAmount,self.target.settledMix=true,d.amount,Inventory.mix(d)
         self:transfer(self.target,true)
-    else self.index,self.target=self.index+1,nil end
+    else self.index,self.target=self.index+1,nil;self.phase="prepare" end
 end
 
 function Pour:step()
     if not self:isBusy() then return end
-    if not self.cancelReason and not self:allowed() then self:cancel();return end
+    if not self.cancelReason then
+        local allowed, reason=self:allowed()
+        if not allowed then self:cancel(nil,reason);return end
+    end
     if self.move:isBusy() then self:tickMove();return end
     if self.pour:isBusy() then self:tickFluid();return end
     if self.cancelReason then self:finish("cancelled",self.cancelReason);return end
-    if not idle(self.player) then self:cancel();return end
+    if not idle(self.player) then self:cancel(nil,"Another action was active.");return end
     if self.endReason then self:unwind(self.endReason);return end
     local valid,src=self:accessible(self.source)
     if not valid or not sameAmount(src.amount,self.expected)
@@ -255,6 +291,7 @@ function Pour:step()
     if loanable(self.target.selected) and not held(self.target) then self:transfer(self.target,false);return end
     self.targetStart=dst.amount
     local checkedMix
+    self.phase="fluid"
     local ok,why=self.pour:start(src.item,dst.item,nil,function(_,_,phase)
         if not self:allowed() then return false end
         local post=phase=="observe"
@@ -283,7 +320,7 @@ function Pour:tick()
     if not self:isBusy() then return end
     local ok=pcall(self.step,self)
     if not ok then
-        self:cancel()
+        self:cancel(nil,"Pour stopped because a game binding changed.")
         if not self.move:isBusy() and not self.pour:isBusy() then self:finish("failed","Pour stopped because a game binding changed.") end
     end
 end

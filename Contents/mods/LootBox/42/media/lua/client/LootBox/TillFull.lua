@@ -1,4 +1,5 @@
 local Adapter = require "LootBox/TillFullNative"
+local OpenFull = require "LootBox/OpenFull"
 local Completion = require "LootBox/CompletionFeedback"
 local TillFull = {}
 TillFull.__index = TillFull
@@ -119,6 +120,10 @@ function TillFull.portion(hunger, thirst, hrelief, trelief, both, kind)
 end
 
 function TillFull.new(player, world, items, kind, both, openingRecipe, menuSource, automatic)
+    -- A Food with stock custom command Drink uses ISEatFoodAction and food
+    -- quantity units, but the player selected thirst, not hunger.
+    local drinkFood = kind == "drinkFood" and not automatic
+    if drinkFood then kind = "food" end
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption action" end
     if type(items) ~= "table" then return nil, "Choose an item stack" end
     if automatic and (type(automatic) ~= "table" or type(automatic.guard) ~= "function"
@@ -144,7 +149,7 @@ function TillFull.new(player, world, items, kind, both, openingRecipe, menuSourc
         end
     end
     if #records == 0 or #records > 4096 then return nil, "Choose a nonempty bounded item stack" end
-    return setmetatable({player = player, world = world, records = records, kind = kind, both = both == true,
+    return setmetatable({player = player, world = world, records = records, kind = kind, goal = drinkFood and "fluid" or kind, drinkFood = drinkFood, both = both == true,
         index = 1, count = 0, native = Adapter.new(player), state = "running", attempts = 0, openingRecipe = openingRecipe, menuSource = menuSource, automatic = automatic}, TillFull)
 end
 
@@ -269,8 +274,17 @@ function TillFull:inspect(record)
     end
     local protected, reason = self.world:protected(item, {allowFavorite = true, allowEquippedConsumption = true})
     if protected then return nil, "Protected: " .. tostring(reason or "selected item") end
-    local opening = self.openingRecipe and not record.opened and (item:isSealed()
-        or (self.kind == "food" and item:getScriptItem():isCantEat()))
+    -- The native selected recipe is authoritative for a closed food package.
+    -- E.g. closed canned milk has neither CantEat nor a fluid seal.
+    local opening = self.openingRecipe and not record.opened and (item:isSealed() or (self.kind == "food"
+        and (item:getScriptItem():isCantEat() or OpenFull.recipeKind(self.player, item, self.openingRecipe) ~= nil)))
+    if self.menuSource and self.openingRecipe and (opening or record.opened)
+        and not OpenFull.recipeMenuAllowed(self.player, item, self.kind, self.kind == "fluid" and self:fluidFor(item)) then
+        return nil, "The game does not currently allow eating or drinking this item"
+    end
+    if self.openingRecipe and self.kind == "fluid" and not opening and not record.opened and not self.opening then
+        return nil, "The selected vessel is already open; use Drink > Til Full"
+    end
     if item:isSealed() and not opening then return nil, "Open this item normally before using Til Full" end
     local hunger, thirst
     if self.kind == "food" then
@@ -278,6 +292,7 @@ function TillFull:inspect(record)
         local required = item.getRequireInHandOrInventory and item:getRequireInHandOrInventory()
         if required and required:size() > 0 then return nil, "Use the normal Eat action for food requiring another item" end
         if opening then return {opening = true} end
+        if self.drinkFood and not OpenFull.drinkFood(item) then return nil, "The opened food does not have the selected Drink action" end
         hunger, thirst = -item:getHungerChange(), -item:getThirstChange()
     else
         if instanceof(item, "Food") and not safeFood(item) then return nil, "This fluid's food container is unsafe" end
@@ -290,15 +305,21 @@ function TillFull:inspect(record)
     return {hunger = hunger, thirst = thirst, opening = opening}
 end
 
+-- The shell of a replacement food may have no nutrition at all. Ask only
+-- whether opening is useful; never fix a bite/sip before the output exists.
+function TillFull:plannedPortion(h, t, effects, both)
+    if effects.opening and self.kind == "food" then
+        return (self.goal == "fluid" and t or h) > 0 and 1 or 0
+    end
+    return TillFull.portion(h, t, effects.hunger, effects.thirst, both, self.goal)
+end
+
 function TillFull:alreadySatisfied()
     local hunger, thirst = needs(self.player)
-    if not self.both then return (self.kind == "food" and hunger <= 0) or (self.kind == "fluid" and thirst <= 0) end
+    if not self.both then return (self.goal == "food" and hunger <= 0) or (self.goal == "fluid" and thirst <= 0) end
     local effects = self:inspect(self.records[self.index])
     if not effects then return false end
-    -- Closed cans expose no relief values. Do not open one solely to discover
-    -- whether it helps thirst after hunger is already satisfied.
-    if effects.opening and self.kind == "food" then return hunger <= 0 end
-    local portion = TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, true, self.kind)
+    local portion = self:plannedPortion(hunger, thirst, effects, true)
     return portion ~= nil and portion <= 0
 end
 
@@ -315,7 +336,7 @@ function TillFull:isBusy() return self.state == "running" or self.state == "canc
 function TillFull:status()
     return {state = self.state, reason = self.reason, done = self.count, total = self.total or (self.records and #self.records or self.count),
         moved = 0, skipped = 0, reasons = {}, hasJob = self:isBusy(), canPreview = not self:isBusy(), canResume = false, canPause = false,
-        action = "consume", intent = "consume:" .. self.kind}
+        action = "consume", intent = "consume:" .. self.goal}
 end
 function TillFull:cancel(silent)
     if silent then self.launched = nil end
@@ -370,11 +391,12 @@ function TillFull:step()
             end
             if reason == "chooseOpened" and not opened and self.kind == "food" and self.openingRecipe
                 and isClient and isClient() and self.count == 0 then
-                if hunger <= 0 then self:finish("finished", "The selected need target is satisfied", "target"); return end
+                if (self.goal == "fluid" and thirst or hunger) <= 0 then self:finish("finished", "The selected need target is satisfied", "target"); return end
                 if self.player:isDead() or self.player:isAsleep() then
                     self:finish("cancelled", "The player cannot consume now"); return
                 end
-                self.openedFoodPrompt = "When the opened food appears, right-click it and choose Eat > Til Full."
+                self.openedFoodPrompt = self.drinkFood and "When the opened drink appears, right-click it and choose Drink > Til Full."
+                    or "When the opened food appears, right-click it and choose Eat > Til Full."
                 self:finish("finished", self.openedFoodPrompt, "open_only")
                 return
             end
@@ -386,9 +408,10 @@ function TillFull:step()
             local previous = self.records[self.index]
             local source = self.player:getInventory()
             if opened:getID() == previous.id and tostring(opened:getFullType()) == previous.fullType
-                and (opened == previous.item or self.kind == "fluid") then source = previous.source end
+                and (opened == previous.item or self.kind == "fluid" or receipt == "sameItem") then source = previous.source end
             self.records[self.index] = {item = opened, id = opened:getID(), fullType = tostring(opened:getFullType()),
                 source = source, opened = true, dispatched = true}
+            hunger, thirst = needs(self.player)
         else
             self.inflight.receipt = receipt
             self.confirmation = getTimestampMs() + 2000
@@ -403,7 +426,7 @@ function TillFull:step()
         local before = self.inflight
         local hungerConfirmed = hunger <= before.expectedHunger + before.hungerDrift + 0.000001
         local thirstConfirmed = thirst <= before.expectedThirst + before.thirstDrift + 0.000001
-        local improved = self.kind == "food" and hungerConfirmed or self.kind == "fluid" and thirstConfirmed
+        local improved = self.goal == "food" and hungerConfirmed or self.goal == "fluid" and thirstConfirmed
         if self.both then
             improved = (before.hrelief <= 0 or hungerConfirmed) and (before.trelief <= 0 or thirstConfirmed)
         end
@@ -417,7 +440,7 @@ function TillFull:step()
             -- client action completion never serves as a multiplayer receipt.
             hungerConfirmed = measured and receipt.hunger + 0.000001 >= before.requiredHunger
             thirstConfirmed = measured and receipt.thirst + 0.000001 >= before.requiredThirst
-            improved = self.kind == "food" and hungerConfirmed or self.kind == "fluid" and thirstConfirmed
+            improved = self.goal == "food" and hungerConfirmed or self.goal == "fluid" and thirstConfirmed
             if self.both then
                 improved = (before.hrelief <= 0 or hungerConfirmed) and (before.trelief <= 0 or thirstConfirmed)
             end
@@ -444,7 +467,7 @@ function TillFull:step()
             end
             local h = displayAck(hungerConfirmed, before.hunger, hunger, before.expectedHunger, before.requiredHunger)
             local t = displayAck(thirstConfirmed, before.thirst, thirst, before.expectedThirst, before.requiredThirst)
-            local acknowledged = self.kind == "food" and h or self.kind == "fluid" and t
+            local acknowledged = self.goal == "food" and h or self.goal == "fluid" and t
             if self.both then acknowledged = (before.hrelief <= 0 or h) and (before.trelief <= 0 or t) end
             if acknowledged then
                 improved = true
@@ -462,7 +485,7 @@ function TillFull:step()
                 and hunger < before.hunger and math.floor(hunger * 100 + 0.5) == 0)
             local substantialThirst = thirstConfirmed or (before.thirst >= 0.01
                 and thirst < before.thirst and math.floor(thirst * 100 + 0.5) == 0)
-            local substantial = self.kind == "food" and substantialHunger or self.kind == "fluid" and substantialThirst
+            local substantial = self.goal == "food" and substantialHunger or self.goal == "fluid" and substantialThirst
             if self.both then
                 substantial = (before.hrelief <= 0 or substantialHunger) and (before.trelief <= 0 or substantialThirst)
             end
@@ -516,13 +539,10 @@ function TillFull:step()
     if not effects then self:finish("cancelled", reason); return end
     local planHunger = math.min(hunger, self.needCap and self.needCap.hunger or hunger)
     local planThirst = math.min(thirst, self.needCap and self.needCap.thirst or thirst)
-    -- A closed can has no native hunger relief until its replacement exists.
-    local portion = effects.opening and self.kind == "food" and (planHunger > 0 and 1 or 0)
-        or TillFull.portion(planHunger, planThirst, effects.hunger, effects.thirst, self.both, self.kind)
+    local portion = self:plannedPortion(planHunger, planThirst, effects, self.both)
     if portion == nil then self:finish("cancelled", "This item cannot restore the need selected by Eat or Drink"); return end
     if portion <= 0 then
-        local actual = effects.opening and self.kind == "food" and (hunger > 0 and 1 or 0)
-            or TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both, self.kind)
+        local actual = self:plannedPortion(hunger, thirst, effects, self.both)
         if actual == 0 then self:finish("finished", "The selected need target is satisfied", "target")
         else self:finish("finished", "Requested portion consumed; no more items were queued") end
         return
@@ -543,8 +563,7 @@ function TillFull:step()
                 return true
             end
             local h, t = needs(self.player)
-            local fraction = current.opening and self.kind == "food" and (h > 0 and 1 or 0)
-                or TillFull.portion(h, t, current.hunger, current.thirst, self.both, self.kind)
+            local fraction = self:plannedPortion(h, t, current, self.both)
             self.targetReached = fraction ~= nil and fraction <= 0
             return self.targetReached
         end
@@ -623,7 +642,7 @@ function TillFull:step()
             return true
         end
         local h, t = needs(self.player)
-        local fraction = TillFull.portion(h, t, effects.hunger, effects.thirst, self.both, self.kind)
+        local fraction = self:plannedPortion(h, t, effects, self.both)
         self.targetReached = fraction ~= nil and fraction <= 0
         return self.targetReached
     end, function() return needs(self.player) end, autoGuard)

@@ -128,11 +128,20 @@ local function install(s)
         if s.sent then return not commit and permitted(s,"wait") end
         return admit(s,commit == true)
     end
+    local function checkedStock(self, check, ...)
+        if not checked(allow,self) then
+            s.validationReason = "The local inventory-move safety check changed."
+            return false
+        end
+        local accepted = check(self,...)
+        s.validationReason = not accepted and "The game's inventory-move validation failed." or nil
+        return accepted
+    end
     function action:isValidStart(...)
-        return checked(allow,self) and validStart(self,...)
+        return checkedStock(self,validStart,...)
     end
     function action:isValid(...)
-        return checked(allow,self) and valid(self,...)
+        return checkedStock(self,valid,...)
     end
     function action:start(...)
         if not checked(allow,self,true) or not valid(self) then
@@ -140,6 +149,7 @@ local function install(s)
             self:forceStop()
             return
         end
+        s.startInvoked = true
         local value = begin(self,...)
         if s.multiplayer then
             local id = self.transactionId
@@ -167,7 +177,13 @@ local function install(s)
         return value
     end
     function action:stop(...)
-        s.problem = s.problem or "Native movement stopped or was rejected"
+        -- Stock stop discards the native transaction. Capture the native
+        -- receipt first without changing its validation, submission or cleanup.
+        if s.sent and self.transactionId == s.sent then
+            s.serverRejected = s.serverRejected or checked(isItemTransactionRejected,s.sent)
+        end
+        s.problem = s.problem or (s.serverRejected and "The server rejected the inventory move."
+            or s.validationReason or "The native inventory move stopped without a confirmed result.")
         if ISTimedActionQueue.getTimedActionQueue(s.player).current == self then
             return preserving(s,stopAction,self,...)
         end
@@ -209,12 +225,21 @@ function Move:start(item,from,to,guard)
     return nil,"Native movement could not start"
 end
 
+-- A refused move is not evidence of where the item ended up. Only claim it
+-- stayed at the from endpoint when a server request was ruled out or explicitly
+-- rejected and both endpoints show the exact original reference there alone.
+local function stayed(s)
+    if s.multiplayer and s.startInvoked and not s.serverRejected then return nil end
+    local from, to, exact = endpoints(s)
+    if exact and from == s.item and not to then return from end
+end
+
 local function poll(self)
     local s = self.active
     if not s then return false,"No native movement is active" end
-    local function finish(ok,reason,item)
+    local function finish(ok,reason,item,retained)
         self.active = nil
-        return ok,reason,item
+        return ok,reason,item,retained
     end
     local _,own,foreign = status(s)
     local now = getTimestampMs()
@@ -224,10 +249,10 @@ local function poll(self)
     if now >= s.deadline then s.problem = s.problem or "Native movement was not confirmed in time" end
     if s.problem then
         if own then stop(s); return nil end
-        return finish(false,s.problem)
+        return finish(false,s.problem,nil,stayed(s))
     end
     if own then return nil end
-    if not s.performed or not s.ack then return finish(false,"No successful native movement transaction") end
+    if not s.performed or not s.ack then return finish(false,"No successful native movement transaction",nil,stayed(s)) end
     if s.nextSample and now < s.nextSample then return nil end
     s.nextSample = now+SAMPLE
     local source,arrival,exact = endpoints(s)
@@ -237,8 +262,8 @@ local function poll(self)
 end
 
 function Move:poll()
-    local ok, result, reason, item = pcall(poll,self)
-    if ok then return result,reason,item end
+    local ok, result, reason, item, retained = pcall(poll,self)
+    if ok then return result,reason,item,retained end
     if self.active then
         self:cancel()
         local _,own = status(self.active)

@@ -279,8 +279,7 @@ print("PASS stock pour: exact owned vessels, native compatibility, SP completion
 
 -- Optional stock-Lua boundary smoke. Files are supplied by the test operator;
 -- normal portable/Kahlua runs need no additional game assets.
-if arg and arg[1] and arg[2] then
-    local stock = arg[1]
+if EQUIPPED_STOCK_FLUIDS or (arg and arg[1] and arg[2]) then
     local function noop() end
     local function derive(self, name)
         local class=setmetatable({Type=name},{__index=self})
@@ -314,9 +313,12 @@ if arg and arg[1] and arg[2] then
         local amount=math.min(a.amount,b:getFreeCapacity(),requested)
         a.amount,b.amount=a.amount-amount,b.amount+amount
     end
-    assert(loadfile(stock.."/ISFluidContainer.lua"))()
-    assert(loadfile(arg[2]))()
-    assert(loadfile(stock.."/ISFluidTransferAction.lua"))()
+    if EQUIPPED_STOCK_FLUIDS then EQUIPPED_STOCK_FLUIDS()
+    else
+        assert(loadfile(arg[1].."/ISFluidContainer.lua"))()
+        assert(loadfile(arg[2]))()
+        assert(loadfile(arg[1].."/ISFluidTransferAction.lua"))()
+    end
     local function actualSetup(mp)
         local f=setup(mp)
         for _,i in ipairs({f.src,f.dst}) do
@@ -378,5 +380,38 @@ if arg and arg[1] and arg[2] then
     f.dst.fluid.amount=remote.dst.fluid.amount
     ok,_,volume=f.native:poll()
     assert(ok and math.abs(volume-.25)<1e-6)
+    -- Equipped, held and attached remain original main-inventory items.
+    -- No extra move or re-equip action is required by the installed native
+    -- pour; a backpack's separate item inventory is not the fluid target.
+    for _,position in ipairs({"satchel","back","hand","attachment"}) do
+        for _,cancelled in ipairs({false,true}) do
+            f=actualSetup(false)
+            f.slot={[position]=f.dst}
+            local cargo
+            if position=="back" then
+                f.dst.nested=container(f.dst);cargo=item(81,"none",0,1);put(cargo,f.dst.nested)
+            end
+            f.dst.fluid.signature="incompatible"
+            assert(not f.native:start(f.src,f.dst,.25))
+            f.dst.fluid.signature="petrol"
+            f.dst.fluid.amount=1
+            assert(not f.native:start(f.src,f.dst,.25))
+            f.dst.fluid.amount=.2
+            assert(f.native:start(f.src,f.dst,.25) and f.queued==1)
+            action=f.queue.current
+            assert(action.targetOwner==f.dst and action.sourceOwner==f.src)
+            f.javaHandles={action.action};assert(not action:waitToStart());action:start()
+            action.progress=.5;action:update()
+            if cancelled then f.native:cancel()
+            else action:perform();assert(action:complete()) end
+            f.javaHandles={}
+            ok,_,volume=f.native:poll()
+            assert(ok==(not cancelled) and math.abs(volume-(cancelled and .125 or .25))<1e-6)
+            assert(f.slot[position]==f.dst and f.dst.direct==f.main and f.dst.id==11 and f.queued==1
+                and f.src.direct==f.bag.nested
+                and (not cargo or cargo.direct==f.dst.nested and f.dst.nested:contains(cargo)))
+        end
+    end
+    print("PASS real installed fluid transfer action: exact worn/held/attached/loaded backpack, cancellation, incompatibility and full recovery")
     print("PASS pinned stock ISFluidTransferAction and ISFluidUtil: saturated SP handoff and server-owned paired MP with Java boundary doubles")
 end

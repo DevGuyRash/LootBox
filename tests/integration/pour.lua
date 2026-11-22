@@ -20,7 +20,7 @@ local function adapter(kind)
         local req=self.pending
         if not req or not req.reply then return nil end
         self.pending=nil
-        return req.reply[1],req.reply[2],req.reply[3]
+        return req.reply[1],req.reply[2],req.reply[3],req.reply[4]
     end
     return a
 end
@@ -143,6 +143,109 @@ local function test(name,fn)
     local ok,err=pcall(fn);if not ok then error(name..": "..tostring(err),0) end
     tests=tests+1;print("PASS "..name)
 end
+
+local function withReceipts(fn)
+    local lines, original={}, print
+    print=function(line) lines[#lines+1]=line end
+    local ok, why=pcall(fn,lines)
+    print=original
+    assert(ok,why)
+end
+
+test("partial native stop reports exactly one terminal receipt without item names or IDs",function()
+    withReceipts(function(lines)
+        local f=fixture()
+        local source=item(f.shelf,777001,"Custom Named Vessel",2,1.5)
+        local target=item(f.main,777002,"Personal Bottle Name",1,0)
+        local j=f:start(source)
+        j:tick();local replica=moveAck(f,true)
+        j:tick();isCall(f,2,"pour",777001,target)
+        assert(#lines==0,"starting a pour is not a terminal receipt")
+        local active=assert(j.pour.pending)
+        local msg="The game poured only part of the requested amount."
+        replica.fluid.amount=replica.fluid.amount-.25;target.fluid.amount=.25
+        active.reply={false,msg,.25}
+        j:tick();j:tick();j:cancel();j:tick()
+        assert(j.state=="cancelled" and j.liters==.25 and j.count==0 and #f.calls==2)
+        assert(j.reason:find("Custom Named Vessel",1,true) and j.reason:find("777001",1,true),"game UI still identifies an outstanding loan")
+        assert(#lines==1 and lines[1]=="[LootBox] action=pour event=terminal state=cancelled nativeStarted=true completed=0 confirmedLitres=0.250 phase=fluid reason="..msg)
+    end)
+end)
+
+test("ordinary early pour stops distinguish stale view, player movement and occupied queue",function()
+    local cases={
+        {update=function(f) f.pane=nil end,reason="The selected loot pane changed or closed."},
+        {update=function(f) f.moving=true end,reason="Character moved, aimed, or could not continue the action."},
+        {update=function(f) f.queue.current={} end,reason="Another action was active."},
+    }
+    for _,case in ipairs(cases) do
+        withReceipts(function(lines)
+            local f=fixture()
+            local source=item(f.shelf,17101,"Source",1,.5)
+            local target=item(f.main,17102,"Target",1,0)
+            local j=f:start(source,{target})
+            case.update(f);j:tick();j:tick()
+            assert(#f.calls==0 and j.state=="cancelled" and j.reason=="Pour cancelled or interrupted.")
+            assert(#lines==1 and lines[1]=="[LootBox] action=pour event=terminal state=cancelled nativeStarted=false completed=0 confirmedLitres=0.000 phase=prepare reason="..case.reason)
+        end)
+    end
+end)
+
+test("cupboard pickup rejection identifies a proven retained source without retrying or pouring",function()
+    local shots,originalHUD={},PZActionCompletionHUD
+    PZActionCompletionHUD={show=function(_,card) shots[#shots+1]=card end}
+    local ok,err=pcall(function()
+        withReceipts(function(lines)
+            local f=fixture()
+            local src=item(f.shelf,201,"Animal Milk Bucket",10,8)
+            local dst=item(f.main,202,"Empty Dispenser Bottle",15,0)
+            local j=f:start(src,{dst})
+            j:tick();isCall(f,1,"move",201,f.shelf)
+            local q=assert(j.move.pending)
+            q.reply={false,"The server rejected the inventory move.",nil,src}
+            j:tick();j:tick();j:cancel()
+            assert(j.state=="cancelled" and j.count==0 and j.liters==0 and #f.calls==1)
+            assert(src.container==f.shelf and src.fluid.amount==8 and dst.fluid.amount==0)
+            assert(j.reason:find("confirmed in original displayed storage",1,true) and not j.reason:find("confirmed in main",1,true))
+            assert(#lines==1 and lines[1]:find("phase=source-pickup reason=The server rejected the inventory move.",1,true))
+            assert(#shots==1 and shots[1].note:find("In original storage: 1.",1,true) and not shots[1].note:find("[ID",1,true))
+        end)
+    end)
+    PZActionCompletionHUD=originalHUD;assert(ok,err)
+end)
+
+test("confirmed denied return stays in main; no retry or silent fallback",function()
+    withReceipts(function(lines)
+        local f=fixture()
+        local src=item(f.shelf,211,"Animal Milk Bucket",10,8)
+        local dst=item(f.main,212,"Empty Dispenser Bottle",15,0)
+        local j=f:start(src,{dst})
+        j:tick();local replica=moveAck(f,true)
+        j:tick();fluidAck(f,8)
+        j:tick();isCall(f,3,"move",211,f.main)
+        local q=assert(j.move.pending)
+        q.reply={false,"The server rejected the inventory move.",nil,replica}
+        j:tick();j:tick();j:cancel()
+        assert(j.state=="cancelled" and j.count==1 and j.liters==8 and #f.calls==3)
+        assert(j.reason:find("confirmed in main inventory",1,true) and not j.reason:find("confirmed in original",1,true))
+        assert(replica.container==f.main and f.main:getItems():contains(replica) and not f.shelf:getItems():contains(src))
+        assert(dst.fluid.amount==8)
+        assert(#lines==1 and lines[1]:find("completed=1 confirmedLitres=8.000 phase=source-return reason=The server rejected the inventory move.",1,true))
+    end)
+end)
+
+test("unconfirmed network stop never uses one stale replica to claim return or retry",function()
+    local f=fixture()
+    local src=item(f.shelf,221,"Named precise bucket",10,8)
+    local dst=item(f.main,222,"Empty dispenser",15,0)
+    local j=f:start(src,{dst})
+    j:tick();isCall(f,1,"move",221,f.shelf)
+    j.move.pending.reply={false,"The native inventory move stopped without a confirmed result."}
+    j:tick();j:tick()
+    assert(j.state=="cancelled" and #f.calls==1 and j.count==0 and dst.fluid.amount==0)
+    assert(j.reason:find("location unconfirmed; check main inventory and the original storage",1,true))
+    assert(not j.reason:find("confirmed in original displayed storage",1,true))
+end)
 
 test("shelf milk stages one exact replica, pours and returns to the captured shelf",function()
     local f=fixture()
@@ -317,7 +420,7 @@ test("failed receipts and unrelated player work never start another action",func
         local j=f:start(a);j:tick();local held=moveAck(f,true)
         local external={Type="ISReadABook"};f.queue.queue={external};f.queue.current=external;j:tick()
         assert(j.state=="cancelled" and #f.calls==1 and f.queue.queue[1]==external and held.container==f.main)
-        assert(j.reason:find("Check main inventory",1,true))
+        assert(j.reason:find("Vessel locations:",1,true))
     end
     do
         local f=fixture()
@@ -392,7 +495,7 @@ test("independently changed shelved target stays in main and is reported after e
     assert(#f.calls==3 and j.count==0 and j.state~="finished")
     assert(returned.container==f.shelf and returned.fluid.amount==2 and target.container==f.main
         and target.fluid.amount==.2 and spare.container==f.shelf and spare.fluid.amount==0)
-    assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Glass Bottle",1,true) and j.reason:find("[ID 72]",1,true),j.reason)
+    assert(j.reason:find("Vessel locations:",1,true) and j.reason:find("Glass Bottle",1,true) and j.reason:find("[ID 72]",1,true),j.reason)
 end)
 
 test("independently changed shelved source stays in main after exact untouched target returns",function()
@@ -403,7 +506,7 @@ test("independently changed shelved source stays in main after exact untouched t
     assert(#f.calls==3 and j.count==0 and j.state~="finished")
     assert(returned.container==f.shelf and returned.fluid.amount==0 and source.container==f.main
         and source.fluid.species==water and source.fluid.amount==2)
-    assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Milk Carton",1,true) and j.reason:find("[ID 71]",1,true),j.reason)
+    assert(j.reason:find("Vessel locations:",1,true) and j.reason:find("Milk Carton",1,true) and j.reason:find("[ID 71]",1,true),j.reason)
 end)
 
 test("changed capacity of either staged replica leaves it reported while the other loan returns",function()
@@ -418,7 +521,7 @@ test("changed capacity of either staged replica leaves it reported while the oth
         assert(#f.calls==3 and j.count==0 and j.state=="cancelled",which)
         assert(returned.container==f.shelf and changed.container==f.main and changed.fluid.amount==amount
             and spare.container==f.shelf and spare.fluid.amount==0,which)
-        assert(j.reason:find("Check main inventory",1,true) and j.reason:find(changed.name,1,true)
+        assert(j.reason:find("Vessel locations:",1,true) and j.reason:find(changed.name,1,true)
             and j.reason:find("[ID "..changed.id.."]",1,true),j.reason)
     end
 end)
@@ -430,7 +533,7 @@ test("denied first unwind return is not retried and both held vessels are report
     moveAck(f,true,false); j:tick(); j:tick()
     assert(#f.calls==3 and j.count==0 and j.state~="finished")
     assert(source.container==f.main and target.container==f.main)
-    assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Milk Carton",1,true)
+    assert(j.reason:find("Vessel locations:",1,true) and j.reason:find("Milk Carton",1,true)
         and j.reason:find("Glass Bottle",1,true) and j.reason:find("[ID 72]",1,true),j.reason)
 end)
 
@@ -444,8 +547,39 @@ test("a changed original shelf holder causes no return retry or relocation",func
     move.reply={false,"original shelf changed"};j:tick();j:tick()
     assert(#f.calls==3 and j.count==0 and j.state~="finished")
     assert(source.container==f.main and target.container==f.main and #f.pane.items==0)
-    assert(j.reason:find("Check main inventory",1,true) and j.reason:find("Milk Carton",1,true)
+    assert(j.reason:find("Vessel locations:",1,true) and j.reason:find("Milk Carton",1,true)
         and j.reason:find("Glass Bottle",1,true) and j.reason:find("[ID 72]",1,true),j.reason)
+end)
+
+test("inventory donor fills exact worn held attached and loaded-fluid-bag targets in place; native move is never called",function()
+    for _,position in ipairs({"worn","attached","held","backpack"})do
+        for _,cancelled in ipairs({false,true})do
+            local f=fixture()
+            local source=item(f.main,75,"Water Bottle",2,1,water)
+            local dest=item(f.main,76,"Chosen Fluid Equipment",3,.5,water)
+            local spare=item(f.main,77,"Chosen Fluid Equipment",3,.5,water)
+            local carried
+            if position=="worn" then function f.player:isEquippedClothing(i)return i==dest end
+            elseif position=="attached" then function f.player:isAttachedItem(i)return i==dest end
+            elseif position=="held" then f.held=dest
+            else
+                function f.player:isEquippedClothing(i)return i==dest end
+                dest.bag=container("bag",dest)
+                carried=item(dest.bag,78,"Separate Cargo")
+            end
+            local j=f:start(source,{dest});j:tick()
+            isCall(f,1,"pour",75,dest)
+            if cancelled then j:cancel();j.pour.pending.reply={false,"cancelled",0};j:tick()
+            else fluidAck(f,1);j:tick() end
+            assert(j.state==(cancelled and "cancelled" or "finished") and #f.calls==1)
+            assert(dest.container==f.main and dest.id==76 and dest.fluid.amount==(cancelled and .5 or 1.5))
+            assert(spare.fluid.amount==.5 and not j.move:isBusy())
+            if position=="held" then assert(f.held==dest)
+            elseif position=="attached" then assert(f.player:isAttachedItem(dest))
+            else assert(f.player:isEquippedClothing(dest)) end
+            if carried then assert(dest.bag.items[1]==carried and carried.container==dest.bag) end
+        end
+    end
 end)
 
 print("PASS "..tests.." Pour controller scenarios")

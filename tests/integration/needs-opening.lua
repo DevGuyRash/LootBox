@@ -12,6 +12,7 @@ end
 ArrayList = {new = list}
 ResourceType = {Item = {}}
 local realm = "sp"
+function getTimestampMs() return 0 end
 function isClient() return realm == "client" end
 function isServer() return realm == "server" end
 local function fakeItem(id, fullType, owner, sealed, food)
@@ -98,7 +99,8 @@ HandcraftLogic = {new=function(character, bench, location)
         return {getAllInputItems=function()
             if extra then return list(can,found,foreign) end
             return list(can,substitute and foreign or found)
-        end, getAllCreatedItems=function() return list(unpack(canList)) end}
+        end, getAllCreatedItems=function() return list(unpack(canList)) end,
+            getAllConsumedItems=function() return list(can) end}
     end
     return logic
 end}

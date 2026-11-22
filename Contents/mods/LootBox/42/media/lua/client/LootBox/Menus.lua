@@ -6,9 +6,13 @@ local Catalog = require "LootBox/Catalog"
 local Guides = require "LootBox/Guides"
 local Selection = require "LootBox/Selection"
 local PourMenu = require "LootBox/PourMenu"
+local ContainerWorldMenu = require "LootBox/ContainerWorldMenu"
+local Focus = require "LootBox/ContainerFocus"
+local PaneClicks = require "LootBox/PaneClicks"
 local Menus = {}
 local interface
 local containerCallbacks = setmetatable({}, { __mode = "k" })
+local invokingButton = setmetatable({}, { __mode = "k" })
 local iconPaths = {
     root = "media/ui/LootableMaps/map_lightbulb.png",
     manager = "media/ui/LootableMaps/map_door.png",
@@ -504,6 +508,9 @@ local function vehicleActions(menu, playerIndex, context, app)
     end, "Choose a storage compartment and assign the categories it should accept.")
 end
 
+local OpenFull = require "LootBox/OpenFull"
+local manualOpenHint = {}
+
 local function runTillFull(selection)
     local app, err = App.get(selection.playerIndex)
     local ok
@@ -555,22 +562,59 @@ local function consumptionMenu(playerIndex, parent, items)
         end
         return contains and snapshot or nil
     end
-    -- Mods can group native amount menus under another submenu. Only walk
-    -- enabled branches; never infer permission from a translated menu label.
-    local visited, remaining = {[parent] = true}, 256
+    local player = getSpecificPlayer(playerIndex)
+    local present, plain = {}, {}
+    local function extend(menu, root, anchor, kind, recipe, snapshot)
+        local drink = kind ~= "food"
+        local title = recipe and (drink and "Open and Drink Til Full" or "Open and Eat Til Full") or "Til Full"
+        local added
+        if recipe and isClient() and not OpenFull.keeps(player, anchor, recipe) then
+            -- No second Open button: the only stock MP receipt with a new ID
+            -- also orders an immediate fixed bite. Leave both actions to PZ.
+            title = "Til Full (use the opened item)"
+            added = menu:addOption(title, manualOpenHint, nil)
+            if added then added.notAvailable = true end
+            local cmd = drink and "Drink" or "Eat"
+            tooltip(added, title, "Use the normal Open action without eating. Right-click the opened item and choose "
+                .. cmd .. " > Til Full. Multiplayer does not identify this recipe's new item after plain Open.")
+        else
+            added = menu:addOption(title, {playerIndex = playerIndex, items = snapshot,
+                kind = kind, openingRecipe = recipe, source = anchor:getContainer()}, runTillFull)
+            if recipe then
+                tooltip(added, title, "Open the selected item normally, then measure your current "
+                    .. (drink and "thirst before drinking." or "hunger before eating."))
+            end
+        end
+        if added then added.itemForTexture = root.itemForTexture or anchor end
+    end
+    -- Prefer the enabled native amount submenu. Some packages (soda cans,
+    -- fruit beverage, jars) expose only a separate stock crafting callback.
+    -- Collect those *existing* rows, then decorate just once after the walk.
+    local visited, remaining = {}, 256
     local function visit(menu, root)
         if visited[menu] or remaining <= 0 then return end
         visited[menu], remaining = true, remaining - 1
         local kind, anchor, openingRecipe, already, ambiguous
         for _, option in ipairs(menu.options or {}) do
-            if option.onSelect == runTillFull then already = true end
+            if option.onSelect == runTillFull or option.target == manualOpenHint then already = true end
             if not option.notAvailable then
                 local action, item
                 if nativeMenu.onEatItems and option.onSelect == nativeMenu.onEatItems then
-                    action, item = "food", inventoryItem((ISInventoryPane.getActualItems(option.target) or {})[1])
+                    item = inventoryItem((ISInventoryPane.getActualItems(option.target) or {})[1])
+                    action = item and OpenFull.drinkFood(item, option.param3) and "drinkFood" or "food"
                 elseif nativeMenu.onDrinkFluid and option.onSelect == nativeMenu.onDrinkFluid then
                     action, item = "fluid", inventoryItem(option.target)
                     if option.param4 and item ~= option.param4 then item = nil end
+                elseif nativeMenu.OnNewCraft and option.onSelect == nativeMenu.OnNewCraft
+                    and option.param2 == playerIndex and option.param3 == false then
+                    local selected = inventoryItem(option.target)
+                    local r = option.param1
+                    local k = selected and r and OpenFull.recipeKind(player, selected, r)
+                    if k and OpenFull.recipeMenuAllowed(player, selected, k) then
+                        local p = plain[selected]
+                        if p and p.recipe ~= r then p.ambiguous = true
+                        elseif not p then plain[selected] = {menu = menu, root = option, recipe = r, kind = k} end
+                    end
                 end
                 if item then
                     local recipe = option.param3
@@ -584,22 +628,24 @@ local function consumptionMenu(playerIndex, parent, items)
                 if child then visit(child, option) end
             end
         end
-        local snapshot = not ambiguous and not already and kind and selectedStack(anchor)
-        if not snapshot or #snapshot == 0 then return end
-        local chooseOpened = kind == "food" and openingRecipe and isClient()
-        local title = chooseOpened and "Open first for Til Full" or "Til Full"
-        local added = menu:addOption(title, {playerIndex = playerIndex, items = snapshot,
-            kind = kind, openingRecipe = openingRecipe, source = anchor:getContainer()}, runTillFull)
-        if added then added.itemForTexture = root.itemForTexture or anchor end
-        if chooseOpened then
-            tooltip(added, title, "Opens one selected item without eating. In multiplayer, right-click the opened food and choose Eat > Til Full.")
-        elseif openingRecipe and kind == "fluid" then
-            tooltip(added, title, "Open this vessel and drink until the selected need is satisfied. Til Full does not drink alcohol or unsafe mixtures.")
-        end
+        -- A direct stock callback is not an amount submenu. Do not confuse
+        -- arbitrary unrelated top-level rows with native amount choices.
+        if menu == parent or not kind then return end
+        if anchor then present[anchor] = true end
+        local snapshot = not ambiguous and not already and selectedStack(anchor)
+        if snapshot and #snapshot > 0 then extend(menu, root, anchor, kind, openingRecipe, snapshot) end
     end
-    for _, root in ipairs(parent.options or {}) do
-        local child = not root.notAvailable and root.subOption and parent:getSubMenu(root.subOption)
-        if child then visit(child, root) end
+    visit(parent, nil)
+    if remaining <= 0 then return end
+    for item, option in pairs(plain) do
+        if not present[item] and not option.ambiguous then
+            local duplicate = false
+            for _, row in ipairs(option.menu.options or {}) do
+                if row.onSelect == runTillFull or row.target == manualOpenHint then duplicate = true; break end
+            end
+            local snapshot = not duplicate and selectedStack(item)
+            if snapshot and #snapshot > 0 then extend(option.menu, option.root, item, option.kind, option.recipe, snapshot) end
+        end
     end
 end
 
@@ -642,13 +688,18 @@ function Menus.inventoryMenu(playerIndex, parent, items)
     common(menu, playerIndex, context, app, preferences)
 end
 
-function Menus.containerMenu(playerIndex, parent, container)
+function Menus.containerMenu(playerIndex, parent, container, worldObjects)
     local preferences = App.getPreferences()
     if not preferences.contextMenus or not container or not parent or not menuAllowed(playerIndex) then return end
     local app = App.get(playerIndex)
     if not app then return end
     local context = containerContext(playerIndex, container)
     local menu = rootMenu(parent)
+    if worldObjects and preferences.worldShortcuts then
+        context.square = worldObjects[1]:getSquare()
+        require("LootBox/WorldFluidMenu").world(playerIndex,menu,worldObjects,app,require("LootBox/Pour").options(preferences),tooltip)
+        worldActions(menu, playerIndex, context, app)
+    end
     if preferences.inventoryShortcuts then containerActions(menu, playerIndex, context, app) end
     common(menu, playerIndex, context, app, preferences)
     return menu
@@ -661,24 +712,49 @@ function Menus.inventoryBackgroundMenu(playerIndex, parent, isLoot)
     Menus.containerMenu(playerIndex, parent, container)
 end
 
+local function pack(...) return {n=select("#", ...), ...} end
+
 function Menus.refreshContainers(page, phase)
     if phase ~= "end" then return end
     Selection.attach(page.inventoryPane)
+    PaneClicks.attach(page.inventoryPane)
     for _, button in ipairs(page.backpacks or {}) do
         local previous = button.onRightMouseDown
         if previous and previous ~= containerCallbacks[button] then
-            local function onRightMouseDown(clicked, x, y)
-                local result = previous(clicked, x, y)
+            local function onRightMouseDown(clicked, x, y, ...)
+                -- A mod may wrap our wrapper and then a native refresh may
+                -- wrap that chain. One gesture still runs each provider once.
+                if invokingButton[clicked] then return previous(clicked, x, y, ...) end
                 local owner = clicked.parent and clicked.parent.parent
                 local container = clicked.inventory
-                if not owner or not container or call(container, "getContainingItem") then return result end
+                local callback = previous
+                if Focus.select(owner, container, clicked) then
+                    local live = Focus.button(owner, container, clicked)
+                    if not live or not live.onRightMouseDown then return true end
+                    if live ~= clicked then
+                        -- Selecting rebuilds the sidebar and may give the original
+                        -- widget to a sibling. Enter only the new exact widget's
+                        -- native/third-party chain; our outer frame adds one menu.
+                        clicked, callback = live, live.onRightMouseDown
+                        x, y = live:getMouseX(), live:getMouseY()
+                    end
+                end
+                invokingButton[clicked] = true
+                local result = pack(pcall(callback, clicked, x, y, ...))
+                invokingButton[clicked] = nil
+                if not result[1] then error(result[2], 0) end
+                if not owner or not container or clicked.inventory ~= container or not clicked.parent
+                    or clicked.parent.parent ~= owner or call(container, "getContainingItem")
+                    or not menuAllowed(owner.player) then return unpack(result, 2, result.n) end
                 local parent = getPlayerContextMenu(owner.player)
-                if Menus.containerMenu(owner.player, parent, container) then
+                local worldObjects, superseded = ContainerWorldMenu.append(owner.player, parent, container)
+                if superseded then return unpack(result, 2, result.n) end
+                if Menus.containerMenu(owner.player, parent, container, worldObjects) or (worldObjects and parent.numOptions > 1) then
                     parent.forceVisible, parent.visibleCheck = true, true
                     parent:setVisible(true)
                     parent:bringToTop()
                 end
-                return result
+                return unpack(result, 2, result.n)
             end
             button.onRightMouseDown = onRightMouseDown
             containerCallbacks[button] = onRightMouseDown
@@ -687,6 +763,9 @@ function Menus.refreshContainers(page, phase)
 end
 
 function Menus.worldMenu(playerIndex, parent, objects, test)
+    -- The sidebar builds our exact container actions once in its own LootBox
+    -- group. Other providers fill the stock World Actions submenu as normal.
+    if ContainerWorldMenu.current(playerIndex, parent, objects) then return end
     local preferences = App.getPreferences()
     if not preferences.contextMenus or not menuAllowed(playerIndex) then return end
     local app = App.get(playerIndex)
@@ -724,6 +803,10 @@ function Menus.worldMenu(playerIndex, parent, objects, test)
     context.sourceContainer, context.targetContainer = context.container, context.container
     context.scope = context.container and "container" or "reach"
     local menu = rootMenu(parent)
+    if preferences.worldShortcuts then
+        require("LootBox/MountedDispenserMenu").add(playerIndex,menu,objects,app,tooltip)
+        require("LootBox/WorldFluidMenu").world(playerIndex,menu,objects,app,require("LootBox/Pour").options(preferences),tooltip)
+    end
     if context.container and preferences.worldShortcuts then
         local names = worldContainerNames(playerIndex, context.containers)
         for _, container in ipairs(context.containers) do

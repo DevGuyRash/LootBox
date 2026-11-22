@@ -332,3 +332,22 @@ For a release, replay these against the exact packaged files in a disposable sav
 ### Multiplayer carried-supply boundary
 
 The portable lane models the public Build 42.22.2 server/client contracts separately, including native transfer Done versus Rejected, late remove/add packets that can reconstruct the item with the same ID, item/stat delivery in either order, lost acknowledgements, option changes, foreign actions, and unsafe or ambiguous inputs. It does not simulate a second water sip or create server inventory. Stock handcraft binds the one selected can and tool in manual mode with an eat percentage of zero. The stock acknowledgement does not include an output ID: the automation requires native completion and absence of the exact original ID from carried inventory, then ends the craft without counting food. A later hunger assessment may choose ready-to-eat food under the normal policy. These fixtures are not a two-process multiplayer gameplay pass.
+
+
+## 0.9.16 active-container mouse input and scoped world picking
+
+The native Mod Options tickbox is the only stored value for click focus. On stock single-container lists a displayed row already belongs to the active source. NeatUI keeps its own grid, selection, drag handling, section detection and Combined mode. The new hooks run on mouse gestures only; the normal stock selector remains responsible for access, exploration, the sidebar and selection notifications. Recycled buttons are rebound by physical container identity after native refresh. The synthetic fixture-menu scope supplies no world-scaled cursor pick, without changing the raw popup position or real world-menu dispatch.
+
+Run the normal stable-source suite in Lua 5.1 and the installed Kahlua interpreter. For an additional installed-source slice run:
+
+```sh
+python3 tools/check-container-world-stock.py --game "$PZ" --neat-views "$NEAT_VIEWS" --shelf-entry "$SHELF_ENTRY"
+```
+
+The latter exercises installed vanilla input, selector, selection, options and world-menu functions; native World Actions submenu pooling, nesting and callback dispatch; NeatUI's grid hit-tests, open stacks and input handlers; and Shelf Aware's original vehicle-first world subscriber. The stock water-source argument shape exercises promotion and the installed get-up action before calling the stock wash callback. Inventory objects, Java menu generation, rendering and networking at this boundary are doubles. This is not a real mouse/renderer or multiplayer gameplay claim. In a disposable client, separately check the active sidebar highlight and the normal item, mixed-stack, modifier, drag, crate and actual vehicle menus with the switch on and off.
+
+## 0.9.21 mounted top-up on matching multiplayer hosts
+
+The exact distributed package was verified on Project Zomboid 42.22.2 with an ordinary player and a stock dedicated host that advertised the same LootBox build and kept native checksums enabled. Two plain-water top-ups added 250 mL each, first into an empty dispenser and then into that partially filled dispenser. A same-server reconnect independently confirmed 500 mL remained mounted. No undeclared host, other fluid, larger pour, or server restart was qualified.
+
+The exact 54 distribution files contain 50 client Lua scripts and no executable server/shared Lua. Its deterministic ZIP SHA-256 is `3e4ab62296b60b96f9e6b0ddd82b131b74b28f4c0d40c28e107d91bfff073952`. The 74 portable and installed-interpreter checks are separate from the private gameplay evidence.

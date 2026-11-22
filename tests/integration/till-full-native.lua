@@ -338,17 +338,26 @@ local function openingFixture(f)
         assert(player==f.player and not force and eat==0)
         if f.noCraft then return end
         local a=f:action("ISHandcraftAction")
-        a.character=f.player;a.craftRecipe=recipe;a.eatPercentage=eat
+        a.character=f.player;a.craftRecipe=recipe;a.eatPercentage=eat;a.craftStarted=not f.neverStarted;a.force=f.forced
         a.manualInputs={[1]={size=function() return 1 end,get=function() return f.wrongInput or f.item end}}
         if f.autoInputs then a.manualInputs=false end
         a.logic={getRecipeData=function()
             return {getAllCreatedItems=function()
                 return {size=function() return #f.outputs end,get=function(_,i) return f.outputs[i+1] end}
+            end,getAllConsumedItems=function()
+                return {contains=function(_,item) return item==(f.consumedInstead or f.item) end}
             end}
         end}
         local perform=a.perform
         function a:perform()
             if f.unseal then f.item.sealed=false;f.item.container=inventory end
+            -- Stock authoritatively adds the exact created objects during
+            -- performRecipe, not while the client is preparing the queue.
+            for _,item in ipairs(f.outputs) do
+                item.container=inventory
+                f.extraItems[#f.extraItems+1]=item
+            end
+            if #f.outputs>0 and not f.keepShell and not f.consumedInstead then f.item.container=nil end
             return perform(self)
         end
         if addToQueue then f.queue:addToQueue(a) end
@@ -364,7 +373,8 @@ local function openingFixture(f)
     end
     function f:open(kind) return self.native:beginOpen(self.item,kind or "food",recipe,function() return self.target end) end
     function f:output(kind)
-        local result={kind=kind or "food",container=inventory}
+        local result={kind=kind or "food",container=nil,id=101+#f.outputs}
+        function result:getID() return self.id end
         function result:getContainer() return self.container end
         function result:isSealed() return false end
         function result:getFluidContainer() return self.kind=="fluid" and {} or nil end
@@ -438,6 +448,67 @@ test("opening dispatch never requests native auto-eat and returns exact craft re
     assert(f:open());assert(f.native:poll()==nil);f:finish()
     local done,reason,item=f.native:poll()
     assert(done and reason=="opened" and item==result and #f.calls==1 and f.calls[1][2]==0)
+end)
+test("force and client retirement without a successful native opening never authorize a follow-up",function()
+    for _,mode in ipairs({"forced","notStarted"}) do
+        local f=fixture();openingFixture(f);f.client=true;f.item.kind="fluid"
+        f.forced=mode=="forced";f.neverStarted=mode=="notStarted"
+        local started=f:open("fluid")
+        if mode=="forced" then assert(not started) else assert(started) end
+        f:finish();f.item.sealed=false;f.item.container=f.inventory
+        local done,why,opened=f.native:poll()
+        assert(done==false and not opened and #f.calls==1 and #f.queue.queue==0 and not f.native:isBusy(),mode)
+    end
+end)
+test("a created output without this exact consumed package is never adopted",function(f)
+    openingFixture(f)
+    local decoy={};f.consumedInstead=decoy
+    local opened=f:output();assert(f:open());f:finish()
+    local done,reason,result=f.native:poll()
+    assert(done==false and result==nil and reason:find("did not consume the selected package",1,true))
+    assert(#f.calls==1 and f.calls[1][2]==0 and opened~=decoy)
+end)
+test("owned opening receipt stops if the exact closed input is still in an endpoint",function(f)
+    openingFixture(f);f.keepShell=true;f:output()
+    assert(f:open());f:finish();assert(f.native:poll()==nil)
+    f.time=2001;local done,why,item=f.native:poll()
+    assert(done==false and not item and why:find("not received",1,true) and #f.calls==1)
+end)
+test("a kept-and-unsealed MP Food binds the exact original ID even after delayed reconstruction",function(f)
+    openingFixture(f);f.client=true
+    local oldCraft,oldFlags=CraftRecipeManager,InputFlag
+    InputFlag={IsSealed={},Unseal={}}
+    CraftRecipeManager={getValidInputScriptForItem=function(r,v,pl)
+        assert(r==f.recipe and v==f.item and pl==f.player)
+        return {isKeep=function() return true end,hasFlag=function(_,k) return k==InputFlag.IsSealed or k==InputFlag.Unseal end}
+    end}
+    local function clone(id)
+        return {kind="food",getID=function() return id end,getFullType=function() return "Base.TestVessel" end,
+            getContainer=function() return f.inventory end,isSealed=function() return false end,
+            getScriptItem=function() return {isCantEat=function() return false end} end}
+    end
+    local preexisting=clone(41);f.extraItems={preexisting}
+    assert(f:open("food"));f:finish();f.item.container=nil
+    assert(f.native:poll()==nil) -- identical opened type already in main is not a receipt
+    f.time=750;local actual=clone(1);f.extraItems={preexisting,actual}
+    local done,why,out,identity=f.native:poll()
+    assert(done and why=="opened" and out==actual and identity=="sameItem" and #f.calls==1)
+    CraftRecipeManager,InputFlag=oldCraft,oldFlags
+end)
+test("opening refuses ID shadows already in a carried bag before a stock request",function(f)
+    openingFixture(f);f.client=true;f.item.kind="fluid"
+    local hidden={getID=function() return 1 end,getFullType=function() return "Base.TestVessel" end}
+    local pocket={getItems=function() return {size=function() return 1 end,get=function() return hidden end} end}
+    hidden.getContainer=function() return pocket end
+    local bag={getID=function() return 7 end,getContainer=function() return f.inventory end,getInventory=function() return pocket end}
+    f.extraItems={bag}
+    local ok,reason=f:open("fluid");assert(not ok and reason and #f.calls==0 and not f.native:isBusy())
+end)
+test("cancellation during the MP unseal sync wait wins over a late item",function(f)
+    openingFixture(f);f.client=true;f.item.kind="fluid"
+    assert(f:open("fluid"));f:finish();assert(f.native:poll()==nil)
+    f.native:cancel("Stopped after opening");f.item.sealed=false;f.item.container=f.inventory;f.time=500
+    local done,why,item=f.native:poll();assert(done==false and why=="Stopped after opening" and not item and #f.calls==1)
 end)
 test("MP fluid opening waits for exact item unseal not client perform",function(f)
     openingFixture(f);f.client=true;f.item.kind="fluid"

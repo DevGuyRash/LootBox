@@ -553,19 +553,24 @@ function World:protected(item, options)
     local id = self:itemId(item)
     if id and self.state.keep[id] then return true, "Keep" end
     if call(item, "isFavorite") and not (type(options) == "table" and options.allowFavorite == true) then return true, "Favorite" end
-    -- Explicit consumption may use held food or a worn vessel in main inventory. This
-    -- permission never authorizes moving equipment or bypassing Keep/recovery.
-    local equippedConsumption = type(options) == "table" and options.allowEquippedConsumption == true
-        and (instance(item, "Food") or call(item, "getFluidContainer") ~= nil)
-        and call(item, "getContainer") ~= nil
-        and call(item, "getContainer") == call(self.player, "getInventory")
-    if not equippedConsumption then
+    local receive = type(options) == "table" and options.allowMainInventoryFluidReceive == true
+    local consume = type(options) == "table" and options.allowEquippedConsumption == true
+    local food = consume and instance(item, "Food")
+    local fluid = (receive or consume and not food) and call(item, "getFluidContainer")
+    local holder = (food or fluid) and call(item, "getContainer")
+    local main = holder and holder == call(self.player, "getInventory")
+    -- Filling in place does not move the worn item or the contents of a bag.
+    local receivesInPlace = receive and fluid and main
+    local equippedConsumption = consume and main and (food or fluid)
+    if not receivesInPlace and not equippedConsumption then
         if call(self.player, "isEquipped", item) or call(item, "isEquipped") or call(item, "isWorn") then return true, "Equipped" end
         if item == call(self.player, "getPrimaryHandItem") or item == call(self.player, "getSecondaryHandItem") then return true, "Held" end
         local attached = call(item, "getAttachedSlot")
         if attached and attached >= 0 then return true, "Attached" end
     end
-    if isBag(item) and size(call(call(item, "getInventory"), "getItems")) > 0 then return true, "Bag contains items" end
+    if not receivesInPlace and isBag(item) and size(call(call(item, "getInventory"), "getItems")) > 0 then
+        return true, "Bag contains items"
+    end
     return false
 end
 

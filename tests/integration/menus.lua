@@ -1296,7 +1296,7 @@ test("Til Full follows a native Open and Eat or Drink recipe without relying on 
         original.param3 = recipe
         Menus.inventoryMenu(0,parent,{f.apple});Menus.inventoryMenu(0,parent,{f.apple})
         assert(#child.options==2 and child.options[1]==original and original.param3==recipe)
-        local added=child.options[2];assert(added.name=="Til Full" and added.itemForTexture==f.apple)
+        local added=child.options[2];assert(added.name==(kind=="food" and "Open and Eat Til Full" or "Open and Drink Til Full") and added.itemForTexture==f.apple)
         assert(added.onSelect(added.target) and f.consumeKind==kind)
     end
     isClient=function() return true end
@@ -1305,7 +1305,7 @@ test("Til Full follows a native Open and Eat or Drink recipe without relying on 
     parent.getSubMenu=function() return child end
     child:addOption("All",{f.apple},ISInventoryPaneContextMenu.onEatItems).param3=recipe
     Menus.inventoryMenu(0,parent,{f.apple})
-    assert(child.options[2].name=="Open first for Til Full")
+    assert(child.options[2].name=="Til Full (use the opened item)" and child.options[2].notAvailable and not child.options[2].onSelect)
     assert(child.options[2].toolTip.description:find("without eating",1,true))
     ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
 end)
@@ -1344,7 +1344,7 @@ test("nearby loot Eat/Drink follows nested native rows and preserves exact click
         use.notAvailable=false
         Menus.inventoryMenu(0,parent,rows);Menus.inventoryMenu(0,parent,rows)
         assert(#amounts.options==2 and amounts.options[1]==original)
-        local added=amounts.options[2];assert(added.name=="Til Full")
+        local added=amounts.options[2];assert(added.name==(closed and (kind=="food" and "Open and Eat Til Full" or "Open and Drink Til Full") or "Til Full"))
         local captured
         f.app.tillFull = function(_,items,actionKind,open,source)
             assert(#items==2 and items[1]==picked and items[2]==peer and actionKind==kind)
@@ -1358,6 +1358,90 @@ test("nearby loot Eat/Drink follows nested native rows and preserves exact click
     ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
 end)
 
+test("stock plain recipe rows on a shelf or bag get one actionable combined entry only where identity is provable",function(f)
+    local oldPane,oldManager,oldCraft,oldFlags,oldMoodle,oldClient = ISInventoryPane,getScriptManager,CraftRecipeManager,InputFlag,MoodleType,isClient
+    local oldNew,oldEat = ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems
+    ISInventoryPane={getActualItems=function(rows) return rows end}
+    ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems=function() end,function() end
+    InputFlag={IsSealed={},Unseal={}};MoodleType={FOOD_EATEN={}}
+    f.preferences.tillFullEnabled=true
+    local drink={getName=function() return "OpenCanOfBeverage" end,isVanilla=function() return true end,getOutputCount=function() return 0 end}
+    local food={getName=function() return "OpenCannedFood" end,isVanilla=function() return true end,getOutputCount=function() return 1 end}
+    local unknown={getName=function() return "UnpackEverything" end,isVanilla=function() return true end,getOutputCount=function() return 1 end}
+    getScriptManager=function() return {getCraftRecipe=function(_,n) return ({OpenCanOfBeverage=drink,OpenCannedFood=food,UnpackEverything=unknown})[n] end} end
+    local mealLevel=0;f.player.getMoodles=function() return {getMoodleLevel=function() return mealLevel end} end
+    for _,name in ipairs({"CannedPeaches","CannedMilk","CannedFruitBeverage","Pop"}) do
+        for _,mode in ipairs({"plain","amount-and-plain","multiplayer","unknown","disabled","full","not-selected","wrong-player"}) do
+            isClient=function() return mode=="multiplayer" end
+            local source = name=="Pop" and f.inventory or f.crate
+            local chosen,decoy=item(source),item(source)
+            local r=mode=="unknown" and unknown or (name=="Pop" and drink or food)
+            chosen.classes.Food=name~="Pop"
+            chosen.getFullType=function() return "Base."..name end;decoy.getFullType=chosen.getFullType
+            chosen.getOpeningRecipe=function()
+                return (name=="CannedMilk" or name=="CannedPeaches") and "OpenCannedFood" or nil
+            end
+            chosen.isSealed=function() return name=="Pop" end
+            chosen.getFluidContainer=function()
+                if name=="Pop" then return {isEmpty=function() return false end,getCapacity=function() return .3 end,
+                    getProperties=function() return {getHungerChange=function() return -.05 end} end} end
+            end
+            CraftRecipeManager={getValidInputScriptForItem=function(recipe,selected,player)
+                assert(selected==chosen and player==f.player)
+                return {isKeep=function() return recipe==drink end,hasFlag=function(_,k) return recipe==drink and (k==InputFlag.IsSealed or k==InputFlag.Unseal) end}
+            end}
+            mealLevel=mode=="full" and 3 or 0
+            local parent,recipes,amounts=Menu:new(),Menu:new(),Menu:new()
+            parent.getSubMenu=function(_,id) return id==1 and recipes or amounts end
+            parent:addOption("Localized cooking",nil,nil).subOption=1
+            local standard=recipes:addOption("Localized Open",chosen,ISInventoryPaneContextMenu.OnNewCraft)
+            standard.param1,standard.param2,standard.param3=r,mode=="wrong-player" and 1 or 0,false
+            standard.notAvailable=mode=="disabled"
+            local both=mode=="amount-and-plain" and chosen:getOpeningRecipe()~=nil
+            if both then
+                parent:addOption("Localized Open & Eat",nil,nil).subOption=2
+                local row=amounts:addOption("All",{chosen},ISInventoryPaneContextMenu.onEatItems)
+                row.param3=r
+            end
+            local rows=mode=="not-selected" and {decoy} or {chosen}
+            Menus.inventoryMenu(0,parent,rows);Menus.inventoryMenu(0,parent,rows)
+            assert(recipes.options[1]==standard and standard.onSelect==ISInventoryPaneContextMenu.OnNewCraft)
+            local supported=mode=="plain" or mode=="multiplayer" or mode=="amount-and-plain"
+            assert(#recipes.options==(supported and not both and 2 or 1),name..":"..mode)
+            assert(#amounts.options==(both and 2 or 0))
+            if supported then
+                local added=both and amounts.options[2] or recipes.options[2]
+                local drinkIntent=name~="CannedPeaches"
+                if mode=="multiplayer" and name~="Pop" then
+                    assert(added.notAvailable and not added.onSelect and added.toolTip.description:find(drinkIntent and "choose Drink" or "choose Eat",1,true))
+                else
+                    assert(added.name==(drinkIntent and "Open and Drink Til Full" or "Open and Eat Til Full"))
+                    f.app.tillFull=function(_,list,kind,recipe,container)
+                        assert(#list==1 and list[1]==chosen and recipe==r and container==source)
+                        assert(kind==(name=="Pop" and "fluid" or (drinkIntent and "drinkFood" or "food")));return true
+                    end
+                    assert(added.onSelect(added.target))
+                end
+            end
+        end
+    end
+    ISInventoryPane,getScriptManager,CraftRecipeManager,InputFlag,MoodleType,isClient=oldPane,oldManager,oldCraft,oldFlags,oldMoodle,oldClient
+    ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems=oldNew,oldEat
+end)
+test("opened stock Food drinks retain the Food callback while selecting thirst even from the loot pane",function(f)
+    local prev=ISInventoryPane;ISInventoryPane={getActualItems=function(rows) return rows end}
+    ISInventoryPaneContextMenu.onEatItems=function() end
+    local opened=item(f.crate);opened.getCustomMenuOption=function() return getText("ContextMenu_Drink") end
+    local parent,amount=Menu:new(),Menu:new();parent.getSubMenu=function() return amount end
+    parent:addOption("Localized stock Drink",nil,nil).subOption=1
+    local row=amount:addOption("All",{opened},ISInventoryPaneContextMenu.onEatItems)
+    f.preferences.tillFullEnabled=true;Menus.inventoryMenu(0,parent,{opened});Menus.inventoryMenu(0,parent,{opened})
+    assert(#amount.options==2 and amount.options[1]==row and amount.options[2].name=="Til Full")
+    f.app.tillFull=function(_,list,kind,recipe,source)
+        assert(#list==1 and list[1]==opened and kind=="drinkFood" and not recipe and source==f.crate);return true
+    end
+    assert(amount.options[2].onSelect(amount.options[2].target));ISInventoryPane=prev
+end)
 test("native ground Drink binds its real world wrapper only to the selected floor item", function(f)
     local oldPane = ISInventoryPane
     ISInventoryPane = {getActualItems = function(rows) return rows end}
@@ -1495,8 +1579,10 @@ test("Pour Into renders a separate native-spanning menu and dispatches one froze
         local branded=needed(needed(parent,"LootBox").child,"Pour Into")
         assert(branded.child and branded.child~=root.child and icon(branded)=="Item_WaterDrop")
         local m,e=pourDestination(root.child,main),pourDestination(root.child,equipped)
-        assert(m and e and m.name:find("Main inventory",1,true) and e.name:find("Field Bag",1,true))
-        assert(m.name:find("1 L free",1,true) and e.name:find("2 L free",1,true))
+        assert(m and e and m.name=="0% | 0.0L / 1.0L" and e.name=="0% | 0.0L / 2.0L")
+        assert(m.itemForTexture==main and e.itemForTexture==equipped and not m.iconTexture and not e.iconTexture)
+        assert(m.toolTip.description:find("Bottle | Main inventory",1,true)
+            and e.toolTip.description:find("Bottle | Field Bag",1,true))
         local fill=needed(root.child,"Fill All")
         assert(icon(fill))
         rows[1]=main; rows[2]=equipped -- callbacks must not re-flatten new UI rows
@@ -1507,6 +1593,44 @@ test("Pour Into renders a separate native-spanning menu and dispatches one froze
         assert(calls[1].targets[1].item==equipped and calls[1].targets[2].item==main)
         assert(calls[1].options.pourFillScope=="equipped-first" and calls[1].options.pourFillOrder=="largest-first")
         assert(not package.loaded["Fluids/ISFluidTransferAction"],"native actions must remain lazy at menu render")
+    end)
+    restore();assert(ok,err)
+end)
+
+test("Pour Into shows exact target icon and compact fill data; identical row text keeps separate destinations",function(f)
+    local src,_,equipped,_,_,calls,restore,vessel=pourFixture(f)
+    local ok,err=pcall(function()
+        local a=vessel(f.inventory,16,"Base.Canteen","Canteen",1,.6)
+        local b=vessel(equipped:getContainer(),17,"Base.Canteen","Canteen",1,.6)
+        local c=vessel(f.inventory,18,"Base.Canteen","Canteen",1,.6)
+        local tiny=vessel(f.inventory,19,"Base.CartOn","Carton",.5,.003)
+        local function render()
+            local parent=Menu:new();Menus.inventoryMenu(0,parent,{src})
+            return needed(parent,"Pour Into").child,needed(needed(parent,"LootBox").child,"Pour Into").child
+        end
+        local main,mirror=render()
+        local labels={
+            [a]="Canteen | Main inventory #1",
+            [b]="Canteen | Field Bag",
+            [c]="Canteen | Main inventory #2",
+        }
+        for _,child in ipairs({main,mirror}) do
+            for _,entry in ipairs({a,b,c}) do
+                local row=assert(pourDestination(child,entry))
+                assert(row.name=="60% | 0.6L / 1.0L" and row.itemForTexture==entry and not row.iconTexture)
+                assert(row.toolTip.description:find(labels[entry],1,true))
+                assert(row.target.targets[1].item==entry and #row.target.targets==1)
+            end
+            local little=assert(pourDestination(child,tiny))
+            assert(little.name=="1% | 0.003L / 0.5L","small real increments must not round away the litres")
+        end
+        assert(#calls==0,"building both mirrored menus must not pour")
+        for _,entry in ipairs({a,b,c}) do
+            local child=render()
+            local row=assert(pourDestination(child,entry))
+            assert(row.onSelect(row.target))
+            assert(calls[#calls].targets[1].item==entry and #calls[#calls].targets==1)
+        end
     end)
     restore();assert(ok,err)
 end)
@@ -1574,8 +1698,9 @@ test("unstacked shelf milk lists the exact two same-name empty buckets only when
         f.preferences.pourLootToLoot=true
         local both=openMilk()
         local a,b=assert(pourDestination(both.child,main)),assert(pourDestination(both.child,other))
-        assert(a~=b and a.name:find("Empty Bucket | Main inventory",1,true)
-            and b.name:find("Empty Bucket | Displayed Kitchen Shelf",1,true))
+        assert(a~=b and a.name=="0% | 0.0L / 1.0L" and b.name=="0% | 0.0L / 0.5L")
+        assert(a.toolTip.description:find("Empty Bucket | Main inventory",1,true)
+            and b.toolTip.description:find("Empty Bucket | Displayed Kitchen Shelf",1,true))
         b.onSelect(b.target)
         assert(#calls==1 and calls[1].source.item==milk and calls[1].targets[1].item==other)
     end)
@@ -1791,6 +1916,7 @@ test("visible native destination stack renders one direct least-filled row but F
         assert(not pourDestination(menu,main) and not pourDestination(menu,fuller))
         local direct=assert(pourDestination(menu,large))
         assert(not direct.child and pourDestination(menu,equipped),"same name in another holder is independent")
+        assert(direct.name=="2% | 0.2L / 10.0L" and direct.toolTip.description:find("3 compatible vessels in this stack",1,true))
         direct.onSelect(direct.target)
         assert(#calls==1 and #calls[1].targets==1 and calls[1].targets[1].item==large)
         local fill=needed(render(),"Fill All")
@@ -1805,6 +1931,30 @@ test("visible native destination stack renders one direct least-filled row but F
           and calls[3].targets[3].item==fuller and calls[3].targets[4].item==main)
     end)
     restore();assert(ok,err)
+end)
+
+test("exact fixture world hook keeps own pane source and world workflows without inferring a vehicle or sibling compartment", function(f)
+    local bridge = require "LootBox/ContainerWorldMenu"
+    local prior, pick = bridge.current, IsoObjectPicker.Instance.PickVehicle
+    local parent, owner, other = Menu:new(), fixtureObject(f, f.crate), container("freezer", false)
+    local objects = {owner}
+    owner.getContainerCount = function()return 2 end
+    owner.getContainerByIndex = function(_, i)return i==0 and f.crate or other end
+    bridge.current = function(index, menu, targets)
+        if index==0 and menu==parent and targets==objects then return other end
+    end
+    IsoObjectPicker.Instance.PickVehicle = function()error("no world-space mouse in pane context")end
+    local ok, err = pcall(function()
+        Menus.worldMenu(0, parent, objects, false)
+        assert(not option(parent,"LootBox"),"synthetic world event must not duplicate the pane's LootBox group")
+        Menus.containerMenu(0, parent, other, objects)
+        local sub = needed(parent, "LootBox").child
+        assert(count(parent,"LootBox")==1 and count(sub,"Open LootBox")==1 and count(sub,"Loot contents (Smart Load)")==1)
+        assert(not option(sub,"Remember this vehicle") and needed(sub,"Clean and delete"))
+        click(sub,"Loot contents (Smart Load)"); assert(f.quick.request.sourceContainer==other)
+    end)
+    bridge.current, IsoObjectPicker.Instance.PickVehicle = prior, pick
+    assert(ok,err)
 end)
 
 assert(#failures == 0, table.concat(failures, "\n"))

@@ -196,4 +196,22 @@ test('NeatUI receives unclaimed controls, not consumed endpoints that would sele
  NeatInventory.Settings={panel={}};press(199);assert(inventory.y==-885);NeatInventory.Settings.panel=nil
  NeatInventory.Category={popup={}};press(199);assert(inventory.y==-885);NeatInventory.Category.popup=nil
 end)
+test('Home still suppresses hover when a late inventory callback enables keyboard cursor',function()
+ local p=inventory;p.y=-240;p.over=true;p.doController=false;p.ninvKeyMode=false
+ assert(N.onKeyStartPressed(199));assert(p.y==0)
+ p.ninvKeyMode=true;p.doController=true;p.joyselection=0
+ p:updateTooltip()
+ assert(p.mouseOverOption==0 and not p.toolRender.visible and not p.doController)
+ joypad=0;p.doController=true;p:updateTooltip();assert(p.toolRender.visible)
+ joypad=-1;p.doController=false
+end)
+test('Home and End also work over the provider inventory chrome, not a foreign page',function()
+ NeatInventory.Keys.hoveredPage=function() return ip end
+ inventory.over=false;loot.over=false;inventory.y=-50
+ assert(N.onKeyStartPressed(199) and inventory.y==0)
+ assert(N.onKeyStartPressed(207) and inventory.y==-885)
+ NeatInventory.Keys.hoveredPage=function() return {} end
+ assert(not N.onKeyStartPressed(199) and inventory.y==-885)
+ NeatInventory.Keys.hoveredPage=nil;inventory.over=true
+end)
 print(count..' inventory navigation cases passed (native UI/input boundaries doubled)')

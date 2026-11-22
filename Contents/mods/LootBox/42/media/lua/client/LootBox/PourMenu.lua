@@ -2,6 +2,8 @@ local Pour = require "LootBox/Pour"
 local Inventory = require "LootBox/PourInventory"
 local Stacks = require "LootBox/PourStacks"
 
+local WorldMenu = require "LootBox/WorldFluidMenu"
+
 local Menu = {}
 local marker = {}
 
@@ -53,6 +55,16 @@ local function unavailable(parent,branded,item,tooltip,reason)
     return true
 end
 
+local function liters(amount)
+    -- Preserve native three-decimal precision; a whole number still reads as 1.0L.
+    return (string.format("%.3f",amount):gsub("0+$",""):gsub("%.$",".0"))
+end
+
+local function destinationText(entry)
+    local percent=math.floor(math.min(1,entry.amount/entry.capacity)*100+0.5)
+    return string.format("%d%% | %sL / %sL",percent,liters(entry.amount),liters(entry.capacity))
+end
+
 local function run(pick)
     if pick.click.used then return nil,"Reopen the inventory menu to start another pour." end
     pick.click.used=true
@@ -82,10 +94,13 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
     local holder=members[1]:getContainer()
     local viewed=Pour.displayed(index,holder)
     local snapshot=Inventory.snapshot(getSpecificPlayer(index),instance.world,holder,viewed)
+    -- Empty carried vessels still need Fill From even when they cannot pour.
+    local worldOK,world=pcall(WorldMenu.inventory,index,parent,branded,members,snapshot,instance,options,tooltip)
+    if not worldOK then world=nil end
     -- A collapsed row delegates the choice; an expanded individual never does.
     local plan,reason
     if #members==1 then plan,reason=Inventory.plan(snapshot,members[1],options,true)
-    else plan,reason=Inventory.choose(snapshot,members,options) end
+    else plan,reason=Inventory.choose(snapshot,members,options,function(e) return #WorldMenu.destinations(world,e)>0 end) end
     if not plan then
         -- For an exact non-empty loot row explain a source failure rather than
         -- leaving an ambiguous invisible shortcut. Never authorize the row.
@@ -113,6 +128,7 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
         end
     end
     local targets,fill=plan.targets,plan.fill
+    local fixtures=WorldMenu.destinations(world,plan.source)
 
     local source=string.format("%s | %.3f L available",plan.source.label,plan.source.amount)
     if #members>1 then
@@ -127,7 +143,7 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
         local root=host:addOption("Pour Into",marker,nil)
         if not root then return end
         builtinIcon(root,"Item_WaterDrop",item)
-        if #targets==0 then
+        if #targets==0 and #fixtures==0 then
             root.notAvailable=true
             local help="No compatible destination with space. Carry an empty or compatible vessel."
             if plan.source.scope=="loot" and not options.pourLootToLoot then
@@ -151,15 +167,14 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
             tooltip(batch,"Fill All",string.format("%s. %d destination(s), %s; %s room left first within each group.",
                 source,#fill,order,options.pourFillOrder=="largest-first" and "most" or "least"))
         end
+        WorldMenu.addTargets(child,world,fixtures,plan.source,click)
         -- A direct stack entry binds one exact vessel; Fill All uses the whole list.
         for _,group in ipairs(groups) do
             local e=group.entry
-            local title=e.label
-            if group.count>1 then title=title.." ("..group.count.." stacked)" end
-            local row=choice(title,{e})
+            local row=choice(destinationText(e),{e})
             if row then
                 row.iconTexture,row.itemForTexture=nil,e.item
-                local detail=group.count>1 and " Uses the least-filled compatible vessel in this stack." or ""
+                local detail=group.count>1 and (" Uses the least-filled of "..group.count.." compatible vessels in this stack.") or ""
                 tooltip(row,"Pour Into",source..". Destination: "..e.label.."."..detail.." Starts one native pour.")
             end
         end

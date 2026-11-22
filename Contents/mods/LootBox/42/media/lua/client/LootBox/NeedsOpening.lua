@@ -1,3 +1,4 @@
+local CreatedItemReceipt = require "LootBox/CreatedItemReceipt"
 local Opening = {}
 local safeName, sharpName = "OpenCannedFood", "OpenCannedFoodWithKnifeOrSharpStoneFlake"
 local prepared = setmetatable({}, {__mode = "k"})
@@ -178,6 +179,21 @@ local function action(player, selected, guard)
     if not native then return end
     prepared[native] = {selected = selected, surface = surface, multiplayer = isClient()}
     if not Opening.preflight(player, selected, native) or guard() ~= true then return end
+    if not isClient() then
+        -- Only SP exposes the result of the native producer in this Lua VM.
+        -- Attach the watcher to the owned action, not the weak-key registry.
+        native.lootboxCreatedItemReceipt = CreatedItemReceipt.begin(native, {
+            inventory = function() return player:getInventory() end,
+            matches = function(created) return instanceof(created, "Food") == true end,
+            anchor = function()
+                return selected.source == player:getInventory()
+                    and not (selected.item.getWorldItem and selected.item:getWorldItem())
+                    and matchesIds(selected.source, {[selected.itemId]=false})
+            end,
+            clock = getTimestampMs,
+        })
+        if not native.lootboxCreatedItemReceipt then return end
+    end
     return native
 end
 
@@ -282,11 +298,15 @@ function Opening.output(player, selected, native)
             or not native.logic then return end
         local main = player:getInventory()
         if selected.source ~= main or carried(main, selected.item) then return end
-        local outputs = native.logic:getRecipeData():getAllCreatedItems()
-        if outputs:size() ~= 1 then return end
+        local data, creation = native.logic:getRecipeData(), native.lootboxCreatedItemReceipt
+        if not creation then return end
+        local outputs = data:getAllCreatedItems()
+        if outputs:size() ~= 1 or not data:getAllConsumedItems():contains(selected.item) then return end
         local created = outputs:get(0)
-        if created ~= selected.item and carried(main, created)
-            and require("LootBox/TillFull").automaticEffects(created, "food") then return created end
+        if created == selected.item or created:getID() == selected.itemId
+            or not carried(main, created) or not creation:complete(native, {item=created}) then return end
+        local confirmed, output = creation:poll()
+        if confirmed and require("LootBox/TillFull").automaticEffects(output, "food") then return output end
     end)
     if ok then return item end
 end

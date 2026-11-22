@@ -1172,7 +1172,11 @@ end)
 
 test("install registers a native rebindable F7 action without duplicating existing bindings", function()
     local registrations, menuInstalls = {tick = {}, key = {}, start = {}}, 0
-    local options = {addTitle = function() end, addDescription = function() end, addButton = function() end}
+    local options = {addTitle = function() end, addDescription = function() end, addButton = function() end,
+        getOption = function() end, addTickBox = function(_, id, _, default)
+            assert(id == "activateClickedContainer" and default == true)
+            return {getValue = function() return default end}
+        end}
     PZAPI = {ModOptions = {getOptions = function() return options end}}
     Events = {OnTick = {Add = function(fn) registrations.tick[#registrations.tick + 1] = fn end},
         OnGameStart = {Add = function(fn) registrations.start[#registrations.start + 1] = fn end},

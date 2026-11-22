@@ -3,6 +3,8 @@ require "ISUI/ISInventoryPaneContextMenu"
 
 -- Own one native wrapper's actions, never the player's entire queue. Consumption
 -- and its server effects remain native; a completed client action is not an MP ack.
+local OpenFull = require "LootBox/OpenFull"
+local CreatedItemReceipt = require "LootBox/CreatedItemReceipt"
 local Native = {}
 Native.__index = Native
 local TIMEOUT = 120000
@@ -130,6 +132,11 @@ local function observeNeeds(self, state, action)
     end
 end
 
+local function openingResult(kind, item)
+    if kind == "food" then return instanceof(item, "Food") == true end
+    return item:getFluidContainer() ~= nil
+end
+
 local function hook(self, state, action)
     local originalStop, originalPerform, originalStart = action.stop, action.perform, action.start
     local originalCancel = action.forceCancel
@@ -190,16 +197,31 @@ local function hook(self, state, action)
                 settleReturn(self, state, false)
             end
         end
-        if ok and performed == state.consume and state.opening and not isClient() then
+        if ok and performed == state.consume and state.opening and performed.craftStarted ~= true then
+            state.reason = "The native opening did not start successfully; no consumption was queued"
+        end
+        if ok and performed == state.consume and state.opening and not state.reason and not isClient() then
             local captured, captureProblem = pcall(function()
-                local outputs = performed.logic:getRecipeData():getAllCreatedItems()
+                local data, created = performed.logic:getRecipeData()
+                local outputs = data:getAllCreatedItems()
                 for index = 0, outputs:size() - 1 do
                     local item = outputs:get(index)
-                    if (state.kind == "food" and instanceof(item, "Food"))
-                        or (state.kind == "fluid" and item:getFluidContainer()) then
-                        if state.output then error("Opening produced multiple consumable items") end
-                        state.output = item
+                    if openingResult(state.kind, item) then
+                        if created then error("Opening produced multiple consumable items") end
+                        created = item
                     end
+                end
+                if created and created ~= state.item then
+                    if not data:getAllConsumedItems():contains(state.item) then
+                        error("The native recipe did not consume the selected package")
+                    end
+                    if created:getContainer() ~= self.player:getInventory() then error("The opened item was not kept in inventory") end
+                    state.recipeConsumed = true
+                    local receipt = state.creation
+                    if not receipt or created:getID() == state.itemId then error("The opening output did not have a fresh item identity") end
+                    local accepted, failure = receipt:complete(performed, {item=created})
+                    if not accepted then error(failure) end
+                    state.hasCreatedReceipt = true
                 end
             end)
             if not captured then state.reason = "Could not identify the opened item: " .. tostring(captureProblem) end
@@ -217,6 +239,7 @@ function Native:cancel(reason)
     local state = self.active
     if not state then return true end
     state.reason = state.reason or reason or "Cancelled"
+    if state.creation then state.creation:cancel(state.reason) end
     settleReturn(self, state, false)
     local queue = queueFor(self)
     -- Remove only our pending preparation/consumption; leave native restoration
@@ -527,8 +550,10 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     if type(atTarget) ~= "function" then return nil, "A live stop predicate is required" end
     local sourceProblem = missingSource(item)
     if sourceProblem then return nil, sourceProblem end
-    if not recipe
-        or not item:getOpeningRecipe() or getScriptManager():getCraftRecipe(item:getOpeningRecipe()) ~= recipe then
+    local name = item:getOpeningRecipe()
+    local declared = recipe and name and getScriptManager():getCraftRecipe(name) == recipe
+    local plainKind = not declared and recipe and OpenFull.recipeKind(self.player, item, recipe)
+    if not declared and (not plainKind or (plainKind == "fluid") ~= (kind == "fluid")) then
         return nil, "The selected opening recipe changed"
     end
     if interrupted(self.player) then return nil, "The player cannot begin opening now" end
@@ -540,9 +565,14 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     local ok, target = pcall(atTarget)
     if not ok then return nil, "Could not read current fullness" end
     if target then return nil, "Already at the requested limit" end
+    if isClient() then
+        local exact, problem = OpenFull.networkItem(self.player:getInventory(), item:getContainer(), item:getID(), item:getFullType())
+        if exact ~= item then return nil, problem or "The selected package could not be uniquely identified" end
+    end
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget,
         opening = true, kind = kind, item = item, itemId = item:getID(), fullType = item:getFullType(), source = item:getContainer(),
-        wasSealed = item:isSealed(), chooseOpened = kind == "food" and isClient()}
+        wasSealed = item:isSealed(),
+        chooseOpened = kind == "food" and isClient() and not OpenFull.keeps(self.player, item, recipe)}
     self.active = state
     -- Zero means opening only. Native Open-and-Eat percentages enqueue a
     -- separate, unowned consumption action, including through the MP server.
@@ -550,7 +580,7 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     ISEntityUI.HandcraftStart = function(player, logic, force, addToQueue, eatPercentage)
         local action = startCraft(player, logic, force, false, eatPercentage)
         local bound = false
-        if action and action.character == self.player and action.craftRecipe == recipe
+        if action and not force and not action.force and action.character == self.player and action.craftRecipe == recipe
             and action.manualInputs and action.eatPercentage == 0 then
             for _, inputs in pairs(action.manualInputs) do
                 for index = 0, inputs:size() - 1 do
@@ -562,6 +592,24 @@ function Native:beginOpen(item, kind, recipe, atTarget)
             state.reason = "The native recipe could not bind the selected item"
             state.restoreFrom = #queue.queue
             return nil
+        end
+        if not isClient() then
+            local receipt, failure = CreatedItemReceipt.begin(action, {
+                inventory = function() return self.player:getInventory() end,
+                matches = function(created) return openingResult(kind, created) end,
+                anchor = function()
+                    if not state.recipeConsumed then return nil end
+                    local current, problem = OpenFull.networkItem(self.player:getInventory(), state.source, state.itemId, state.fullType)
+                    if problem then return nil, problem end
+                    if not current and not (state.item.getWorldItem and state.item:getWorldItem()) then return true end
+                end,
+                clock = now, timeoutMs = 2000,
+            })
+            if not receipt then
+                state.reason, state.restoreFrom = failure, #queue.queue
+                return nil
+            end
+            state.creation = receipt
         end
         if addToQueue then ISTimedActionQueue.add(action) end
         return action
@@ -594,23 +642,22 @@ end
 
 -- Network pickup can reconstruct a vessel. Match only the original network ID
 -- among direct source/main-inventory members, never by type or food output.
-local function openedNetworkVessel(self, state)
-    local found, seen = nil, {}
-    for _, container in ipairs({state.source, self.player:getInventory()}) do
-        if not seen[container] then
-            seen[container] = true
-            local items = container:getItems()
-            for index = 0, items:size() - 1 do
-                local item = items:get(index)
-                if item:getContainer() == container and item:getID() == state.itemId then
-                    if found and found ~= item then return nil, "Ambiguous opened vessel identity" end
-                    if item:getFullType() ~= state.fullType then return nil, "Opened vessel identity changed" end
-                    found = item
-                end
-            end
-        end
+local function openedNetworkItem(self, state)
+    if not state.wasSealed then return end
+    local main = self.player:getInventory()
+    -- During delayed replication, cheap direct Java lookups can rule out a
+    -- ready candidate. The recursive uniqueness audit is mandatory before use.
+    if main.getItemWithID and state.source.getItemWithID then
+        local held = main:getItemWithID(state.itemId)
+        local original = state.source ~= main and state.source:getItemWithID(state.itemId) or nil
+        if held and original and held ~= original then return nil, "Ambiguous opened item identity" end
+        local candidate = held or original
+        if not candidate or candidate:isSealed() then return end
     end
-    if found and not found:isSealed() and found:getFluidContainer() then return found end
+    local found, problem = OpenFull.networkItem(main, state.source, state.itemId, state.fullType)
+    if problem then return nil, problem end
+    if found and not found:isSealed() and ((state.kind == "fluid" and OpenFull.vesselFluid(found))
+        or (state.kind == "food" and instanceof(found, "Food") and not found:getScriptItem():isCantEat())) then return found end
 end
 
 local function pollAuto(self, state, queue)
@@ -722,27 +769,37 @@ function Native:poll()
     if state.reason then self.active = nil; return false, state.reason end
     if not state.performed then self.active = nil; return false, "Native consumption ended without completion" end
     if state.opening then
+        if liveCancellation(self, state) then
+            self.active = nil
+            return false, "Opening was interrupted; no consumption was queued"
+        end
         if state.chooseOpened then
             self.active = nil
             return true, "chooseOpened"
         end
-        local item = state.output or state.item
-        if isClient() and state.kind == "fluid" then
+        local item = state.item
+        if state.hasCreatedReceipt then
+            local confirmed, created = state.creation:poll()
+            if confirmed == nil then return nil end
+            if not confirmed then self.active = nil; return false, created end
+            item = created
+        end
+        if isClient() then
             local problem
-            item, problem = openedNetworkVessel(self, state)
+            item, problem = openedNetworkItem(self, state)
             if problem then self.active = nil; return false, problem end
         end
         local source = item and item:getContainer()
         if source and not item:isSealed()
-            and (state.output or (state.wasSealed and item:getID() == state.itemId))
-            and (source == state.source or source == self.player:getInventory()) then
+            and (state.hasCreatedReceipt or (state.wasSealed and item:getID() == state.itemId))
+            and (source == self.player:getInventory() or (not state.hasCreatedReceipt and source == state.source)) then
             self.active = nil
-            return true, "opened", item
+            return true, "opened", item, not state.hasCreatedReceipt and "sameItem" or nil
         end
         state.confirmUntil = state.confirmUntil or now() + 2000
         if now() < state.confirmUntil then return nil end
         self.active = nil
-        return false, "Opening result was not confirmed; no consumption was queued"
+        return false, "Opening result was not confirmed. Choose Til Full on the opened item; no consumption was queued."
     end
     self.active = nil
     return true, "complete", nil, state.receipt

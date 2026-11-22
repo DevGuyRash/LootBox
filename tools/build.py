@@ -43,7 +43,11 @@ def build(output: Path) -> Path:
         for path in files:
             relative = path.relative_to(ROOT).as_posix()
             data = path.read_bytes()
-            package.writestr(relative, data)
+            # Keep release bytes independent of wall-clock time and host OS.
+            entry = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            entry.create_system = 3  # Unix regular file with portable read mode.
+            entry.external_attr = 0o100644 << 16
+            package.writestr(entry, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
             hashes[relative] = hashlib.sha256(data).hexdigest()
     manifest = {"modId": "LootBox", "version": version, "scripts": len(scripts), "files": hashes,
                 "archiveSha256": hashlib.sha256(archive.read_bytes()).hexdigest()}

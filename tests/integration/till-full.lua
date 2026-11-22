@@ -29,10 +29,12 @@ package.loaded['LootBox/TillFullNative'] = {new=function()
 end}
 local Full=require 'LootBox/TillFull'
 local inventory={}
+MoodleType={FOOD_EATEN={}}
 local function player(h,t)
  local p={h=h,t=t}
  function p:getStats() return {get=function(_,k) return k==CharacterStat.HUNGER and p.h or p.t end} end
  function p:getInventory() return inventory end
+ function p:getMoodles() return {getMoodleLevel=function() return p.fullMoodle or 0 end} end
  function p:isDead() return self.dead end
  function p:isAsleep() return false end
  return p
@@ -321,6 +323,58 @@ test('sealed food opens exact selected can before sizing its replacement portion
  created.pending=false;created.opened=output;a.source=nil;c:tick()
  assert(#created.calls==1 and created.calls[1].item==output and c.count==0)
  close(created.calls[1].portion,.25);assert(outside.h==.4)
+end)
+test('peaches from reachable loot use their exact fresh output and need measured after authoritative opening',function()
+ local p=player(.12,0)
+ local shell,actual,decoy=can(30),food(31,.15),food(32,.15)
+ local shelf={}
+ shell.source=shelf;shell.getFullType=function() return 'Base.CannedPeaches' end
+ actual.getFullType=function() return 'Base.CannedPeachesOpen' end;decoy.getFullType=actual.getFullType
+ local worldHere={protected=world.protected,consumptionSource=function(_,item,origin) return item:getContainer()==origin end}
+ local c=assert(Full.new(p,worldHere,{shell},'food',false,recipe,shelf));c:tick()
+ created.pending=true;c:tick();assert(#created.opens==1 and #created.calls==0)
+ created.pending=false;created.opened=actual;shell.source=nil
+ local poll=created.poll;function created:poll() local d,r,item=poll(self);p.h=.03;return d,r,item end
+ c:tick();assert(#created.calls==1 and created.calls[1].kind=='food' and created.calls[1].item==actual)
+ close(created.calls[1].portion,.2);assert(decoy.h==.15)
+end)
+test('canned milk and fruit beverage open as packages but use live thirst with the stock Food action',function()
+ local oldText,oldManager,oldCraft=getText,getScriptManager,CraftRecipeManager
+ local r={getName=function() return 'OpenCannedFood' end,isVanilla=function() return true end,
+     getOutputCount=function() return 1 end}
+ getScriptManager=function() return {getCraftRecipe=function(_,name) return name=='OpenCannedFood' and r or nil end} end
+ CraftRecipeManager={getValidInputScriptForItem=function() return {isKeep=function() return false end} end}
+ getText=function(k) return k=='ContextMenu_Drink' and 'Boire' or k end
+ for _,name in ipairs({'CannedMilk','CannedFruitBeverage'}) do
+  for _,mode in ipairs({'ok','already-quenched','late-quench','unsafe','lost-drink-command','refused-by-moodle'}) do
+   local isMilk=name=='CannedMilk'
+   local h,t=isMilk and .1 or .15,isMilk and .1 or .85
+   local shell,actual,decoy=food(37,0),food(38,h),food(39,h)
+   shell.cantEat=not isMilk
+   shell.getFullType=function() return 'Base.'..name end
+   shell.getOpeningRecipe=function() return isMilk and 'OpenCannedFood' or nil end
+   actual.getFullType=function() return 'Base.'..name..'Open' end;decoy.getFullType=actual.getFullType
+   actual.t=t;actual.getCustomMenuOption=function() return mode~='lost-drink-command' and 'Boire' or nil end
+   local p=player(0,mode=='already-quenched' and 0 or .8)
+   local here={protected=world.protected,consumptionSource=function(_,item,source) return item:getContainer()==source end}
+   local c=assert(Full.new(p,here,{shell},'drinkFood',false,r,inventory))
+   assert(c:alreadySatisfied()==(mode=='already-quenched'));c:tick()
+   if mode=='already-quenched' then assert(#created.opens==0 and #created.calls==0)
+   else
+    assert(#created.opens==1 and #created.calls==0);shell.source=nil;created.opened=actual
+    if mode=='unsafe' then actual.unsafe=true end
+    if mode=='refused-by-moodle' then p.fullMoodle=3 end
+    p.t=mode=='late-quench' and 0 or t*.2;c:tick()
+    if mode=='ok' then
+     assert(#created.calls==1 and created.calls[1].kind=='food' and created.calls[1].item==actual)
+     close(created.calls[1].portion,.2)
+     actual.h=h*.8;p.t=0;c:tick();assert(c.count==1 and not c:isBusy())
+    else assert(not c:isBusy() and #created.calls==0,mode) end
+   end
+   assert(decoy.h==h)
+  end
+ end
+ getText,getScriptManager,CraftRecipeManager=oldText,oldManager,oldCraft
 end)
 test('opening a fluid preserves its exact identity and rechecks need before consuming',function()
  local p=player(0,.3);local a,fluid=bottle(10,.5);a.sealed=true

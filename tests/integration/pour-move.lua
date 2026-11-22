@@ -151,6 +151,25 @@ assert(not f.action:isValid(), "stock validator remains authoritative after requ
 f.action:stop()
 assert(f.move:poll()==false and f.item.parent==f.source and f.writes==0)
 print("PASS loss of stock admission after submission never continues or reports success")
+reset(true);assert(begin());f.reject[12]=true
+f.action:stop()
+local allowed, why, item_, retained=f.move:poll()
+assert(not allowed and why=="The server rejected the inventory move." and not item_ and retained==f.item and f.writes==0)
+reset(true);assert(begin());f.reject[12]=true
+place(arrival(),f.dest)
+f.action:stop()
+allowed,why,item_,retained=f.move:poll()
+assert(not allowed and why=="The server rejected the inventory move." and not retained, "ambiguous replicas are never reported retained")
+reset(true);assert(begin())
+f.action:stop()
+allowed,why,item_,retained=f.move:poll()
+assert(not allowed and why=="The native inventory move stopped without a confirmed result." and not retained)
+reset(true);assert(begin());f.invalid=true
+assert(not f.action:isValid())
+f.action:stop()
+allowed,why,item_,retained=f.move:poll()
+assert(not allowed and why=="The game's inventory-move validation failed." and not retained, "local validity is not a server rejection")
+print("PASS terminal evidence distinguishes server refusal, stock invalidation and a stop without receipt")
 
 
 -- Optional stock Lua lane. Supply the root of installed media/lua or the
@@ -195,7 +214,7 @@ if arg and arg[1] then
     end
     assert(loadfile(root.."/client/TimedActions/ISInventoryTransferAction.lua"))()
     assert(loadfile(root.."/shared/TimedActions/ISInventoryTransferUtil.lua"))()
-    local function stockSetup()
+    local function stockSetup(reference)
         reset(true)
         for _,c in ipairs({f.source,f.dest}) do
             c.isVehicleSeat=function()return false end
@@ -230,7 +249,9 @@ if arg and arg[1] then
             a.action={setWaitForFinished=noop,setTime=noop,stopTimedActionAnim=noop,setLoopedAction=noop,
                 getJobDelta=function()return 0 end,forceComplete=function()a:perform()end}
         end
-        assert(begin())
+        if reference then
+            ISTimedActionQueue.add(ISInventoryTransferUtil.newInventoryTransferAction(f.player,f.item,f.source,f.dest))
+        else assert(begin()) end
         local a=f.q.current
         assert(a:waitToStart() and not f.request)
         f.now=f.now+11
@@ -252,14 +273,22 @@ if arg and arg[1] then
     f.now=f.now+126
     local settled,_,actual=f.move:poll()
     assert(settled and actual==remote and f.writes==0)
+    a=stockSetup(true)
+    f.reject[12]=true
+    a:update()
+    assert(f.removed[1]==12 and f.removed[2] and f.item.parent==f.source and #f.dest.items==0)
     a=stockSetup()
     f.reject[12]=true
     a:update()
-    assert(f.removed[1]==12 and f.removed[2] and f.move:poll()==false and f.item.parent==f.source)
+    local declined,why,_,stayed=f.move:poll()
+    assert(f.removed[1]==12 and f.removed[2] and declined==false and f.item.parent==f.source)
+    assert(why=="The server rejected the inventory move." and stayed==f.item)
     a=stockSetup()
     f.trading=true
     assert(not a:isValid(), "ordinary stock validator stops while trading becomes active")
     a:stop()
-    assert(f.removed[1]==12 and f.removed[2] and f.move:poll()==false and f.item.parent==f.source and f.writes==0)
-    print("PASS pinned stock inventory action: exact MP request, positive result, delayed Add/Remove, and rejection")
+    declined,why,_,stayed=f.move:poll()
+    assert(f.removed[1]==12 and f.removed[2] and declined==false and f.item.parent==f.source and f.writes==0)
+    assert(why=="The game's inventory-move validation failed." and not stayed)
+    print("PASS pinned stock inventory action: exact MP request, positive result, delayed Add/Remove, stock screening and rejection")
 end

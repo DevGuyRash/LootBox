@@ -1,3 +1,31 @@
+LootBox 0.9.21
+
+Mounted water dispensers can be topped up with 50-250 mL of plain water at a time on multiplayer servers that advertise matching LootBox files. Empty and partially filled dispensers were verified with the normal player role on Build 42.22.2, including a reconnect. Does not enable this action on servers that do not advertise matching LootBox or replace the existing single-player/manual actions.
+
+Includes nearby and world fluid sources, filling equipped vessels in place, and exact container context menus and focus for vanilla inventory and supported NeatUI sections. Native access, compatibility and capacity still apply.
+
+LootBox 0.9.20
+
+Options bound to the exact selected fixture or container stay at the top level. The rest remain under World Actions. No fixture names or mod-specific handlers.
+
+LootBox 0.9.19
+
+Right-click a container icon or a NeatUI section to get that exact container's pane actions. Stock world actions and other mods' world entries are available under World Actions. No per-mod rules.
+
+LootBox 0.9.18
+
+Fill worn, held or attached fluid vessels in place. A hydration pack can receive liquid without being taken off or emptied of gear. Stock capacity, permissions and fluid compatibility still apply.
+
+LootBox 0.9.17
+
+Pour Into now lists nearby accepting world fixtures. Right-click a carried vessel for Fill From, or a world fixture for individual pours and ordered Fill All. Collectors can receive and supply compatible fluids; plumbed sinks follow stock plumbing; ponds, rivers and lakes supply water without becoming writable reservoirs. Uses stock actions and preserves hands for world deposits.
+
+LootBox 0.9.16
+
+Adds a default-on Mod Options switch to activate the container you click. Right-clicking a vanilla container icon or a NeatUI section title selects the exact container before its normal menu. Clicking an item in either window focuses its source without changing what a normal click, multiselect or drag does. Mixed-source stacks stay ambiguous until a single member is clicked. Turning this off keeps all existing menus.
+
+Fixes a vehicle behind the inventory window taking precedence over a clicked fixture in Shelf Aware and other world-menu providers that consult the world-scaled pointer. Actual world clicks still pick vehicles normally.
+
 LootBox 0.9.12
 
 Pour Into and Fill All move liquids between compatible vessels in your inventory, carried bags, and visible nearby loot. Stock dropped vessels pour in place. Collapsed stacks use the least-filled eligible vessel. Loot-to-loot targets are optional and off by default.

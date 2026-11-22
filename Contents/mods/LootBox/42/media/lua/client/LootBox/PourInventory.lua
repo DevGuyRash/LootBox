@@ -203,6 +203,19 @@ local function mixture(snapshot,entry)
     return result
 end
 
+function Pour.sortFill(fill,options)
+    local weight=options.pourFillScope=="equipped-first" and {equipped=1,main=2,carried=3,loot=4}
+        or {main=1,equipped=2,carried=3,loot=4}
+    table.sort(fill,function(a,b)
+        if a.scope~=b.scope then return weight[a.scope]<weight[b.scope] end
+        if a.free~=b.free then
+            if options.pourFillOrder=="largest-first" then return a.free>b.free end
+            return a.free<b.free
+        end
+        return order(a,b)
+    end)
+end
+
 local function plan(snapshot, sourceItem, options, budget, capture)
     options=options or {}
     local source=Pour.source(snapshot,sourceItem)
@@ -241,16 +254,7 @@ local function plan(snapshot, sourceItem, options, budget, capture)
         local free=string.format("%.3f",entry.free):gsub("0+$",""):gsub("%.$","")
         entry.label=entry.label.." | "..free.." L free"
     end
-    local weight=options.pourFillScope=="equipped-first" and {equipped=1,main=2,carried=3,loot=4}
-        or {main=1,equipped=2,carried=3,loot=4}
-    table.sort(fill,function(a,b)
-        if a.scope~=b.scope then return weight[a.scope]<weight[b.scope] end
-        if a.free~=b.free then
-            if options.pourFillOrder=="largest-first" then return a.free>b.free end
-            return a.free<b.free
-        end
-        return order(a,b)
-    end)
+    Pour.sortFill(fill,options)
     return {source=source,targets=targets,fill=truncated and {} or fill,truncated=truncated}
 end
 
@@ -258,7 +262,7 @@ function Pour.plan(snapshot, sourceItem, options, capture)
     return plan(snapshot,sourceItem,options,nil,capture)
 end
 
-function Pour.choose(snapshot, items, options)
+function Pour.choose(snapshot, items, options, extraTarget)
     if not snapshot or snapshot.truncated or type(items)~="table" or #items>MAX_ITEMS then
         return nil,"The full stack could not be checked; select one exact vessel."
     end
@@ -276,7 +280,7 @@ function Pour.choose(snapshot, items, options)
         if mixture(snapshot,candidate) then
             local chosen,why=plan(snapshot,candidate.item,options,budget,true)
             if not chosen then return nil,why end
-            if #chosen.targets>0 then return chosen end
+            if #chosen.targets>0 or (extraTarget and extraTarget(chosen.source)) then return chosen end
         end
     end
     return nil,"No selected vessel can pour into an eligible destination."

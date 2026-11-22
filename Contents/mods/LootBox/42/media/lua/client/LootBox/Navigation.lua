@@ -32,9 +32,10 @@ function Navigation.scroll(pane, action)
     return true
 end
 
-local function hoveredPane()
+local function hoveredPane(endpoint, neat)
+    local inventoryPage, lootPage = getPlayerInventory(0), getPlayerLoot(0)
     local result
-    for _, page in pairs({getPlayerInventory(0), getPlayerLoot(0)}) do
+    for _, page in pairs({inventoryPage, lootPage}) do
         local pane = page and page.inventoryPane
         if pane and page:isVisible() and not page.isCollapsed and pane:isVisible()
             and pane:isMouseOver() then
@@ -42,7 +43,31 @@ local function hoveredPane()
             result = pane
         end
     end
+    if not result and endpoint and neat and neat.Keys and neat.Keys.hoveredPage then
+        -- Some inventory views receive keyboard input over the page chrome,
+        -- outside the rows' hit box. Use that same scope for view-only jumps.
+        local page = neat.Keys.hoveredPage()
+        if page and (page == inventoryPage or page == lootPage) and page:isVisible() and not page.isCollapsed
+            and page.inventoryPane and page.inventoryPane:isVisible() then
+            return page.inventoryPane
+        end
+    end
     return result
+end
+
+local function leaveKeyboardCursor(pane)
+    local keys = NeatInventory and NeatInventory.Keys
+    if pane.ninvKeyMode and keys and keys.leaveKeyMode then keys.leaveKeyMode(pane) end
+end
+
+local function clearHover(pane)
+    pane.mouseOverOption, pane.buttonOption = 0, 0
+    pane:hideButtons()
+    if pane.toolRender and pane.toolRender:isVisible() then
+        pane.toolRender:removeFromUIManager()
+        pane.toolRender:setVisible(false)
+    end
+    if pane.parent.onCharacter then Key.setHighlightDoors(pane.player, nil) end
 end
 
 -- A changed scroll offset is not mouse input. Use screen coordinates, not
@@ -54,10 +79,17 @@ local function holdHover(pane)
             local previous = pane[name]
             pane[name] = function(self, ...)
                 local at = self.lootBoxHoverAt
-                if at and not self.doController and self.inventory == at.inventory and self:isMouseOver()
-                    and getMouseX() == at.x and getMouseY() == at.y then
-                    self.mouseOverOption = 0
-                    return
+                if at and self.inventory == at.inventory and getMouseX() == at.x and getMouseY() == at.y then
+                    local player = getSpecificPlayer(self.player)
+                    if player and player:getJoypadBind() == -1 then
+                        -- A late inventory key listener can create a mouse-only
+                        -- keyboard cursor after the endpoint has been handled.
+                        leaveKeyboardCursor(self)
+                        if not self.doController then
+                            clearHover(self)
+                            return
+                        end
+                    end
                 end
                 self.lootBoxHoverAt = nil
                 return previous(self, ...)
@@ -77,13 +109,7 @@ local function holdHover(pane)
         end
     end
     pane.lootBoxHoverAt = {x = getMouseX(), y = getMouseY(), inventory = pane.inventory}
-    pane.mouseOverOption, pane.buttonOption = 0, 0
-    pane:hideButtons()
-    if pane.toolRender and pane.toolRender:isVisible() then
-        pane.toolRender:removeFromUIManager()
-        pane.toolRender:setVisible(false)
-    end
-    if pane.parent.onCharacter then Key.setHighlightDoors(pane.player, nil) end
+    clearHover(pane)
 end
 
 function Navigation.onKeyStartPressed(key)
@@ -108,24 +134,30 @@ function Navigation.onKeyStartPressed(key)
     if endpoint and neat and ((neat.Settings and neat.Settings.panel) or (neat.Category and neat.Category.popup)) then
         return false
     end
-    local pane = hoveredPane()
+    local pane = hoveredPane(endpoint, neat)
     if not pane or pane.dragging or pane.draggingMarquis or not Navigation.scroll(pane, action) then return false end
     if endpoint then
-        if pane.ninvKeyMode and neat and neat.Keys and neat.Keys.leaveKeyMode then
-            neat.Keys.leaveKeyMode(pane)
-        end
+        leaveKeyboardCursor(pane)
         holdHover(pane)
     elseif pane.lootBoxHoverAt then
         pane.lootBoxHoverAt = nil
         pane:onMouseMove(0, 0)
     end
     if GameKeyboard and GameKeyboard.eatKeyPress then GameKeyboard.eatKeyPress(key) end
-    return true, endpoint
+    return true, endpoint, pane
 end
 
-local neatKeyStart, lastNeatKey
+local neatKeyStart, lastNeatKey, endpointPane
 local function dispatch(key)
-    local handled, endpoint = Navigation.onKeyStartPressed(key)
+    local handled, endpoint, pane = Navigation.onKeyStartPressed(key)
+    if endpoint then
+        endpointPane = pane
+    elseif endpointPane and key ~= Keyboard.KEY_LSHIFT and key ~= Keyboard.KEY_RSHIFT
+        and key ~= Keyboard.KEY_HOME and key ~= Keyboard.KEY_END then
+        -- A fresh non-endpoint key may legitimately request a keyboard cursor.
+        endpointPane.lootBoxHoverAt = nil
+        endpointPane = nil
+    end
     if neatKeyStart then
         if not endpoint then
             if key ~= Keyboard.KEY_LSHIFT and key ~= Keyboard.KEY_RSHIFT then lastNeatKey = key end
@@ -161,6 +193,7 @@ function Navigation.install()
             keyBinding[#keyBinding + 1] = {value = binding.name, key = Keyboard[binding.key]}
         end
     end
+    attachNeatKeys()
     Events.OnKeyStartPressed.Add(dispatch)
     Events.OnGameStart.Add(attachNeatKeys)
 end
