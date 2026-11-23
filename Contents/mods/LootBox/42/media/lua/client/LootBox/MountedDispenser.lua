@@ -1,9 +1,10 @@
 local Inventory = require "LootBox/PourInventory"
 local Fluid = require "LootBox/PourNative"
 local CreatedItemReceipt = require "LootBox/CreatedItemReceipt"
-local mountedMPAllowed = require("LootBox/MountedClientPolicy").enabled
+local nativeClientAvailable = require("LootBox/MountedClientPolicy").enabled
 local D = {}
 D.__index = D
+D.MAX_DONORS = 128
 
 local BOTTLE = "Base.WaterDispenserBottle"
 local MAX_ITEMS, MAX_JUGS, MAX_TILE, TIMEOUT = 4096, 64, 128, 20000
@@ -133,17 +134,22 @@ function D.capture(p,objects)
     local ok,found=pcall(options,p,objects)
     return ok and found or nil
 end
-function D.mountedMPEnabled() return mountedMPAllowed()==true end
+function D.mountedMPEnabled() return nativeClientAvailable()==true end
 
--- Preserve the bounded non-default-filled result of both paired diagnostics.
--- Near-zero is not an empty mount. Full-size pours need separate qualification.
+-- Near-zero is not an empty mount. Keep the native empty predicate distinct
+-- from an uncertain small residual before scheduling the native Take.
 local function eligibleMountedReading(reading)
     return reading and (reading.amount>.00005 or reading.amount==0 and reading.fluid:isEmpty()==true)
 end
+local function carriedDonor(e,main)
+    local scope,item=e.scope,e.item
+    return (scope=="main" or scope=="carried" or scope=="equipped") and item==e.object
+        and item:getContainer()==e.container and not item:getWorldItem()
+        and (e.container==main or item:isInPlayerInventory()==true)
+end
 local function inwardAmount(e,reading,main)
-    if e.scope~="main" or e.container~=main or not eligibleMountedReading(reading) then return nil end
-    local size=math.floor(math.min(.25,e.amount-.01,reading.cap-reading.amount-.01)*100+.00001)/100
-    return size>=.05 and size or nil
+    if not carriedDonor(e,main) or not eligibleMountedReading(reading) then return nil end
+    return Fluid.transferAmount(e.amount,reading.fluid:getFreeCapacity())
 end
 function D.plannedMountedTopUp(donor,destination)
     return destination.mpMain and inwardAmount(donor,destination.test,destination.mpMain) or nil
@@ -151,10 +157,11 @@ end
 function D.destinations(p,world,a)
     if a.kind=="mounted" then
         local mp=isClient()
-        if mp and (not D.mountedMPEnabled() or not activeSlot(p,a,true)) then return {} end
+        if mp and (not D.mountedMPEnabled() or not activeSlot(p,a,true)
+            or not SafeHouse.isSafehouseAllowLoot or SafeHouse.isSafehouseAllowLoot(a.square,p)~=true) then return {} end
         local reading=mounted(a)
         if not reading or not FluidUtil or FluidUtil.roundTransfer(reading.cap-reading.amount)<=0
-            or mp and (not eligibleMountedReading(reading) or reading.cap-reading.amount<.06) then return {} end
+            or mp and not eligibleMountedReading(reading) then return {} end
         local item, test=preview(reading)
         local main=p:getInventory()
         if not item or not main:hasRoomFor(p,item) then return {} end
@@ -173,7 +180,8 @@ function D.destinations(p,world,a)
     return out
 end
 function D.donors(p,world)
-    return Inventory.snapshot(p,world,nil,nil).entries
+    local snapshot=Inventory.snapshot(p,world,nil,nil)
+    return snapshot.entries,snapshot.truncated
 end
 function D.canFill(e,destination)
     if e.item==destination.item or not FluidUtil or not FluidContainer
@@ -386,14 +394,42 @@ local function makeAction(self,refit)
     return s
 end
 
-function D.new(p,world,a,donor,destination,allow)
+local function captureDonors(selection)
+    if type(selection)~="table" then return nil end
+    local batch=selection.item==nil
+    local list=batch and selection or {selection}
+    local n,seen,records=#list,{},{}
+    if n<1 or n>D.MAX_DONORS then return nil end
+    for key in pairs(list) do
+        if not finite(key) or key%1~=0 or key<1 or key>n then return nil end
+    end
+    for index=1,n do
+        local entry=list[index]
+        if type(entry)~="table" or not entry.item or not finite(entry.id) or entry.id%1~=0
+            or seen[entry.id] or type(entry.pourSignature)~="table" then return nil end
+        seen[entry.id]=true
+        local reading=sample(entry.fluid,entry.item)
+        local before
+        if reading and near(reading.cap,entry.capacity) and near(reading.amount,entry.amount)
+            and sameMix(reading.mix,entry.pourSignature) then before=reading end
+        local identity={}
+        for key,value in pairs(entry) do identity[key]=value end
+        records[index]={entry=identity,before=before}
+    end
+    return records,batch
+end
+
+function D.new(p,world,a,selection,destination,allow)
     if type(allow)~="function" or not a or not safe(p) or not idle(p) or not activeSlot(p,a) then return nil,"Stand next to the selected dispenser and finish your current action." end
     local mp,observed=isClient(),isClient() and a.kind=="mounted"
     if mp and a.kind~="bare" and (not observed or not D.mountedMPEnabled()) then
         return nil,"Use the stock Take Bottle action first and select the exact detached bottle."
     end
-    local f=setmetatable({player=p,world=world,anchor=a,donor=donor,mp=mp,allow=allow,
-        state="running",phase=a.kind=="mounted" and "take" or "pour",liters=0, count=0,name="Refill Dispenser",fluid=Fluid.new(p)},D)
+    local donors,batch=captureDonors(selection)
+    if not donors then return nil,"The selected sources are invalid, ambiguous, or too numerous; reopen the menu." end
+    local f=setmetatable({player=p,world=world,anchor=a,donors=donors,batch=batch,mp=mp,allow=allow,
+        state="running",phase=a.kind=="mounted" and "take" or "pour",liters=0,count=0,verified=0,skipped=0,cursor=1,
+        name="Refill Dispenser",fluid=Fluid.new(p)},D)
     if a.kind=="mounted" then
         f.original=mounted(a)
         if not sameFluid(f.original,destination.state) then return nil,"The mounted bottle changed; reopen the menu." end
@@ -404,22 +440,21 @@ function D.new(p,world,a,donor,destination,allow)
         f.test=bottle(f.jug,p)
         if not f.jug or f.jugID~=f.jug:getID() or not sameFluid(f.test,f.original) then return nil,"The selected bottle changed; reopen the menu." end
     end
-    f.from=sample(donor.fluid,donor.item)
-    if not f.from or not near(f.from.cap,donor.capacity) or not near(f.from.amount,donor.amount)
-        or not sameMix(f.from.mix,donor.pourSignature) or not f.test or not D.canFill(donor,{item=f.jug,test=f.test}) then
-        return nil,"The game does not allow these fluids to transfer; reopen the menu."
-    end
     if observed then
         local square,main,index,online=a.square,p:getInventory(),p:getPlayerNum(),p:getOnlineID()
         local cell=getCell()
         f.observed={square=square,here=p:getCurrentSquare(),main=main,index=index,online=online,
             cell=cell,queue=qFor(p),x=square:getX(),y=square:getY(),z=square:getZ()}
-        f.amount=inwardAmount(donor,f.original,main)
-        if not f.amount or not finite(online) or online<0 or not cell or not f:scope()
-            or not activeSlot(p,a,true) or not f:observedDonor(f.from) or not f:canUse(false) then
-            return nil,"The mounted bottle, donor, or receiving space does not qualify."
+        if not finite(online) or online<0 or not cell or not f:scope() or not activeSlot(p,a,true) then
+            return nil,"The mounted bottle or receiving space does not qualify."
         end
     end
+    local first,index,amount=f:nextDonor(f.test)
+    if not first then return nil,"No selected source can still pour into the exact bottle; reopen the menu." end
+    f:setDonor(first,amount)
+    f.cursor,f.skipped=index,index-1
+    f.expected=f.original
+    if observed and not f:canUse(false) then return nil,"The mounted bottle, donor, or receiving space does not qualify." end
     return f
 end
 function D:scope()
@@ -435,39 +470,72 @@ end
 function D:guard()
     return self:scope() and activeSlot(self.player,self.anchor,self.observed~=nil)
 end
-function D:carried(observe)
-    local ok,live=Inventory.accessible(self.player,self.world,self.donor,nil,observe)
-    return ok and near(live.capacity,self.from.cap) and live or nil
+function D:carried(observe,record)
+    local r=record or self.currentDonor
+    if not r or not r.before then return nil end
+    local ok,live=Inventory.accessible(self.player,self.world,r.entry,nil,observe)
+    return ok and near(live.capacity,r.before.cap)
+        and (not self.observed or carriedDonor(live,self.observed.main)) and live or nil
 end
-function D:observedDonor(expected)
-    local r=self.observed
-    local live=self:carried(expected~=self.from)
-    if not r or not live or live.container~=r.main or live.item:getWorldItem()
-        or self.world:protected(live.item) or not sameFluid(sample(live.fluid,live.item),expected) then return nil end
-    local exact,problem,holder=CreatedItemReceipt.findCarried(r.main,live.id)
-    return not problem and exact==live.item and holder==r.main and live or nil
+function D:matchedDonor(expected,record)
+    local r=record or self.currentDonor
+    if not r or not expected then return nil end
+    local live=self:carried(expected~=r.before,r)
+    local scope=self.observed
+    if not live or self.world:protected(live.item) or not sameFluid(sample(live.fluid,live.item),expected) then return nil end
+    if scope or self.batch then
+        local exact,problem,holder=CreatedItemReceipt.findCarried(self.player:getInventory(),live.id)
+        if problem or exact~=live.item or holder~=live.container then return nil end
+    end
+    return live
+end
+function D:nextDonor(target)
+    if not target then return nil end
+    for index=self.cursor,#self.donors do
+        local record=self.donors[index]
+        local live=self:matchedDonor(record.before,record)
+        local main=self.observed and self.observed.main
+        if live and live.id~=self.jugID and D.canFill(live,{item=self.jug,test=target,mpMain=main}) then
+            local quantity
+            if main then quantity=inwardAmount(live,target,main)
+            elseif self.batch then quantity=Fluid.transferAmount(live.amount,target.fluid:getFreeCapacity()) end
+            if quantity or not (main or self.batch) then return record,index,quantity,live end
+        end
+    end
+end
+function D:setDonor(record,amount)
+    self.currentDonor,self.donor,self.from,self.amount=record,record.entry,record.before,amount
 end
 function D:heldJug()
     local jug,main=self.jug,self.player:getInventory()
     return jug and jug:getID()==self.jugID and jug:getFullType()==BOTTLE
         and jug:getContainer()==main and main:contains(jug)
 end
+-- During a batch an added same-ID row cannot impersonate the exact jug.
+function D:exactBatchJug()
+    if not self.batch then return true end
+    local main=self.player:getInventory()
+    local found,problem,holder=CreatedItemReceipt.findCarried(main,self.jugID)
+    return not problem and found==self.jug and holder==main
+end
 function D:canUse(refit)
     if not self:guard() then return false end
     if refit then
         return self.anchor.kind=="bare" and not self.anchor.object:getFluidContainer()
-            and self:heldJug() and not self.world:protected(self.jug) and sameFluid(bottle(self.jug,self.player),self.after)
+            and self:heldJug() and self:exactBatchJug()
+            and not self.world:protected(self.jug) and sameFluid(bottle(self.jug,self.player),self.after)
     end
-    local live=self:carried()
-    return sameFluid(mounted(self.anchor),self.original) and live and not self.world:protected(live.item)
-        and sameFluid(sample(live.fluid,live.item),self.from)
+    local live=self:matchedDonor(self.from)
+    return sameFluid(mounted(self.anchor),self.original) and live
         and self.player:getInventory():hasRoomFor(self.player,self.preview)
-        and D.canFill(live,{test=self.test})
+        and D.canFill(live,{test=self.test,mpMain=self.observed and self.observed.main})
 end
 function D:isBusy() return self.state=="running" or self.state=="cancelling" end
 function D:status()
+    local done=self.batch and self.verified or self.count
     return {state=self.state,reason=self.reason,action="pour",intent="pour",hasJob=self:isBusy(),canPreview=not self:isBusy(),
-        canResume=false,canPause=false,done=self.count,moved=self.count,total=1,pourLiters=self.liters,skipped=0,reasons={}}
+        canResume=false,canPause=false,done=done,moved=done,total=self.batch and #self.donors or 1,
+        pourLiters=self.liters,skipped=self.skipped,reasons={}}
 end
 function D:finish(state,reason)
     if not self:isBusy() then return end
@@ -478,14 +546,23 @@ function D:finish(state,reason)
         if not self.silent and PZActionCompletionHUD then
             pcall(function()
                 PZActionCompletionHUD.show(self.player:getPlayerNum(),{brand="LOOTBOX",theme="loot",
-                    title=state=="finished" and "Dispenser refilled" or self.refitRequested and "Dispenser refit requested" or "Dispenser refill stopped",
-                    status=state~="finished" and "stopped" or nil,detail=string.format("%.3f L confirmed",self.liters),note=reason})
+                    title=self.count>0 and "Dispenser refilled" or self.refitRequested and "Dispenser refit requested" or "Dispenser refill stopped",
+                    status=self.count==0 and state~="finished" and "stopped" or nil,
+                    detail=string.format("%.3f L confirmed",self.liters),note=reason})
             end)
         end
     end
 end
+function D:fitted()
+    self.count=1
+    local why="The exact refilled bottle is fitted to its stand."
+    if self.skipped>0 then
+        why=why.." Unavailable or incompatible sources were left untouched."
+        self:finish("finished_with_skips",why)
+    else self:finish("finished",why) end
+end
 function D:stopped(reason)
-    -- Unsuccessful or interrupted sequences never try another item or socket.
+    -- Unverified attempts never trigger another native leg or refit.
     if self.jug or self.phase=="take" and self.launched then
         local ok,held=pcall(self.heldJug,self)
         if ok and held then reason=reason.." The selected bottle is visible in main inventory. Check the stand before fitting."
@@ -514,9 +591,14 @@ end
 local function observedAction(self,refit)
     local p,a=self.player,self.anchor
     return require("LootBox/MountedClientAction").start(p,a,refit and self.jug or nil,{
-        live=function() return self:scope() and self:observedDonor(refit and self.afterDonor or self.from)~=nil end,
+        live=function() return self:scope() and self:matchedDonor(refit and self.afterDonor or self.from)~=nil end,
         admit=function() return self:canUse(refit) end,
-        useItem=function(i) return i~=self.donor.item and not self.world:protected(i) end,
+        useItem=function(i)
+            for _,source in ipairs(self.donors) do
+                if i==source.entry.item or i:getID()==source.entry.id then return false end
+            end
+            return not self.world:protected(i)
+        end,
         slot=function() return slot(a.square,a.facing,true) end,
         jugUnchanged=function() return self:heldJug() and not self.world:protected(self.jug)
             and sameFluid(bottle(self.jug,p),self.after)==true end,
@@ -554,7 +636,7 @@ function D:step()
                     tostring(result.facing),self.jugID,tostring(retired),read.amount,tostring(read.fluid:isInputLocked()),
                     self.donor.id,self.afterDonor.amount,spareReading(self,false))
             end)
-            self.count=1;self:finish("finished","The exact refilled bottle is fitted to its stand.")
+            self:fitted()
         else self:stopped("The stock refit could not be confirmed.") end
         return
     end
@@ -579,7 +661,7 @@ function D:step()
             if s.result then
                 local current=jugRefs(p:getInventory())
                 if activeSlot(p,s.result) and sameFluid(mounted(s.result),self.after) and current and not current[self.jugID] then
-                    self.count=1;self:finish("finished","The exact refilled bottle is fitted to its stand.");return
+                    self:fitted();return
                 end
                 self:stopped("The stand changed after the stock refit.");return
             end
@@ -604,22 +686,27 @@ function D:step()
         end
         local ok,why,amount=self.fluid:poll()
         if ok==nil then return end
-        self.after=bottle(self.jug,p)
+        local after=bottle(self.jug,p)
         local donor=self:carried(true)
         local afterDonor=donor and sample(donor.fluid,donor.item)
-        local observed=self:heldJug() and pairedMix(self.from,self.original,afterDonor,self.after,amount)
-        self.liters=observed and amount or 0
+        local paired=self:heldJug() and pairedMix(self.from,self.before,afterDonor,after,amount)
+        if paired then paired=self:matchedDonor(afterDonor)~=nil and self:exactBatchJug() end
+        if paired then self.liters=self.liters+amount end
         if not ok or self.cancelled then self:stopped(why or "Refill cancelled.");return end
-        if not observed or self.observed and not near(amount,self.amount) then
+        if not paired or (self.observed or self.batch) and not near(amount,self.amount) then
             self:stopped("The exact filled bottle and its mixture could not be confirmed.");return
         end
-        self.afterDonor=afterDonor
+        self.after,self.expected,self.afterDonor=after,after,afterDonor
+        self.verified,self.cursor=self.verified+1,self.cursor+1
         receipt(self,"pour",function()
             return string.format("jug=%.0f jugFrom=%.6f jugTo=%.6f donor=%.0f donorFrom=%.6f donorTo=%.6f transferred=%.6f spares=%s",
-                self.jugID,self.original.amount,self.after.amount,self.donor.id,self.from.amount,afterDonor.amount,
+                self.jugID,self.before.amount,self.after.amount,self.donor.id,self.from.amount,afterDonor.amount,
                 amount,spareReading(self,false))
         end)
-        self.phase="refit";return
+        if not self.batch or self.cursor>#self.donors or FluidUtil.roundTransfer(after.fluid:getFreeCapacity())<=0 then
+            self.phase="refit"
+        end
+        return
     end
     if self.cancelled or not self:guard() or not idle(p) then self:stopped("Refill cancelled or no longer in reach.");return end
     if self.phase=="take" or self.phase=="refit" then
@@ -638,18 +725,31 @@ function D:step()
         self.launched=true;return
     end
     local target=bottle(self.jug,p)
-    local live=self:carried()
-    if not self:heldJug() or not sameFluid(target,self.original) or not live or not sameFluid(sample(live.fluid,live.item),self.from)
-        or self.world:protected(self.jug) or self.world:protected(live.item) then self:stopped("The selected vessels changed.");return end
+    if self.anchor.kind~="bare" or self.anchor.object:getFluidContainer()
+        or not self:heldJug() or not self:exactBatchJug() or not sameFluid(target,self.expected)
+        or self.world:protected(self.jug) then self:stopped("The exact bottle or stand changed.");return end
+    local record,index,planned,live=self:nextDonor(target)
+    if not record then
+        if self.batch and self.after then
+            self.skipped=self.skipped+#self.donors-self.cursor+1
+            self.phase="refit";return
+        end
+        self:stopped("No selected source still qualifies for this bottle.");return
+    end
+    self.skipped,self.cursor=self.skipped+index-self.cursor,index
+    self:setDonor(record,planned)
+    self.before=target
+    self.pourTailAt=nil
     local checkedAt
     local ok,why,amount=self.fluid:start(live.item,self.jug,self.amount,function(_,jug,phase)
         if not self:guard() or jug~=self.jug or not self:heldJug() or self.world:protected(jug)
             or self.world:protected(live.item) then return false end
         local donor=self:carried(phase=="observe")
         local fc=bottleFluid(jug,p)
-        if not donor or not fc or not near(fc:getCapacity(),self.original.cap) then return false end
+        if not donor or not fc or not near(fc:getCapacity(),self.before.cap) then return false end
         if phase=="admit" then
-            return sameFluid(sample(donor.fluid,donor.item),self.from) and sameFluid(sample(fc,jug),self.original)==true
+            return self:matchedDonor(self.from)~=nil and self:exactBatchJug()
+                and sameFluid(sample(fc,jug),self.before)==true
         end
         local at=getTimestampMs()
         if not checkedAt or at-checkedAt>=500 then
@@ -657,13 +757,13 @@ function D:step()
                 local reading=sample(donor.fluid,donor.item)
                 if not reading or not sameMix(reading.mix,self.from.mix) then return false end
             end
-            if near(fc:getAmount(),self.original.amount) and not sameFluid(sample(fc,jug),self.original) then return false end
+            if near(fc:getAmount(),self.before.amount) and not sameFluid(sample(fc,jug),self.before) then return false end
             checkedAt=at
         end
         return true
-    end)
+    end,self.observed~=nil)
     if not ok then self:stopped(why or "The game refused the pour.");return end
-    if self.observed and not near(amount,self.amount) then self:cancel();return end
+    if (self.observed or self.batch) and not near(amount,self.amount) then self:cancel();return end
     self.launched=true
 end
 function D:tick()

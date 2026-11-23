@@ -533,7 +533,8 @@ function Instance:worldPour(anchor,take,entries,origin,options)
     if controller.state~="running" and controller.state~="finished" then return nil,controller.reason end
     return true
 end
-function Instance:refillDispenser(anchor, donor, bottle)
+function Instance:refillDispenser(anchor, donor, bottle, origin)
+    origin=origin=="inventoryShortcuts" and origin or "worldShortcuts"
     if self.error or loadError or self.replacement or self.recovery:status().pending then
         return nil,"Finish or recover the current job before refilling."
     end
@@ -543,10 +544,10 @@ function Instance:refillDispenser(anchor, donor, bottle)
     end
     local function allowed()
         local prefs,problem=currentPreferences()
-        return not problem and prefs and prefs.contextMenus==true and prefs.worldShortcuts==true
+        return not problem and prefs and prefs.contextMenus==true and prefs[origin]==true
             and not self.error and not self.replacement and not self.recovery:status().pending
     end
-    if not allowed() then return nil,"World shortcuts are disabled." end
+    if not allowed() then return nil,"Dispenser shortcuts are disabled." end
     local feature=require "LootBox/MountedDispenser"
     local ok,controller,why=pcall(feature.new,self.player,self.world,anchor,donor,bottle,allowed)
     if not ok then return nil,"The game did not expose the selected dispenser." end

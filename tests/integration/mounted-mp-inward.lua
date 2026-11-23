@@ -40,8 +40,8 @@ end
 local function holder(containerItem)
     local h={rows={}}
     function h:getItems() return list(self.rows) end
-    function h:getType() return "inventory" end
-    function h:isLockedToCharacter() return false end
+    function h:getType() return containerItem and "bag" or "inventory" end
+    function h:isLockedToCharacter() return self.locked==true end
     function h:hasRoomFor(_,i) return i:getContainer()==nil and not f.noHeadroom end
     function h:contains(item)
         for _,row in ipairs(self.rows) do if row==item then return true end end
@@ -55,6 +55,22 @@ local function holder(containerItem)
     function h:getContainingItem() return containerItem end
     return h
 end
+local function carriedIn(item,root)
+    local direct=item:getContainer()
+    local seen={}
+    while direct and not seen[direct] and direct:contains(item) do
+        if direct==root then return true end
+        seen[direct]=true
+        item=direct:getContainingItem()
+        direct=item and item:getContainer()
+    end
+    return false
+end
+local function put(item,cont)
+    if item.holder then item.holder:Remove(item) end
+    cont.rows[#cont.rows+1]=item
+    item.holder=cont
+end
 local function makeItem(id,typeName,cont,parts)
     local item={id=id,typeName=typeName,holder=cont,engineType="InventoryItem"}
     function item:getID() return self.id end
@@ -65,12 +81,18 @@ local function makeItem(id,typeName,cont,parts)
     function item:isSealed() return self.sealed==true end
     function item:isFavorite() return self.favorite==true end
     function item:isWorn() return false end
-    function item:isInPlayerInventory() return self.holder==f.main end
+    function item:isInPlayerInventory() return carriedIn(self,f.main) end
     function item:getItemHeat() return 1 end
     function item:syncItemFields() if self.onSync then self.onSync(self) end end
     if parts then item.fluid=fluid(item,parts,false) end
     if cont then cont.rows[#cont.rows+1]=item end
     return item
+end
+local function makeBag(id,typeName,cont)
+    local bag=makeItem(id,typeName,cont)
+    bag.pocket=holder(bag)
+    function bag:getInventory() return self.pocket end
+    return bag,bag.pocket
 end
 local function stand(square,name,facing,parts)
     local object={square=square,facing=facing,engineType="IsoObject"}
@@ -191,9 +213,7 @@ local function new(parts)
     function f.q:removeFromQueue(a) drop(self.queue,a) end
     f.old=stand(sq,"WaterDispenser",IsoDirections.E,parts or {[WATER]=13.125204})
     f.control=makeItem(73121619,BOTTLE,f.main,{})
-    local bag=makeItem(100,"Base.Bag",f.main)
-    f.pocket=holder(bag)
-    function bag:getInventory() return f.pocket end
+    f.bag,f.pocket=makeBag(100,"Base.Bag",f.main)
     f.bagControl=makeItem(101,BOTTLE,f.pocket,{[WATER]=15})
     function f:juggle(newId,parts,where)
         return makeItem(newId or 1635801116,BOTTLE,where or self.main,parts or {[WATER]=13.125204})
@@ -212,7 +232,8 @@ FluidUtil={roundTransfer=function(n) return math.floor(n*100+.5)/100 end,
     getTransferActionTimePerLiter=function() return 40 end,getMinTransferActionTime=function() return 30 end}
 FluidContainer={}
 function FluidContainer.CanTransfer(a,b)
-    return not f.incompatible and a~=b and a:canPlayerEmpty() and b:canPlayerEmpty() and not b:isInputLocked()
+    return not f.incompatible and (not f.extraCompatibility or f.extraCompatibility(a,b))
+        and a~=b and a:canPlayerEmpty() and b:canPlayerEmpty() and not b:isInputLocked()
         and a:getAmount()>0 and b:getFreeCapacity()>0
 end
 function FluidContainer.Transfer(a,b,amount)
@@ -273,9 +294,15 @@ local function engineStart(x,a) -- exact Java call boundary, not transport emula
 end
 local function authorityPour(x,flow)
     local root=holder()
-    local a=makeItem(x.donorId,x.donorType,root,copy(flow.donor.fluid.parts))
+    local function mirror(original)
+        if original==x.main then return root end
+        local bag=assert(original:getContainingItem())
+        local _,pocket=makeBag(bag:getID(),bag:getFullType(),mirror(bag:getContainer()))
+        return pocket
+    end
+    local a=makeItem(flow.donor:getID(),flow.donor:getFullType(),mirror(flow.donor:getContainer()),copy(flow.donor.fluid.parts))
     local b=makeItem(flow.result.id,BOTTLE,root,copy(flow.result.item.fluid.parts))
-    for _,i in ipairs({a,b}) do function i:isInPlayerInventory() return self.holder==root end end
+    for _,i in ipairs({a,b}) do function i:isInPlayerInventory() return carriedIn(self,root) end end
     x.authority=true
     local act=ISFluidTransferAction:new(x.player,ISFluidContainer:new(a.fluid),a.fluid,
         ISFluidContainer:new(b.fluid),b.fluid,flow.wanted)
@@ -284,9 +311,9 @@ local function authorityPour(x,flow)
     return copy(a.fluid.parts),copy(b.fluid.parts)
 end
 
--- Native active list is a Java-boundary double, not a policy replacement.
-local activeMods=nil
-function getActivatedMods() return activeMods end
+-- This fixture never advertises LootBox. Native actions, not an advertised
+-- mod identifier, provide the execution and receipt boundaries.
+function getActivatedMods() return list({"SomeOtherMod"}) end
 local Policy=require "LootBox/MountedClientPolicy"
 local D=require "LootBox/MountedDispenser"
 local Menu=require "LootBox/MountedDispenserMenu"
@@ -306,22 +333,31 @@ local function fixture(parts)
     x.pocket:Remove(x.bagControl)
     x.donor=makeItem(110,"Base.WaterBottle",x.main,{[OTHER]=1})
     x.donorId,x.donorType=x.donor.id,x.donor.typeName
-    x.world={protected=function(_,it) return it.protected==true or it:isFavorite() end}
+    x.world={protected=function(_,it)
+        return it.protected==true or it:isFavorite() or x.player:isEquipped(it) or x.player:isAttachedItem(it)
+    end}
     x.anchor=assert(D.capture(x.player,{x.old}))
-    function x:ask()
+    function x:selection(items)
         local destination=D.destinations(self.player,self.world,self.anchor)[1]
-        if not destination then return nil end
-        local wanted
-        for _,entry in ipairs(D.donors(self.player,self.world)) do
-            if entry.item==self.donor then wanted=entry;break end
+        local byItem={}
+        for _,entry in ipairs(D.donors(self.player,self.world)) do byItem[entry.item]=entry end
+        local wanted={}
+        for index,item in ipairs(items) do
+            local entry=byItem[item]
+            if not entry then return nil end
+            entry.pourSignature=Inv.mix(entry)
+            wanted[index]=entry
         end
-        if not wanted then return nil end
-        wanted.pourSignature=Inv.mix(wanted)
-        self.job=D.new(self.player,self.world,self.anchor,wanted,destination,function()return not self.disabled end)
+        return wanted,destination
+    end
+    function x:ask(items)
+        local wanted,destination=self:selection(items or {self.donor})
+        if not wanted or not destination then return nil end
+        self.job=D.new(self.player,self.world,self.anchor,items and wanted or wanted[1],destination,function()return not self.disabled end)
         return self.job
     end
-    function x:queueTake()
-        assert(self:ask());self.job:tick()
+    function x:queueTake(items)
+        assert(self:ask(items));self.job:tick()
         local a=assert(self.q.current,self.job.reason)
         assert(a.Type=="ISAddTakeDispenserBottle" and a.bottle==nil and a.waterdispenser==self.old)
         return a
@@ -358,58 +394,69 @@ local function show(x)
     return m.options[2],function()return selected end
 end
 
-test("native active list gates the mounted shortcut; stock Take and menu selection remain intact",function()
-    local target=fixture({})
-    assert(not D.mountedMPEnabled() and not target:ask() and #target.q.queue==0)
+test("mounted shortcut uses stock client bindings, independent of server add-on activation",function()
+    local x=fixture({})
+    assert(Policy.enabled() and D.mountedMPEnabled())
     assert(require("LootBox/MountedClientAction").start()==nil)
-    local row=show(target)
-    assert(row.notAvailable and not row.child and row.tip:find("Use stock Take Bottle",1,true))
-    for _,ids in ipairs({{}, {"Other"}, {"lootbox"}, {"LootBox","LootBox"}, {"LootBox","lootbox"}, {"LootBox",42}}) do
-        activeMods=list(ids)
-        assert(not Policy.enabled())
-        assert(not target:ask())
+    local old=getActivatedMods
+    for _,reader in ipairs({function() return list({}) end, function() return nil end,
+            function() error("Server addon list must never be queried") end}) do
+        getActivatedMods=reader
+        local target=fixture({})
+        assert(Policy.enabled() and target:ask() and #target.q.queue==0)
+        local option,count=show(target)
+        assert(option.child and not option.notAvailable and option.name=="Top up mounted dispenser")
+        for _,choice in ipairs(option.child.options) do
+            assert(choice.itemForTexture==target.donor)
+            assert(choice.name:find("add 1.000 L (1.000 L available)",1,true))
+            choice.onSelect(choice.target);choice.onSelect(choice.target)
+        end
+        assert(count()==1 and #target.q.queue==0)
     end
-    activeMods={size=function() error("missing native list") end}
-    assert(not Policy.enabled())
-    activeMods=list({"Other","LootBox"})
+    getActivatedMods=old
+
+    local interact=SafeHouse.isSafehouseAllowInteract
+    x=fixture({})
+    SafeHouse.isSafehouseAllowInteract=nil
+    assert(not Policy.enabled() and not x:ask() and #x.q.queue==0)
+    SafeHouse.isSafehouseAllowInteract=interact
+    local clock=getTimestampMs
+    getTimestampMs=nil
+    assert(not Policy.enabled() and not x:ask() and #x.q.queue==0)
+    local blocked=show(x)
+    assert(blocked.notAvailable and not blocked.child and blocked.tip:find("Use stock Take Bottle",1,true))
+    getTimestampMs=clock
     assert(Policy.enabled())
-    target=fixture({})
-    row=show(target)
-    assert(row.child and not row.notAvailable and row.name=="Top up mounted dispenser")
-    local option,count=show(target)
-    for _,choice in ipairs(option.child.options) do
-        assert(choice.itemForTexture==target.donor)
-        assert(choice.name:find("add 0.25 L (1.000 L available)",1,true))
-        choice.onSelect(choice.target);choice.onSelect(choice.target)
-    end
-    assert(count()==1 and #target.q.queue==0)
 end)
 
-local function detach(x)
-    local take=x:queueTake()
+local function detach(x,items)
+    local take=x:queueTake(items)
     assert(engineStart(x,take) and x.sends==1,"owned native take did not start")
     local item=x:juggle(nil,copy(x.old.fluid.parts))
     x:landTake(item,take,true)
     assert(x.job:isBusy(),x.job.reason)
     return item
 end
-local function startPour(x,jug)
+local function startPour(x,jug,wanted,source)
+    wanted,source=wanted or 1,source or x.donor
+    local oldSends=x.sends
     x.job:tick()
     local a=assert(x.q.current,x.job.reason)
-    assert(a.Type=="ISFluidTransferAction" and a.amount==.25 and a.sourceOwner==x.donor and a.targetOwner==jug)
-    assert(engineStart(x,a) and x.sends==2,"owned native pour did not start")
-    local left,right=authorityPour(x,{donor=x.donor,result={item=jug,id=jug.id},wanted=.25})
+    assert(a.Type=="ISFluidTransferAction" and math.abs(a.amount-wanted)<.00005 and a.sourceOwner==source and a.targetOwner==jug)
+    assert(engineStart(x,a) and x.sends==oldSends+1,"owned native pour did not start")
+    local left,right=authorityPour(x,{donor=source,result={item=jug,id=jug.id},wanted=wanted})
     return a,left,right
 end
-local function pourToRefit(x,jug)
-    local a,left,right=startPour(x,jug)
+local function pourToRefit(x,jug,wanted)
+    wanted=wanted or 1
+    local a,left,right=startPour(x,jug,wanted)
     a:perform();release(x,a)
     x.donor.fluid.parts=left
     x.job:tick()
     assert(x.job.phase=="pour" and not x.q.current,"one-sided delta must not refit")
     jug.fluid.parts=right
     x.time=x.time+100;x.job:tick()
-    assert(x.job.phase=="refit" and x.job.liters==.25 and x.job:isBusy(),x.job.reason)
+    assert(x.job.phase=="refit" and math.abs(x.job.liters-wanted)<.00005 and x.job:isBusy(),x.job.reason)
     x.job:tick()
     local refit=assert(x.q.current,x.job.reason)
     assert(refit.Type=="ISAddTakeDispenserBottle" and refit.bottle==jug and refit.waterdispenser==x.bareActual)
@@ -438,8 +485,45 @@ test("A3 nonempty mix and exact zero both carry only the native ID through pour 
         x.time=x.time+350;x.job:tick()
         assert(x.job.state=="finished" and x.job.count==1 and x.main:contains(x.control)
             and x.control.fluid:isEmpty() and not x.main:contains(jug) and mounted.fluid.locked
-            and math.abs(mounted.fluid:getAmount()-((initial[WATER] or 0)+.25))<.00005,
+            and math.abs(mounted.fluid:getAmount()-((initial[WATER] or 0)+1))<.00005,
             x.job.reason)
+    end
+end)
+
+test("compatible mix fills exactly to capacity without emptying a partially used donor",function()
+    local x=fixture({[WATER]=14.625})
+    local jug=detach(x)
+    local a,final=pourToRefit(x,jug,.375)
+    assert(math.abs(final[WATER]-14.625)<.00005 and math.abs(final[OTHER]-.375)<.00005)
+    assert(math.abs(x.donor.fluid:getAmount()-.625)<.00005)
+    drop(x.square.rows,x.bareActual)
+    local mounted=stand(x.square,"WaterDispenser",IsoDirections.E,copy(final))
+    a:perform();release(x,a);x.main:Remove(jug)
+    x.job:tick();x.time=x.time+350;x.job:tick()
+    assert(x.job.state=="finished" and mounted.fluid.locked and mounted.fluid:getAmount()==15,x.job.reason)
+end)
+
+test("native donor-empty and receiver-full mirrors may lead Done without completing early",function()
+    for _,scenario in ipairs({"donorFirst","receiverFirst","missing","overshot"}) do
+        local receiverFirst=scenario=="receiverFirst"
+        local x=fixture(receiverFirst and {[WATER]=14.625} or {})
+        local jug=detach(x)
+        local pour,left,right=startPour(x,jug,receiverFirst and .375 or 1)
+        if receiverFirst then jug.fluid.parts=right else x.donor.fluid.parts=left end
+        assert(pour:isValid(),"A matching one-sided terminal delta must not invalidate the exact native pour")
+        pour:update()
+        assert(not pour.action.forceStop and x.job.phase=="pour")
+        pour:perform();release(x,pour);x.job:tick()
+        assert(x.job:isBusy() and x.job.phase=="pour" and not x.q.current)
+        if receiverFirst then x.donor.fluid.parts=left
+        elseif scenario=="overshot" then jug.fluid.parts={[OTHER]=1.01}
+        elseif scenario~="missing" then jug.fluid.parts=right end
+        x.time=x.time+(scenario=="missing" and 7100 or 100);x.job:tick()
+        if scenario=="missing" or scenario=="overshot" then
+            assert(x.job.state=="cancelled" and x.sends==2 and not x.q.current)
+        else
+            assert(x.job.phase=="refit" and x.job:isBusy() and x.sends==2)
+        end
     end
 end)
 
@@ -471,7 +555,7 @@ end)
 
 test("invalid starting restrictions never queue or send a stock Take",function()
     for _,mode in ipairs({"smallResidual","notNativeEmpty","full","badChemistry","protected","noHeadroom",
-                          "blocked","deniedInteract","deniedLoot","replaced","dropped","nestedSource","oversized","disabled"}) do
+                          "blocked","deniedInteract","deniedLoot","replaced","dropped","lockedSource","equippedSource","oversized","disabled"}) do
         local parts=mode=="smallResidual" and {[WATER]=.000001} or mode=="full" and {[WATER]=15} or {}
         local x=fixture(parts)
         if mode=="notNativeEmpty" then function x.old.fluid:isEmpty()return false end
@@ -483,8 +567,9 @@ test("invalid starting restrictions never queue or send a stock Take",function()
         elseif mode=="deniedLoot" then x.deniedLoot=true
         elseif mode=="replaced" then x.replacedActor=true
         elseif mode=="dropped" then x.donor.ground={}
-        elseif mode=="nestedSource" then
-            x.main:Remove(x.donor);x.pocket.rows[1]=x.donor;x.donor.holder=x.pocket
+        elseif mode=="lockedSource" then
+            put(x.donor,x.pocket);x.pocket.locked=true
+        elseif mode=="equippedSource" then x.donor.equipped=true
         elseif mode=="oversized" then
             for i=1,4096 do makeItem(10000+i,"Base.Tissue",x.main) end
         elseif mode=="disabled" then x.disabled=true end
@@ -534,4 +619,186 @@ test("refit never confirms a different or surviving ID, stale stand, unlock, or 
     end
 end)
 
-print("PASS "..tests.." dormant paired product envelopes; Lua/Java/transport boundaries are explicit doubles")
+
+local function settleLeg(x,jug,source,wanted,sourceFirst)
+    local a,left,right=startPour(x,jug,wanted,source)
+    a:perform();release(x,a)
+    if sourceFirst then source.fluid.parts=left else jug.fluid.parts=right end
+    x.job:tick()
+    assert(x.job.phase=="pour" and not x.q.current,"A single endpoint is not permission to advance")
+    if sourceFirst then jug.fluid.parts=right else source.fluid.parts=left end
+    x.time=x.time+100;x.job:tick()
+    assert(x.job:isBusy() and not x.q.current,x.job.reason)
+    return right
+end
+
+local function settleRefit(x,jug,expected)
+    x.job:tick()
+    local refit=assert(x.q.current,x.job.reason)
+    assert(refit.Type=="ISAddTakeDispenserBottle" and refit.bottle==jug and refit.waterdispenser==x.bareActual)
+    x.player.facingTarget=x.bareActual
+    assert(engineStart(x,refit))
+    x.main:Remove(jug)
+    drop(x.square.rows,x.bareActual)
+    local fitted=stand(x.square,"WaterDispenser",IsoDirections.E,copy(expected))
+    refit:perform();release(x,refit)
+    x.job:tick();x.time=x.time+350;x.job:tick()
+    assert(x.job.count==1 and not x.job:isBusy() and fitted.fluid.locked
+        and x.main:contains(x.control) and not x.main:contains(jug),x.job.reason)
+    assert(x.control.fluid:isEmpty())
+    return fitted
+end
+
+test("a stock MP pour uses an exact donor in a nested pocket of an equipped bag",function()
+    local x=fixture({[WATER]=13})
+    x.bag.equipped=true
+    local _,pocket=makeBag(102,"Base.BeltPouch",x.pocket)
+    put(x.donor,pocket)
+    assert(x.donor:isInPlayerInventory() and not x.main:containsID(x.donor.id))
+    local selected,destination=x:selection({x.donor})
+    local donor=assert(selected and selected[1])
+    assert(donor.scope=="equipped" and donor.container==pocket)
+    assert(D.plannedMountedTopUp(donor,destination)==1)
+    assert(#Menu.targets({{anchor=x.anchor,bottle=destination}},donor,x.world)==1)
+    local option,count=show(x)
+    local row=assert(option.child.options[1])
+    assert(row.itemForTexture==x.donor and row.name:find("add 1.000 L",1,true))
+    row.onSelect(row.target)
+    assert(count()==1 and idle(x))
+    local jug=detach(x)
+    assert(jug:getContainer()==x.main)
+    local mixed=settleLeg(x,jug,x.donor,1,true)
+    local fitted=settleRefit(x,jug,mixed)
+    assert(x.job.state=="finished" and x.sends==3 and close(fitted.fluid:getAmount(),14))
+    assert(x.donor:getContainer()==pocket and pocket:contains(x.donor) and x.donor.fluid:isEmpty())
+end)
+
+test("moved or stale carried donors cannot send a new stock action",function()
+    for _,mode in ipairs({"moved","sameIdReplacement","duplicateId","staleContents","protected"}) do
+        local x=fixture({})
+        put(x.donor,x.pocket)
+        local selection,destination=x:selection({x.donor})
+        local chosen=assert(selection and selection[1])
+        if mode=="moved" then put(x.donor,x.main)
+        elseif mode=="sameIdReplacement" then
+            x.pocket:Remove(x.donor)
+            makeItem(x.donor.id,x.donor.typeName,x.pocket,{[OTHER]=1})
+        elseif mode=="duplicateId" then
+            makeItem(x.donor.id,x.donor.typeName,x.main,{[OTHER]=1})
+        elseif mode=="staleContents" then x.donor.fluid.parts={[WATER]=1}
+        elseif mode=="protected" then x.donor.favorite=true end
+        assert(not D.new(x.player,x.world,x.anchor,chosen,destination,function() return true end)
+            and x.sends==0 and idle(x),mode)
+    end
+
+    -- Same donor and same immediate pocket, but its ancestry changes
+    -- after native pour admission. The native address is no longer exact.
+    local x=fixture({})
+    put(x.donor,x.pocket)
+    local _,otherPocket=makeBag(102,"Base.Satchel",x.main)
+    local jug=detach(x)
+    x.job:tick()
+    local pour=assert(x.q.current,x.job.reason)
+    assert(pour.Type=="ISFluidTransferAction" and pour.sourceOwner==x.donor and pour.targetOwner==jug)
+    put(x.bag,otherPocket)
+    assert(x.donor:isInPlayerInventory() and x.donor.holder==x.pocket)
+    assert(not engineStart(x,pour) and x.sends==1)
+    x.job:tick()
+    assert(pour.action.forceStop)
+    pour:stop();release(x,pour);x.job:tick()
+    assert(x.job.state=="cancelled" and x.job.count==0 and jug.fluid:isEmpty())
+end)
+
+test("batch takes once, uses exact ordered compatible donors, fills 15 L, refits once",function()
+    local x=fixture({[WATER]=13})
+    x.donor.fluid.parts={[OTHER]=.75}
+    local second=makeItem(111,"Base.Bucket",x.pocket,{[WATER]=2})
+    local spare=makeItem(112,"Base.Bucket",x.main,{[OTHER]=.5})
+    local jug=detach(x,{x.donor,second,spare})
+    assert(x.sends==1 and x.job:status().done==0 and x.job:status().total==3)
+    settleLeg(x,jug,x.donor,.75,true)
+    assert(x.job:status().done==1 and close(x.job.liters,.75) and x.sends==2 and x.donor.fluid:isEmpty())
+    local mixed=settleLeg(x,jug,second,1.25,false)
+    assert(x.job.phase=="refit" and x.sends==3 and x.job:status().done==2 and close(x.job.liters,2))
+    local fitted=settleRefit(x,jug,mixed)
+    x.job:tick()
+    assert(x.job.state=="finished" and x.sends==4 and close(fitted.fluid:getAmount(),15))
+    assert(close(fitted.fluid.parts[WATER],14.25) and close(fitted.fluid.parts[OTHER],.75))
+    assert(close(second.fluid:getAmount(),.75) and close(spare.fluid:getAmount(),.5))
+end)
+
+test("batch rechecks the evolved mix and never uses protected, stale, or incompatible donors",function()
+    local x=fixture({[WATER]=1})
+    local bad={}
+    local protected=makeItem(111,"Base.Bucket",x.main,{[WATER]=1})
+    local stale=makeItem(112,"Base.Bucket",x.main,{[WATER]=1})
+    local incompatible=makeItem(113,"Base.Bucket",x.main,{[bad]=1})
+    local fitting=makeItem(114,"Base.Bucket",x.main,{[WATER]=.5})
+    function x.extraCompatibility(from,target)
+        return not (from.parts[bad] and target.parts[OTHER])
+    end
+    local jug=detach(x,{x.donor,protected,stale,incompatible,fitting})
+    settleLeg(x,jug,x.donor,1,true)
+    protected.protected=true
+    stale.fluid.parts={[WATER]=1.25}
+    local mixed=settleLeg(x,jug,fitting,.5,false)
+    assert(x.job:status().skipped==3 and x.job:status().done==2)
+    local fitted=settleRefit(x,jug,mixed)
+    assert(x.sends==4 and x.job.state=="finished_with_skips" and close(fitted.fluid:getAmount(),2.5))
+    assert(close(fitted.fluid.parts[OTHER],1) and close(fitted.fluid.parts[WATER],1.5))
+    assert(protected.fluid:getAmount()==1 and stale.fluid:getAmount()==1.25 and incompatible.fluid:getAmount()==1)
+end)
+
+test("batch refits confirmed contents when the only remaining donor was removed",function()
+    local x=fixture({})
+    local removed=makeItem(111,"Base.Bucket",x.main,{[WATER]=1})
+    local jug=detach(x,{x.donor,removed})
+    local mixed=settleLeg(x,jug,x.donor,1,true)
+    x.main:Remove(removed)
+    x.job:tick()
+    assert(x.job.phase=="refit" and x.job:status().skipped==1 and x.sends==2 and not x.q.current)
+    local fitted=settleRefit(x,jug,mixed)
+    assert(x.sends==3 and x.job.state=="finished_with_skips" and close(fitted.fluid:getAmount(),1))
+end)
+
+test("a foreign action, changed or ambiguous jug, or incomplete second leg cannot refit",function()
+    for _,scenario in ipairs({"foreign","changed","ambiguous","incomplete"}) do
+        local x=fixture({})
+        local second=makeItem(111,"Base.Bucket",x.main,{[WATER]=1})
+        local jug=detach(x,{x.donor,second})
+        settleLeg(x,jug,x.donor,1,true)
+        local foreign
+        if scenario=="foreign" then
+            foreign={Type="ForeignAction"}
+            x.q:addToQueue(foreign)
+        elseif scenario=="changed" then jug.fluid.parts={[WATER]=1}
+        elseif scenario=="ambiguous" then makeItem(jug.id,BOTTLE,x.main,{[OTHER]=1})
+        elseif scenario=="incomplete" then
+            local a,left=startPour(x,jug,1,second)
+            a:perform();release(x,a)
+            second.fluid.parts=left
+            x.job:tick(); x.time=x.time+7100
+        end
+        x.job:tick();x.job:tick()
+        assert(x.job.state=="cancelled" and x.job.count==0 and close(x.job.liters,1),scenario)
+        assert(x.sends==(scenario=="incomplete" and 3 or 2) and x.q.current==foreign)
+        if foreign then assert(not foreign.action.forceStop and not foreign.cancelled) end
+        assert(x.main:contains(jug) and x.bareActual:getObjectIndex()>=0)
+    end
+end)
+
+test("batch rejects duplicate snapshot IDs and hides loot-denied mounts; donor truncation propagates",function()
+    local x=fixture({})
+    local spec,destination=x:selection({x.donor})
+    assert(not D.new(x.player,x.world,x.anchor,{spec[1],spec[1]},destination,function()return true end))
+    x.deniedLoot=true
+    assert(#D.destinations(x.player,x.world,x.anchor)==0 and not x:ask({x.donor}) and x.sends==0)
+    local original=Inv.snapshot
+    local entries={spec[1]}
+    Inv.snapshot=function()return {entries=entries,truncated=true}end
+    local donors,truncated=D.donors(x.player,x.world)
+    Inv.snapshot=original
+    assert(donors==entries and truncated==true)
+end)
+
+print("PASS "..tests.." client-side mounted multiplayer and batch contracts; Lua/Java/transport boundaries are explicit doubles")

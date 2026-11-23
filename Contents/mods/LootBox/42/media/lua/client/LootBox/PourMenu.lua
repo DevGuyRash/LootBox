@@ -3,6 +3,7 @@ local Inventory = require "LootBox/PourInventory"
 local Stacks = require "LootBox/PourStacks"
 
 local WorldMenu = require "LootBox/WorldFluidMenu"
+local MountedMenu = require "LootBox/MountedDispenserMenu"
 
 local Menu = {}
 local marker = {}
@@ -97,10 +98,12 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
     -- Empty carried vessels still need Fill From even when they cannot pour.
     local worldOK,world=pcall(WorldMenu.inventory,index,parent,branded,members,snapshot,instance,options,tooltip)
     if not worldOK then world=nil end
+    local mounted=MountedMenu.nearby(index,instance)
+    local function mountedTargets(e) return MountedMenu.targets(mounted,e,instance.world) end
     -- A collapsed row delegates the choice; an expanded individual never does.
     local plan,reason
     if #members==1 then plan,reason=Inventory.plan(snapshot,members[1],options,true)
-    else plan,reason=Inventory.choose(snapshot,members,options,function(e) return #WorldMenu.destinations(world,e)>0 end) end
+    else plan,reason=Inventory.choose(snapshot,members,options,function(e) return #WorldMenu.destinations(world,e)>0 or #mountedTargets(e)>0 end) end
     if not plan then
         -- For an exact non-empty loot row explain a source failure rather than
         -- leaving an ambiguous invisible shortcut. Never authorize the row.
@@ -129,6 +132,7 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
     end
     local targets,fill=plan.targets,plan.fill
     local fixtures=WorldMenu.destinations(world,plan.source)
+    local mountedJugs=mountedTargets(plan.source)
 
     local source=string.format("%s | %.3f L available",plan.source.label,plan.source.amount)
     if #members>1 then
@@ -143,7 +147,7 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
         local root=host:addOption("Pour Into",marker,nil)
         if not root then return end
         builtinIcon(root,"Item_WaterDrop",item)
-        if #targets==0 and #fixtures==0 then
+        if #targets==0 and #fixtures==0 and #mountedJugs==0 then
             root.notAvailable=true
             local help="No compatible destination with space. Carry an empty or compatible vessel."
             if plan.source.scope=="loot" and not options.pourLootToLoot then
@@ -168,6 +172,7 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
                 source,#fill,order,options.pourFillOrder=="largest-first" and "most" or "least"))
         end
         WorldMenu.addTargets(child,world,fixtures,plan.source,click)
+        MountedMenu.addTargets(child,mountedJugs,index,instance,plan.source,click,tooltip)
         -- A direct stack entry binds one exact vessel; Fill All uses the whole list.
         for _,group in ipairs(groups) do
             local e=group.entry

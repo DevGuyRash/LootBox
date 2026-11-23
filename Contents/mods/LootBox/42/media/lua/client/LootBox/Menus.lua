@@ -804,7 +804,10 @@ function Menus.worldMenu(playerIndex, parent, objects, test)
     context.scope = context.container and "container" or "reach"
     local menu = rootMenu(parent)
     if preferences.worldShortcuts then
-        require("LootBox/MountedDispenserMenu").add(playerIndex,menu,objects,app,tooltip)
+        local dispenser=require "LootBox/MountedDispenserMenu"
+        local once={}
+        dispenser.add(playerIndex,parent,objects,app,tooltip,true,once)
+        dispenser.add(playerIndex,menu,objects,app,tooltip,false,once)
         require("LootBox/WorldFluidMenu").world(playerIndex,menu,objects,app,require("LootBox/Pour").options(preferences),tooltip)
     end
     if context.container and preferences.worldShortcuts then

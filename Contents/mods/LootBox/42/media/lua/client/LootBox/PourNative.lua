@@ -18,6 +18,19 @@ local function fluidOf(item)
     return item:getFluidContainer(),item
 end
 
+-- One stock-rounded amount for both menu previews and action admission.
+function PourNative.transferAmount(have, free, requested)
+    if not finite(have) or not finite(free) or (requested ~= nil and not finite(requested)) then
+        return nil, "Fluid amounts are unavailable."
+    end
+    local wanted=math.min(have,free,requested or math.huge)
+    local rounded=FluidUtil.roundTransfer(wanted)
+    if not finite(rounded) then return nil, "The game did not provide a transfer amount." end
+    local amount=math.min(wanted,rounded)
+    if amount<=0 then return nil, "No fluid or free vessel space remains." end
+    return amount
+end
+
 local function inspect(source, target, requested)
     if not source or not target or source == target or source:getID() == target:getID() then return nil, "Choose two different vessels." end
     local a, aOwner = fluidOf(source)
@@ -26,13 +39,9 @@ local function inspect(source, target, requested)
         or not a:canPlayerEmpty() or not b:canPlayerEmpty()
         or not FluidContainer.CanTransfer(a,b) then return nil, "The game does not allow pouring between these vessels." end
     local have, before, free = a:getAmount(), b:getAmount(), b:getFreeCapacity()
-    if not finite(have) or not finite(before) or not finite(free)
-        or (requested ~= nil and not finite(requested)) then return nil, "Fluid amounts are unavailable." end
-    local wanted = math.min(have, free, requested or math.huge)
-    local rounded = FluidUtil.roundTransfer(wanted)
-    if not finite(rounded) then return nil, "The game did not provide a transfer amount." end
-    local amount = math.min(wanted,rounded)
-    if amount <= 0 then return nil, "No fluid or free vessel space remains." end
+    if not finite(before) then return nil, "Fluid amounts are unavailable." end
+    local amount,reason=PourNative.transferAmount(have,free,requested)
+    if not amount then return nil,reason end
     return {sourceFluid=a,targetFluid=b,sourceOwner=aOwner,targetOwner=bOwner,
         amount=amount, sourceBefore=have, targetBefore=before}, nil
 end
@@ -171,7 +180,7 @@ end
 
 function PourNative:isBusy() return self.active ~= nil end
 
-function PourNative:start(source,target,requested,validate)
+function PourNative:start(source,target,requested,validate,allowProjectedEndpoint)
     if self.active then return nil,"A fluid transfer is already active." end
     local s, reason = PourNative.inspect(source,target,requested)
     if not s then return nil,reason end
@@ -219,14 +228,21 @@ function PourNative:start(source,target,requested,validate)
             local finished=total and closeEnough(s,total,s.amount)
             if not finished and (not src:canPlayerEmpty() or not dst:canPlayerEmpty()) then return false end
             if total then s.latestPaired=total end
-            return true,finished
+            -- The two stock MP fluid mirrors can arrive separately. A
+            -- terminal side makes native CanTransfer false even though the
+            -- server is completing our exact, already-admitted pour.
+            local endpointPending = allowProjectedEndpoint and s.mp and s.preflight
+                and phase=="active" and not finished
+                and ((closeEnough(s,loss,s.amount) and closeEnough(s,src:getAmount(),0))
+                    or (closeEnough(s,gain,s.amount) and closeEnough(s,dst:getFreeCapacity(),0)))
+            return true,finished,endpointPending
         end
         local wait=action.waitToStart
         action.stopOnWalk,action.stopOnRun,action.stopOnAim=true,true,true
         function action:canMergeAction() return false end
         function action:isValid()
-            local good,finished=allowed(member(queueFor(player),action) and "active" or "admit")
-            return good and (finished or valid(self))
+            local good,finished,endpointPending=allowed(member(queueFor(player),action) and "active" or "admit")
+            return good and (finished or endpointPending or valid(self))
         end
         function action:waitToStart()
             local good=allowed("active")
@@ -250,9 +266,9 @@ function PourNative:start(source,target,requested,validate)
             else s.reason="Fluid amounts changed outside the native pour." end
         end
         function action:update()
-            local good,finished=allowed("active")
+            local good,finished,endpointPending=allowed("active")
             if not good or not s.preflight then s.reason="Fluid transfer interrupted."; self:forceStop(); return end
-            if finished then return end
+            if finished or endpointPending then return end
             update(self)
             if not s.mp then afterNative() end
         end

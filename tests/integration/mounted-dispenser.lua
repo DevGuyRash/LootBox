@@ -112,8 +112,9 @@ package.loaded["LootBox/PourNative"]={new=function()
         start=function(self,a,b,amount,guard)
             if not FluidContainer.CanTransfer(a.fluid,b.fluid) or not guard(a,b,"admit") then return nil,"stock fluid rejected" end
             f.pours[#f.pours+1]={a,b}
-            self.pending={a=a,b=b,guard=guard}
-            return true
+            local moved=math.min(a.fluid:getAmount(),b.fluid:getFreeCapacity(),amount or math.huge)
+            self.pending={a=a,b=b,guard=guard,amount=moved}
+            return true,nil,moved
         end,
         cancel=function(self) self.pending.cancelled=true end,
         poll=function(self)
@@ -123,6 +124,10 @@ package.loaded["LootBox/PourNative"]={new=function()
             self.pending=nil
             return true,nil,reply
         end}
+end,transferAmount=function(have,free)
+    local wanted=math.min(have,free)
+    local amount=math.min(wanted,FluidUtil.roundTransfer(wanted))
+    if amount>0 then return amount end
 end}
 local Inventory=require "LootBox/PourInventory"
 local D=require "LootBox/MountedDispenser"
@@ -133,6 +138,7 @@ local function fixture(mp,contents,name)
     f.main=main
     function main:contains(i)return list(self.rows):contains(i) end
     function main:getItems()return list(self.rows) end
+    function main:getContainingItem()return nil end
     function main:getType()return "inventory" end
     function main:isLockedToCharacter()return false end
     function main:hasRoomFor(_,i) assert(i:getContainer()==nil);return not f.atCap end
@@ -184,16 +190,19 @@ local function fixture(mp,contents,name)
     f.donor=item("Base.Bucket",{Milk=1.5,Water=.5},10,main)
     f.spare=item(BOTTLE,contents or {},15,main)
     f.anchor=assert(D.capture(p,{f.old}))
-    function f:request(which)
+    function f:request(which,selected)
         local options=D.destinations(p,world,self.anchor)
         local target
         for _,e in ipairs(options) do if not which or e.item==which then target=e;break end end
         if not target then return end
-        local donor
-        for _,e in ipairs(D.donors(p,world)) do if e.item==self.donor then donor=e;break end end
-        assert(donor)
-        donor.pourSignature=Inventory.mix(donor)
-        self.job=assert(D.new(p,world,self.anchor,donor,target,function()return not self.off end))
+        local sources,byItem={},{}
+        for _,e in ipairs(D.donors(p,world)) do byItem[e.item]=e end
+        for index,chosen in ipairs(selected or {self.donor}) do
+            local entry=assert(byItem[chosen])
+            entry.pourSignature=Inventory.mix(entry)
+            sources[index]=entry
+        end
+        self.job=assert(D.new(p,world,self.anchor,selected and sources or sources[1],target,function()return not self.off end))
         return self.job
     end
     function f:perform(allowComplete)
@@ -205,11 +214,11 @@ local function fixture(mp,contents,name)
         self.java=nil
         return a
     end
-    function f:fluidReceipt(wrongMix)
+    function f:fluidReceipt(wrongMix,chosen)
         local s=assert(self.job.fluid.pending)
-        assert(s.a==self.donor and s.b==self.job.jug and s.guard(s.a,s.b,"active"))
+        assert(s.a==(chosen or self.donor) and s.b==self.job.jug and s.guard(s.a,s.b,"active"))
         local a,b=s.a.fluid,s.b.fluid
-        local got=math.min(a:getAmount(),b:getFreeCapacity())
+        local got=s.amount
         local total=a:getAmount()
         for k,v in pairs(a.parts) do
             local delta=v*got/total
@@ -365,6 +374,36 @@ t=fixture(true,nil)
 d=assert(t:request(t.spare));d:tick();t:fluidReceipt(true);d:tick();d:tick()
 assert(d.state=="cancelled" and d.liters==0 and #t.enqueued==0 and t.main:contains(t.spare))
 print("PASS ambiguous synchronous output, invalid chemistry, capacity and mispaired constituents do not progress")
+
+for _,mp in ipairs({false,true}) do
+    local test=fixture(mp,not mp and {Milk=1,Water=1} or nil)
+    local source2=item("Base.Bottle",{Water=1.25},2,test.main)
+    local job=assert(test:request(mp and test.spare or nil,{test.donor,source2}))
+    job:tick()
+    local bare=test.old
+    if not mp then
+        assert(#test.enqueued==1)
+        test:perform(true);job:tick();job:tick()
+        bare=test.square.rows[1]
+        assert(bare~=test.old and not bare.fluid)
+    end
+    assert(#test.pours==1)
+    test:fluidReceipt();job:tick();job:tick()
+    assert(#test.pours==2 and test.pours[2][1]==source2 and test.pours[2][2]==job.jug)
+    test:fluidReceipt(false,source2);job:tick();job:tick()
+    assert(#test.enqueued==(mp and 1 or 2) and test.q.current.bottle==job.jug and test.q.current.waterdispenser==bare)
+    test:perform(not mp);job:tick()
+    assert(job:status().done==2 and job:status().total==2 and math.abs(job.liters-3.25)<.00005)
+    if mp then
+        assert(job.state=="finished_with_skips" and job.refitRequested and test.main:contains(job.jug))
+        print("PASS manual multiplayer batch uses the two selected sources and only reports a refit request")
+    else
+        local fitted=test.square.rows[1]
+        assert(job.state=="finished" and fitted.fluid.locked and fitted.fluid:getAmount()==5.25
+            and fitted.fluid.parts.Milk==2.5 and fitted.fluid.parts.Water==2.75 and test.main:contains(test.spare))
+        print("PASS single-player batch takes and refits once with the original jug, final mix and liters")
+    end
+end
 
 local function menu()
     return {options={},addOption=function(self,n,t,c)

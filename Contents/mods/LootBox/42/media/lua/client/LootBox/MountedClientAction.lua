@@ -135,7 +135,8 @@ local function refitWatch(s)
 end
 
 function M.start(p,input,jug,ops,nativeEnd)
-    if enabled()~=true or not isClient() or isServer() or not ops.live() or not ops.admit() then return nil end
+    if enabled()~=true or not p or not input or type(ops)~="table"
+        or not ops.live() or not ops.admit() then return nil end
     require "TimedActions/ISAddTakeDispenserBottle"
     local a=ISAddTakeDispenserBottle:new(p,input.object,jug)
     if not a or getmetatable(a)~=ISAddTakeDispenserBottle or a.Type~=ACTION or a.character~=p
