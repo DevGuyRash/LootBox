@@ -168,14 +168,14 @@ test("partial native stop reports exactly one terminal receipt without item name
         j:tick();j:tick();j:cancel();j:tick()
         assert(j.state=="cancelled" and j.liters==.25 and j.count==0 and #f.calls==2)
         assert(j.reason:find("Custom Named Vessel",1,true) and j.reason:find("777001",1,true),"game UI still identifies an outstanding loan")
-        assert(#lines==1 and lines[1]=="[LootBox] action=pour event=terminal state=cancelled nativeStarted=true completed=0 confirmedLitres=0.250 phase=fluid reason="..msg)
+        assert(#lines==1 and lines[1]=="[LootBox] action=pour event=terminal state=cancelled nativeSubmitted=true completed=0 confirmedLitres=0.250 phase=fluid route=portable mode=SP source=loot target=main destinations=1 reason="..msg)
     end)
 end)
 
 test("ordinary early pour stops distinguish stale view, player movement and occupied queue",function()
     local cases={
         {update=function(f) f.pane=nil end,reason="The selected loot pane changed or closed."},
-        {update=function(f) f.moving=true end,reason="Character moved, aimed, or could not continue the action."},
+        {update=function(f) f.moving=true end,reason="Character moved."},
         {update=function(f) f.queue.current={} end,reason="Another action was active."},
     }
     for _,case in ipairs(cases) do
@@ -185,8 +185,8 @@ test("ordinary early pour stops distinguish stale view, player movement and occu
             local target=item(f.main,17102,"Target",1,0)
             local j=f:start(source,{target})
             case.update(f);j:tick();j:tick()
-            assert(#f.calls==0 and j.state=="cancelled" and j.reason=="Pour cancelled or interrupted.")
-            assert(#lines==1 and lines[1]=="[LootBox] action=pour event=terminal state=cancelled nativeStarted=false completed=0 confirmedLitres=0.000 phase=prepare reason="..case.reason)
+            assert(#f.calls==0 and j.state=="cancelled" and j.reason==case.reason)
+            assert(#lines==1 and lines[1]=="[LootBox] action=pour event=terminal state=cancelled nativeSubmitted=false completed=0 confirmedLitres=0.000 phase=prepare route=portable mode=SP source=loot target=main destinations=1 reason="..case.reason)
         end)
     end
 end)
@@ -207,7 +207,7 @@ test("cupboard pickup rejection identifies a proven retained source without retr
             assert(j.state=="cancelled" and j.count==0 and j.liters==0 and #f.calls==1)
             assert(src.container==f.shelf and src.fluid.amount==8 and dst.fluid.amount==0)
             assert(j.reason:find("confirmed in original displayed storage",1,true) and not j.reason:find("confirmed in main",1,true))
-            assert(#lines==1 and lines[1]:find("phase=source-pickup reason=The server rejected the inventory move.",1,true))
+            assert(#lines==1 and lines[1]:find("phase=source-pickup route=portable mode=SP source=loot target=main destinations=1 reason=The server rejected the inventory move.",1,true))
             assert(#shots==1 and shots[1].note:find("In original storage: 1.",1,true) and not shots[1].note:find("[ID",1,true))
         end)
     end)
@@ -230,7 +230,7 @@ test("confirmed denied return stays in main; no retry or silent fallback",functi
         assert(j.reason:find("confirmed in main inventory",1,true) and not j.reason:find("confirmed in original",1,true))
         assert(replica.container==f.main and f.main:getItems():contains(replica) and not f.shelf:getItems():contains(src))
         assert(dst.fluid.amount==8)
-        assert(#lines==1 and lines[1]:find("completed=1 confirmedLitres=8.000 phase=source-return reason=The server rejected the inventory move.",1,true))
+        assert(#lines==1 and lines[1]:find("completed=1 confirmedLitres=8.000 phase=source-return route=portable mode=SP source=loot target=main destinations=1 reason=The server rejected the inventory move.",1,true))
     end)
 end)
 
@@ -322,6 +322,30 @@ test("stock facing refresh does not cancel the owned Ground action or its termin
     j:tick()
     assert(j.state=="finished" and j.count==1 and #f.calls==1 and f.cancels==0)
     assert(src.fluid.amount==.5 and dst.fluid.amount==1)
+end)
+
+test("MP placed bucket fills equipped Western Canteen with stale animation and jog flags",function()
+    for _,manual in ipairs({false,true}) do
+        local f=fixture()
+        isClient=function() return true end
+        local src,dst=item(f.shelf,1,"Placed Bucket",2,1.5),item(f.main,2,"Western Canteen",1,0)
+        f.held=dst
+        stockGround(f,src)
+        function f.player:isMoving() return true end
+        function f.player:isRunning() return true end
+        function f.player:isSprinting() return true end
+        function f.player:isPlayerMoving() return false end
+        function f.player:pressedMovement() return manual end
+        local j=f:start(src,{dst})
+        j:tick()
+        if manual then
+            assert(j.state=="cancelled" and j.reason=="Character moved." and #f.calls==0)
+        else
+            isCall(f,1,"pour",1,dst)
+            fluidAck(f,1); j:tick()
+            assert(j.state=="finished" and j.count==1 and #f.calls==1 and f.held==dst)
+        end
+    end
 end)
 
 test("a stale Ground tab cannot authorize a new pour or hide player interruption",function()
@@ -580,6 +604,106 @@ test("inventory donor fills exact worn held attached and loaded-fluid-bag target
             if carried then assert(dest.bag.items[1]==carried and carried.container==dest.bag) end
         end
     end
+end)
+
+local function inversePlan(f,donor,receiver)
+    local snap=Inventory.snapshot(f.player,f.world,receiver.container,f.pane)
+    local plan=assert(Inventory.fillFrom(snap,receiver,f.options))
+    local selected
+    for _,entry in ipairs(plan.donors) do if entry.item==donor then selected=entry end end
+    if f.shelf:getType()~="floor" then plan.target.pourAnchor=f.world:pourShelfAnchor(f.shelf) end
+    local function contextFor(captured)
+        assert(captured==f.shelf,"must ask about the clicked holder, not the currently active tab")
+        return f.options,f.pane
+    end
+    return assert(selected),plan.target,contextFor
+end
+local function inverseStart(f,donor,receiver)
+    local source,target,read=inversePlan(f,donor,receiver)
+    f.job=assert(Pour.new(f.player,f.world,source,{target},f.options,read,receiver))
+    return f.job
+end
+
+test("Fill From leaves the bagged donor in place, fills and returns only the exact clicked shelf replica",function()
+    local f=fixture()
+    local bag=item(f.main,300,"Worn pack");bag.bag=container("bag",bag);f.held=bag
+    local chosen=item(bag.bag,301,"Portable milk",3,2.25)
+    local other=item(f.main,302,"Portable milk",3,2.25)
+    local target=item(f.shelf,303,"Kitchen jug",2,.5)
+    local twin=item(f.shelf,304,"Kitchen jug",2,.5)
+    local j=inverseStart(f,chosen,target)
+    assert(j.shelf==f.shelf and j.anchor and not j.inPlaceGround)
+    j:tick();isCall(f,1,"move",303,f.shelf)
+    local staged=moveAck(f,true);assert(staged~=target and staged.id==target.id)
+    j:tick();isCall(f,2,"pour",301,staged);fluidAck(f,1.5)
+    isCall(f,3,"move",303,f.main);local restored=moveAck(f,true)
+    j:tick()
+    assert(j.state=="finished" and j.count==1 and j.liters==1.5 and #f.calls==3)
+    assert(restored.id==target.id and restored.container==f.shelf and restored.fluid.amount==2)
+    assert(chosen.container==bag.bag and chosen.fluid.amount==.75 and other.fluid.amount==2.25)
+    assert(twin.container==f.shelf and twin.fluid.amount==.5 and f.held==bag)
+end)
+
+test("Fill From cannot grant forward or batch scope, guess an anchor, or silently replace a stale vessel",function()
+    for _,mode in ipairs({"pane","locked","changed-target","changed-donor","replaced-receiver","removed-donor","changed-capacity"}) do
+        local f=fixture()
+        local donor=item(f.main,311,"Donor",2,1.25)
+        local target=item(f.shelf,312,"Jug",2,.25)
+        local twin=item(f.shelf,313,"Jug",2,.25)
+        local src,dst,read=inversePlan(f,donor,target)
+        assert(not Pour.new(f.player,f.world,src,{dst},f.options,read))
+        assert(not Pour.new(f.player,f.world,src,{dst,dst},f.options,read,target))
+        assert(not Pour.new(f.player,f.world,src,{dst},f.options,read,twin))
+        local anchor=dst.pourAnchor;dst.pourAnchor=nil
+        assert(not Pour.new(f.player,f.world,src,{dst},f.options,read,target))
+        dst.pourAnchor=anchor
+        f.job=assert(Pour.new(f.player,f.world,src,{dst},f.options,read,target))
+        if mode=="pane" then f.pane=container("counter")
+        elseif mode=="locked" then f.shelf.lock=true
+        elseif mode=="changed-target" then target.fluid.amount=.5
+        elseif mode=="changed-donor" then donor.fluid.species=water
+        elseif mode=="replaced-receiver" then remove(target);item(f.shelf,target.id,target.name,2,.25)
+        elseif mode=="removed-donor" then remove(donor)
+        else target.fluid.capacity=3 end
+        f.job:tick();f.job:tick()
+        assert(#f.calls==0 and f.job.state=="cancelled" and twin.fluid.amount==.25,mode)
+    end
+end)
+
+test("Fill From on a stock Ground receiver pours in place and does not redirect after facing refresh",function()
+    local f=fixture()
+    local src=item(f.main,321,"Donor",3,2)
+    local dst=item(f.shelf,322,"Ground jug",2,.25);stockGround(f,dst)
+    local native=dst:getWorldItem()
+    local j=inverseStart(f,src,dst)
+    j:tick();isCall(f,1,"pour",321,dst);f.pane=container("counter")
+    fluidAck(f,1.75);j:tick()
+    assert(j.state=="finished" and #f.calls==1 and dst:getWorldItem()==native)
+    assert(dst.container==f.shelf and src.container==f.main and src.fluid.amount==.25 and dst.fluid.amount==2)
+end)
+
+test("Fill From refuses a stock Ground receiver relocated after preview even if still reachable",function()
+    local f=fixture()
+    local src=item(f.main,325,"Donor",3,2)
+    local dst=item(f.shelf,326,"Ground jug",2,0);stockGround(f,dst)
+    local j=inverseStart(f,src,dst)
+    local adjacent={}
+    function dst:getWorldItem() return self.fluid.owner end
+    function dst.fluid.owner:getSquare() return adjacent end
+    function f.player:getSquare() return adjacent end
+    j:tick();j:tick()
+    assert(j.state=="cancelled" and #f.calls==0 and src.fluid.amount==2 and dst.fluid.amount==0)
+end)
+
+test("Fill From uses the exact Ground loan for an item-owned receiver and returns to its captured spot",function()
+    local f=fixture()
+    local src=item(f.main,331,"Donor",3,2)
+    local dst=item(f.shelf,332,"Ground bottle",2,0);local spot=markGround(f,dst,{kind="original"})
+    local j=inverseStart(f,src,dst)
+    j:tick();isCall(f,1,"ground",332,f.shelf);assert(f.calls[1].anchor==spot);moveAck(f,false)
+    j:tick();isCall(f,2,"pour",331,dst);fluidAck(f,2)
+    isCall(f,3,"ground",332,f.main);assert(f.calls[3].anchor==spot);moveAck(f,false)
+    j:tick();assert(j.state=="finished" and #f.calls==3 and src.fluid.amount==0 and dst.fluid.amount==2 and dst.container==f.shelf)
 end)
 
 print("PASS "..tests.." Pour controller scenarios")

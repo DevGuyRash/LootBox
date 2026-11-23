@@ -18,11 +18,7 @@ end
 local function loanable(entry)
     return entry.scope=="loot" and (entry.container:getType()~="floor" or entry.groundAnchor~=nil)
 end
-local function mobile(p)
-    return p:isLocalPlayer() and p:getCurrentSquare() and not p:isDead() and not p:isAsleep()
-        and not p:isMoving() and not p:isRunning() and not p:isSprinting() and not p:isAiming()
-        and not p:isAttacking() and not p:isShoving() and not p:isClimbing() and not p:isKnockedDown()
-end
+local Actor = require "LootBox/PourActor"
 local function slot(e) return {selected=e,live=e,signature=e.pourSignature or (e.amount>0 and Inventory.mix(e))} end
 function Pour.capture(entry)
     if entry.amount>0 then entry.pourSignature=Inventory.mix(entry);return entry.pourSignature~=nil end
@@ -30,23 +26,41 @@ function Pour.capture(entry)
 end
 local function held(slot_) return slot_ and slot_.borrowed end
 
+local function traceScope(entry)
+    if not entry then return "none" end
+    if entry.scope == "loot" then
+        return (entry.groundSquare or entry.groundAnchor) and "ground" or "loot"
+    end
+    return entry.scope == "main" and "main" or entry.scope == "equipped" and "equipped" or "carried"
+end
+
+local function traceRoute(options)
+    local route = options.pourRoute
+    if route == "single" or route == "fill-all" or route == "portable-fill-from" then return route end
+    return "portable"
+end
+
 -- Only snapshots from this click may be used. A new target is never discovered
 -- after a native action, and a display label is never an inventory identity.
-function Pour.new(player,world,source,targets,options,read)
+function Pour.new(player,world,source,targets,options,read,clickedReceiver)
     if not source or not targets or #targets<1 or #targets>512 or type(read)~="function" then
         return nil,"Choose at least one exact destination."
     end
+    if clickedReceiver and (#targets~=1 or not targets[1] or targets[1].item~=clickedReceiver
+        or targets[1].scope~="loot") then return nil,"The selected receiver changed." end
     local seen, frozen = {[source.id]=true}, {}
     for _,e in ipairs(targets) do
-        if not e or seen[e.id] or e.scope=="loot" and (not options.pourLootToLoot
-            or source.scope~="loot" or source.container~=e.container) then return nil,"The chosen destinations changed." end
+        if not e or seen[e.id] or not Inventory.legalScope(source,e,options,clickedReceiver) then
+            return nil,"The chosen destinations changed."
+        end
         seen[e.id],frozen[#frozen+1]=true,slot(e)
     end
-    local shelf=source.scope=="loot" and source.container or nil
-    local inPlaceGround=shelf and shelf:getType()=="floor" and source.object and source.object~=source.item
-    local anchor=source.pourAnchor
+    local origin=clickedReceiver and targets[1] or source.scope=="loot" and source
+    local shelf=origin and origin.container
+    local inPlaceGround=origin and origin.groundSquare~=nil
+    local anchor=origin and origin.pourAnchor
     if shelf and shelf:getType()~="floor" then
-        anchor=anchor or world:pourShelfAnchor(shelf)
+        if not anchor and not clickedReceiver then anchor=world:pourShelfAnchor(shelf) end
         if not anchor or not world:pourShelfReachable(shelf,anchor) then return nil,"The selected storage moved or closed." end
     end
     local Fluid, Move = require "LootBox/PourNative", require "LootBox/PourMove"
@@ -56,16 +70,18 @@ function Pour.new(player,world,source,targets,options,read)
 end
 
 function Pour:allowed()
-    local prefs, pane = self.read()
+    local prefs, pane = self.read(self.shelf)
     if not prefs then return false,"Pour controls or the current context are unavailable." end
-    if not mobile(self.player) then return false,"Character moved, aimed, or could not continue the action." end
+    local blocked = Actor.blocked(self.player)
+    if blocked then return false,blocked end
     if self.cancelReason then return false,"Cancellation was already requested." end
     if self.shelf and pane~=self.shelf then
         -- A stock ground pour turns the character; the game may automatically
         -- select a different loot tab. Let the already-owned action settle
         -- against the same reachable world item, but never start another
         -- destination because of a stale view. Loans still require that tab.
-        local owned=self.inPlaceGround and self.pour:isBusy() and self.target and self.target.selected.scope~="loot"
+        local owned=self.inPlaceGround and self.pour:isBusy() and self.target and
+            (self.target.selected.scope~="loot" or self.source.selected.scope~="loot")
         local done=self.inPlaceGround and not self.target and not self.moving and not self.endReason and self.count>0
             and (self.index>#self.targets or FluidUtil.roundTransfer(self.expected)<=0)
         if not owned and not done then return false,"The selected loot pane changed or closed." end
@@ -99,8 +115,12 @@ function Pour:finish(state, reason)
     -- any exact item names, locations or IDs for the player's local UI.
     pcall(function()
         local diagnostic=self.endReason or self.cancelDiagnostic or reason or "Reason unavailable."
-        print(string.format("[LootBox] action=pour event=terminal state=%s nativeStarted=%s completed=%d confirmedLitres=%.3f phase=%s reason=%s",
-            state,tostring(self.launched==true),self.count,self.liters,self.stopPhase or self.phase or "prepare",diagnostic))
+        local nextTarget = self.target or self.targets[self.index] or self.targets[#self.targets]
+        local context = string.format("route=%s mode=%s source=%s target=%s destinations=%d",
+            traceRoute(self.options),isClient and isClient() and "MP" or "SP",
+            traceScope(self.source.selected),traceScope(nextTarget and nextTarget.selected),#self.targets)
+        print(string.format("[LootBox] action=pour event=terminal state=%s nativeSubmitted=%s completed=%d confirmedLitres=%.3f phase=%s %s reason=%s",
+            state,tostring(self.launched==true),self.count,self.liters,self.stopPhase or self.phase or "prepare",context,diagnostic))
     end)
     -- The active target may have been retired. Audit every original lease,
     -- not just the current target, including an unconfirmed in-flight move.
@@ -143,7 +163,7 @@ function Pour:cancel(silent, diagnostic)
     if not self:isBusy() then return true end
     self.cancelDiagnostic=self.cancelDiagnostic or diagnostic or (silent and "Session cleanup." or "Cancel requested.")
     self.stopPhase=self.stopPhase or self.phase
-    self.silent,self.cancelReason,self.state=silent,"Pour cancelled or interrupted.","cancelling"
+    self.silent,self.cancelReason,self.state=silent,diagnostic or "Pour cancelled or interrupted.","cancelling"
     if self.pour:isBusy() then self.pour:cancel() end
     if self.move:isBusy() then self.move:cancel() end
     if not self.pour:isBusy() and not self.move:isBusy() then self:finish("cancelled",self.cancelReason) end

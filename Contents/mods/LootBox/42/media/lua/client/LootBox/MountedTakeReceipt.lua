@@ -2,6 +2,7 @@
 -- creates, moves, pours or refits anything; the owner retains stock callbacks.
 local Receipt = require "LootBox/CreatedItemReceipt"
 local Inventory = require "LootBox/PourInventory"
+local Actor = require "LootBox/PourActor"
 local Take = {}
 Take.__index = Take
 local ACTION, BOTTLE = "ISAddTakeDispenserBottle", "Base.WaterDispenserBottle"
@@ -81,9 +82,6 @@ local function same(a,b)
     return true
 end
 
-local unsafe={"isDead","isAsleep","isMoving","isRunning","isSprinting","isAiming","isAttacking",
-    "isShoving","isClimbing","isKnockedDown","isbFalling","isPerformingGrappleAnimation"}
-
 local function context(self, phase)
     local p,o,s=self.player,self.action,self.square
     if not isClient() or isServer() or not p:isLocalPlayer() or getSpecificPlayer(self.playerNum)~=p
@@ -93,7 +91,7 @@ local function context(self, phase)
         or o.waterdispenser~=self.old or o.square~=s or o.bottle~=nil then
         return false,"The selected dispenser action, actor or square changed"
     end
-    for _, name in ipairs(unsafe) do if p[name](p) then return false,"The player interrupted the dispenser take" end end
+    if Actor.blocked(p) then return false,"The player interrupted the dispenser take" end
     local here=p:getCurrentSquare()
     local x,y=p:getX(),p:getY()
     if not here or here~=self.from or p:getSquare()~=here or here:getZ()~=self.z

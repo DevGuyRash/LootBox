@@ -94,7 +94,7 @@ local function setup(mp)
         for _,entry in ipairs(f.javaHandles) do if entry==handle then return true end end
         return false
     end
-    f.player={getInventory=function() return f.main end,
+    f.player={getCurrentSquare=function() return f.main end,getInventory=function() return f.main end,
         getCharacterActions=function() return stack end,
         hasTimedActions=function() return not stack:isEmpty() or f.actionAnimation==true end,
         isLocalPlayer=function() return true end, isDead=function() return false end, isAsleep=function() return false end}
@@ -206,6 +206,18 @@ assert(f.native:poll()==nil)
 f.now=8000
 local confirmed,_,observed=f.native:poll()
 assert(not confirmed and observed==0)
+-- Stationary local player may retain a gait/animation flag. Real direction
+-- input must still stop the exact action before it reaches stock wait/update.
+f=setup(true)
+f.isMoving,f.isRunning,f.isSprinting=true,true,true
+function f.player:isPlayerMoving() return false end
+function f.player:pressedMovement() return f.manual end
+assert(f.native:start(f.src,f.dst,.4))
+action=f.queue.current
+f.manual=true
+assert(action:waitToStart()==true and f.stopped==1 and f.updated==0)
+assert(f.native:poll()==false)
+
 f=setup(true); f.isAiming=true
 assert(not f.native:start(f.src,f.dst,.4) and f.queued==0)
 f.isAiming=false; assert(f.native:start(f.src,f.dst,.4)); action=f.queue.current

@@ -496,26 +496,25 @@ function Instance:start(plan, options)
     if started then self.consumption = nil end
     return started, problem
 end
-function Instance:startPour(source,targets,options)
+function Instance:startPour(source,targets,options,clickedReceiver)
     if self.error or loadError or self.replacement or self.recovery:status().pending then return nil,"Finish or recover the current job before pouring." end
     local job=self.jobs:status()
     if job.hasJob or not job.canPreview or self.consumption and self.consumption:isBusy() then return nil,"Finish the current action before pouring." end
     local Pour=require "LootBox/Pour"
-    local function context()
+    local function context(shelf)
         local p,err=currentPreferences()
         if err or not p.contextMenus or not p.inventoryShortcuts or self.error or self.replacement
             or self.recovery:status().pending then return nil end
-        return Pour.options(p),Pour.displayed(self.player:getPlayerNum(),
-            source and source.scope=="loot" and source.container or nil)
+        return Pour.options(p),Pour.displayed(self.player:getPlayerNum(),shelf)
     end
-    local controller,why=Pour.new(self.player,self.world,source,targets,options,context)
+    local controller,why=Pour.new(self.player,self.world,source,targets,options,context,clickedReceiver)
     if not controller then return nil,why end
     self.consumption=controller
     controller:tick()
     if not controller:isBusy() and controller.state~="finished" then return nil,controller.reason end
     return true
 end
-function Instance:worldPour(anchor,take,entries,origin,options)
+function Instance:worldPour(anchor,take,entries,origin,options,loan)
     local job=self.jobs:status()
     if self.error or loadError or self.replacement or self.recovery:status().pending or job.hasJob
         or not job.canPreview or self.consumption and self.consumption:isBusy() then return nil,"Finish or recover the current action first." end
@@ -526,7 +525,15 @@ function Instance:worldPour(anchor,take,entries,origin,options)
         return now.pourFillOrder==options.pourFillOrder and now.pourFillScope==options.pourFillScope
     end
     if not enabled() then return nil,"World fluid shortcuts or fill preferences changed." end
-    local controller,why=require("LootBox/WorldFluidJob").new(self.player,self.world,anchor,take,entries,enabled)
+    local controller,why
+    if loan then
+        if not take or origin~="inventoryShortcuts" or #entries~=1 or loan.a~=anchor or loan.lease.entry~=entries[1] then
+            return nil,"The selected fixture or receiver changed."
+        end
+        controller,why=require("LootBox/WorldLootFill").new(self.player,self.world,loan,enabled)
+    else
+        controller,why=require("LootBox/WorldFluidJob").new(self.player,self.world,anchor,take,entries,enabled)
+    end
     if not controller then return nil,why end
     self.consumption=controller
     controller:tick()

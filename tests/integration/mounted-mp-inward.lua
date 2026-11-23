@@ -465,28 +465,83 @@ local function pourToRefit(x,jug,wanted)
     return refit,right
 end
 
-test("A3 nonempty mix and exact zero both carry only the native ID through pour and locked refit",function()
+local function latchGait(x)
+    x.isMoving,x.isRunning,x.isSprinting=true,true,true
+    function x.player:isPlayerMoving() return x.nativeMovement==true end
+    function x.player:pressedMovement(duringBlock)
+        assert(duringBlock==false)
+        return x.manualMovement==true
+    end
+end
+
+test("A3 nonempty mix and exact zero carry only the native ID through refit even with stationary sprint or animation flags",function()
     for _,initial in ipairs({{}, {[WATER]=12.497615}}) do
         local x=fixture(initial)
-        local jug=detach(x)
-        assert(jug~=x.control and x.control.fluid:isEmpty())
-        local a,final=pourToRefit(x,jug)
-        drop(x.square.rows,x.bareActual)
-        x.job:tick()
-        local mounted=stand(x.square,"WaterDispenser",IsoDirections.E,{[WATER]=6})
-        assert(a:isValid())
-        a:perform();release(x,a)
-        x.main:Remove(jug)
-        x.time=x.time+450;x.job:tick()
-        assert(x.job:isBusy(),"default sprite with retired ID is not receipt")
-        mounted.fluid.parts=final
-        x.job:tick()
-        assert(x.job:isBusy(),"projected contents must settle")
-        x.time=x.time+350;x.job:tick()
-        assert(x.job.state=="finished" and x.job.count==1 and x.main:contains(x.control)
-            and x.control.fluid:isEmpty() and not x.main:contains(jug) and mounted.fluid.locked
-            and math.abs(mounted.fluid:getAmount()-((initial[WATER] or 0)+1))<.00005,
-            x.job.reason)
+        local before=initial[WATER] or 0
+        x.control.fluid.parts=copy(initial)
+        latchGait(x)
+        local log,savedPrint={},print
+        print=function(line)log[#log+1]=line end
+        local ok,err=pcall(function()
+            local jug=detach(x)
+            assert(jug~=x.control and x.control.fluid:getAmount()==before)
+            local a,final=pourToRefit(x,jug)
+            drop(x.square.rows,x.bareActual)
+            x.job:tick()
+            local mounted=stand(x.square,"WaterDispenser",IsoDirections.E,{[WATER]=6})
+            assert(a:isValid())
+            a:perform();release(x,a)
+            x.main:Remove(jug)
+            x.time=x.time+450;x.job:tick()
+            assert(x.job:isBusy(),"default sprite with retired ID is not receipt")
+            mounted.fluid.parts=final
+            x.job:tick()
+            assert(x.job:isBusy(),"projected contents must settle")
+            x.time=x.time+350;x.job:tick()
+            x.job:tick()
+            assert(x.job.state=="finished" and x.job.count==1 and x.main:contains(x.control)
+                and x.control.fluid:getAmount()==before and not x.main:contains(jug) and mounted.fluid.locked
+                and close(mounted.fluid:getAmount(),before+1) and x.donor.fluid:getAmount()==0 and x.sends==3,
+                x.job.reason)
+            assert(#log==5)
+            local serial=assert(log[1]:match("receipt=take%-start job=(%d+) schema=2"))
+            assert(log[1]:find(string.format("mountedLitres=%.6f locked=true donorLitres=1.000000",before),1,true))
+            assert(log[2]:find("receipt=take job="..serial.." schema=2 stand=bare exactJug=true",1,true))
+            assert(log[3]:find("receipt=pour job="..serial.." schema=2 exactJug=true sourceOrdinal=1",1,true))
+            assert(log[3]:find("donorFrom=1.000000 donorTo=0.000000 transferred=1.000000",1,true))
+            assert(log[4]:find("receipt=refit job="..serial.." schema=2 stand=mounted exactJug=true retired=true",1,true))
+            assert(log[4]:find(string.format("mountedLitres=%.6f locked=true donorLitres=0.000000",before+1),1,true))
+            assert(log[5]:find("event=terminal state=finished phase=refit mode=MP reason=refit-confirmed job="..serial,1,true))
+            assert(log[5]:find("donorsConfirmed=1 mountedConfirmed=true confirmedLitres=1.000",1,true))
+            for i,line in ipairs(log) do
+                assert(not line:find("xyz=",1,true) and not line:find("facing=",1,true)
+                    and not line:find("donor=",1,true) and not line:find(tostring(jug.id),1,true)
+                    and not line:find(tostring(x.control.id),1,true))
+                if i<5 then assert(line:find("sparesObserved=1 sameVolumeSpares=1 sparesChanged=0",1,true)) end
+            end
+        end)
+        print=savedPrint
+        assert(ok,err)
+    end
+end)
+
+test("empty and partial mounts reject real movement before the stock Take is sent",function()
+    for _,parts in ipairs({{}, {[WATER]=12.497615}}) do
+        for _,movement in ipairs({"nativeMovement","manualMovement"}) do
+            local x=fixture(parts)
+            latchGait(x)
+            x[movement]=true
+            assert(not x:ask() and #x.q.queue==0 and x.sends==0,"initial movement could queue a Take")
+
+            x[movement]=false
+            local take=x:queueTake()
+            x[movement]=true
+            assert(not engineStart(x,take) and take.action.forceStop,"movement after click crossed the pre-send fence")
+            release(x,take)
+            x.job:tick()
+            assert(x.job.state=="cancelled" and x.sends==0 and #x.q.queue==0 and x.old:getObjectIndex()>=0,
+                "movement allowed a Take, pour, or refit")
+        end
     end
 end)
 

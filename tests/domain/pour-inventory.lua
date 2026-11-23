@@ -294,4 +294,44 @@ do
     local plan,why=Pour.choose(Pour.snapshot(p,w,p.main,loot),choices,{})
     assert(not plan and why:find("Too many",1,true) and probes<=8192)
 end
-print("PASS PourInventory scope, order, exact endpoints and native suitability")
+do
+    local p,w,loot=fixture()
+    local receiver=item(loot,"Receiver",2,.2)
+    local main=item(p.main,"Main donor",3,.8)
+    local pack=bag(p.main,"Pack");p.gear[pack]=true
+    local bagged=item(pack.bag,"Bagged donor",2,1.2)
+    local sibling=item(loot,"Loot donor",1,.4)
+    item(loot,"Empty",1,0)
+    local hidden=item(container(),"Hidden",1,1)
+    local empty=item(p.main,"Empty",1,0)
+    local bad=item(p.main,"Forbidden",1,.6)
+    local unreadable=item(p.main,"Unknown",1,.5);unreadable.fluid.createFluidSample=function() return nil end
+    FluidContainer.CanTransfer=function(from,to) return from~=bad.fluid and to==receiver.fluid end
+    local function inverse(prefs)
+        return Pour.fillFrom(Pour.snapshot(p,w,loot,loot),receiver,prefs or {})
+    end
+    local a=assert(inverse())
+    assert(a.target.item==receiver and a.target.pourSignature and #a.donors==2)
+    assert(a.donors[1].item==main and a.donors[2].item==bagged and a.donors[2].scope=="equipped")
+    assert(a.donors[1].pourSignature and a.donors[2].pourSignature)
+    local opt={pourLootToLoot=true}
+    local b=assert(inverse(opt))
+    assert(#b.donors==3 and b.donors[3].item==sibling)
+    for _,e in ipairs(b.donors) do assert(e.item~=receiver and e.item~=hidden and e.item~=empty) end
+    assert(not Pour.revalidate(p,w,a.target,loot,opt,a.donors[1]),"normal carried-source action cannot target loot")
+    assert(Pour.revalidate(p,w,a.target,loot,{},a.donors[1],receiver))
+    assert(not Pour.revalidate(p,w,a.target,loot,{},a.donors[1],sibling))
+    assert(not Pour.revalidate(p,w,b.target,loot,{},b.donors[3],receiver))
+    assert(Pour.revalidate(p,w,b.target,loot,opt,b.donors[3],receiver))
+    assert(not Pour.fillFrom(Pour.snapshot(p,w,loot,nil),receiver,opt),"an unshown holder is not a destination")
+    assert(not Pour.fillFrom(Pour.snapshot(p,w,p.main,loot),main,opt),"this route never guesses a loot vessel")
+    assert(#assert(Pour.collect(p,w,main,loot,opt)).targets==0,"inverse menu cannot widen regular Pour Into")
+    pack.bag.lock=true;assert(#assert(inverse()).donors==1)
+    loot.lock=true;assert(not inverse(opt));loot.lock=false
+    receiver.fluid.amount=2;assert(not inverse(opt));receiver.fluid.amount=0
+    local fromEmpty=assert(inverse());assert(not fromEmpty.target.pourSignature and #fromEmpty.donors==1)
+    receiver.sealed=true;assert(not inverse(opt));receiver.sealed=false
+    w.deny=true;assert(not inverse(opt));w.deny=false
+    item(p.main,"Collision",1,.4).id=receiver.id;assert(not inverse(opt))
+end
+print("PASS PourInventory scope, order, exact endpoints, inverse donor direction and native suitability")

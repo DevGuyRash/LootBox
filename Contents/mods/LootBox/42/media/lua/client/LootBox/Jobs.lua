@@ -4,6 +4,7 @@ local Routing = require "LootBox/Routing"
 local Carry = require "LootBox/Carry"
 local Condense = require "LootBox/Condense"
 local Completion = require "LootBox/CompletionFeedback"
+local Log = require "LootBox/Diagnostics"
 local Jobs = {}
 Jobs.__index = Jobs
 
@@ -345,11 +346,17 @@ function Jobs:previewCondense(options)
 end
 
 function Jobs:start(plan, options)
-    if self.recoveryRequired then return nil, "Recover personal gear before starting another job" end
-    if planningBlocked(self) then return nil, "A LootBox job is already active" end
     local reviewed = self.reviewed
-    if not reviewed or reviewed.token ~= plan or reviewed.revision ~= self.revision then
-        return nil, "Preview this job again before starting" end
+    local code, reason
+    if self.recoveryRequired then code, reason = "recovery-required", "Recover personal gear before starting another job"
+    elseif planningBlocked(self) then code, reason = "job-active", "A LootBox job is already active"
+    elseif not reviewed or reviewed.token ~= plan or reviewed.revision ~= self.revision then
+        code, reason = "stale-preview", "Preview this job again before starting"
+    end
+    if code then
+        Log.emit("job", "rejected", "not-started", "prepare", code)
+        return nil, reason
+    end
     self.reviewed = nil
     self.completion = {startedAt = now(), movedWeight = 0}
     self.plan, self.cancelled, self.ending, self.hauled, self.suspended = reviewed, false, nil, {}, nil
@@ -360,7 +367,7 @@ function Jobs:start(plan, options)
             skipped = 0, reasons = {}, carried = 0, unconfirmedSources = 0, condense = info,
             reason = "Planning carried-item condensation."}
         self.execution = {phase = "condense", condense = reviewed.condense, batch = {}, reviewBins = false}
-        self:diagnostic("start-condense")
+        self:diagnostic("start")
         return true
     end
     self.view = { state = "running", done = 0, moved = 0, cleared = 0, deferred = 0, total = #reviewed.records, skipped = #reviewed.skipped,
@@ -409,18 +416,64 @@ function Jobs:checkCondense(op)
     return controller:validate(op)
 end
 
-function Jobs:diagnostic(event, reason, work)
+local diagnosticPhase = {condense=true, recovery=true, heavyEmpty=true, carry=true, source=true,
+    binProbe=true, binInspection=true, binReview=true, survey=true, surveyScan=true, walk=true,
+    delivery=true, discoveryWait=true, finalTrash=true}
+local diagnosticDestination = {inventory=true, trash=true, vehicle=true, labels=true, matching=true,
+    floor=true, container=true}
+local diagnosticOperation = {approach=true, transfer=true, trash=true, vehicle=true, gear=true}
+local function jobReason(reason, code, fallback)
+    if code == "capacity" then return "capacity" end
+    if type(reason) ~= "string" then return fallback end
+    if reason:find("Protected: ", 1, true) == 1 then return "protected" end
+    if reason:find("Native operation error: ", 1, true) == 1 then return "native-binding-error" end
+    if reason:find("timed out", 1, true) or reason:find("before timeout", 1, true) then return "timed-out" end
+    if reason:find("Safehouse permissions", 1, true) then return "safehouse-denied" end
+    if reason:find("TrashDeleteAll", 1, true) then return "server-trash-disabled" end
+    if reason:find("selected item changed source", 1, true) or reason == "The item is no longer in its selected source"
+        or reason == "Floor item changed from its original location" then return "source-changed" end
+    if reason == "Item no longer matches the selection" then return "selection-changed" end
+    if reason == "The native loot window is not available" then return "loot-window-unavailable" end
+    if reason == "No path to the destination" or reason:find("out of reach", 1, true) then return "unreachable" end
+    if reason == "The game stopped the native action before completing it" then return "native-interrupted" end
+    if reason:find("ended without the expected result", 1, true) then return "native-result-unconfirmed" end
+    if reason:find("Aiming paused", 1, true) == 1 then return "aiming" end
+    if reason:find("Attacking or shoving paused", 1, true) == 1 then return "combat" end
+    if reason:find("Running or sprinting stopped", 1, true) == 1 then return "running" end
+    if reason == "The player died" then return "player-dead" end
+    if reason:find("Sleeping stopped", 1, true) == 1 then return "player-asleep" end
+    return fallback
+end
+
+function Jobs:diagnostic(event, code, op, stage, state)
     local log = self.diagnostics
-    if not log or log.count >= 128 then return end
-    local phase = self.execution and self.execution.phase or "none"
-    local message = reason and tostring(reason):gsub("[\r\n]", " "):sub(1, 300) or ""
-    local key = event .. "|" .. self.view.state .. "|" .. phase .. "|" .. message
-    if log.seen[key] then return end
-    log.seen[key], log.count = true, log.count + 1
-    local item = work and work.fullType or "none"
-    local id = work and work.itemId or "none"
-    print("[LootBox] event=" .. event .. " state=" .. self.view.state .. " phase=" .. phase
-        .. " item=" .. tostring(item) .. " id=" .. tostring(id) .. " reason=" .. message)
+    if not log then return end
+    local execution = self.execution or self.suspended and self.suspended.execution
+    local phase = execution and execution.phase
+    local request = self.plan and self.plan.request
+    local destination = request and request.destination and request.destination.kind
+    local action = execution and execution.recoveryOnly and "gear-recovery"
+        or self.plan and self.plan.action == "condense" and "condense"
+        or destination == "trash" and "cleanup"
+        or destination == "inventory" and "loot" or "transfer"
+    local operation = op and op.kind
+    phase = diagnosticPhase[phase] and phase or "none"
+    destination = diagnosticDestination[destination] and destination or "none"
+    operation = diagnosticOperation[operation] and operation or "none"
+    stage, code = stage or "job", code or "none"
+    -- A large batch can reject many similar items. Keep one representative
+    -- decision per phase/op/reason, with bounded space and a reserved ending.
+    if event ~= "start" and event ~= "resume" and event ~= "paused" and event ~= "terminal" then
+        if log.count >= 48 then return end
+        local key = table.concat({action, event, phase, operation, stage, code}, "|")
+        if log.seen[key] then return end
+        log.seen[key], log.count = true, log.count + 1
+    end
+    local v = self.view
+    Log.emit(action, event, state or v.state, phase, code,
+        " operation=%s stage=%s destination=%s done=%d total=%d moved=%d cleared=%d skipped=%d deferred=%d unconfirmedSources=%d",
+        operation, stage, destination, v.done or 0, v.total or 0, v.moved or 0,
+        v.cleared or 0, v.skipped or 0, v.deferred or 0, v.unconfirmedSources or 0)
 end
 
 function Jobs:skip(record, reason)
@@ -430,7 +483,7 @@ function Jobs:skip(record, reason)
     table.insert(self.view.reasons, { itemName = record.itemName or "Container", status = status,
         reason = reason, tone = record.tone or "warning" })
     self.view.reason = reason
-    self:diagnostic("left-in-place", reason)
+    self:diagnostic("left-in-place", status == "Protected" and "protected" or jobReason(reason, nil, "not-eligible"))
 end
 
 local function completeTransfer(self, work, source, destination)
@@ -440,7 +493,7 @@ local function completeTransfer(self, work, source, destination)
         floorDestinations = op.floorDestinations}, work.itemId, work.fullType)
 end
 
-function Jobs:finishOperation(work, ok, reason, code)
+function Jobs:finishOperation(work, ok, reason, code, stage, operation)
     self.operation, self.pending, self.view.waiting = nil, nil, nil
     if ok and work.op.kind == "approach" and work.op.travel then
         local trip, target = work.op.travel, work.op.location
@@ -449,7 +502,10 @@ function Jobs:finishOperation(work, ok, reason, code)
         self.routing:observe(trip.from, target or trip.to, trip.distance, trip.elapsedMs)
     end
     if ok and work.op.kind == "trash" then self:settleTrash(work) end
-    if not ok then self:diagnostic("native-failure", reason, work) end
+    if not ok then
+        self:diagnostic("operation-failure", jobReason(reason, code, stage == "receipt" and "native-result-unconfirmed"
+            or stage == "dispatch" and "native-refused" or "preflight-refused"), operation or work.op, stage or "preflight")
+    end
     work.callback(ok, reason, code)
 end
 
@@ -657,7 +713,7 @@ function Jobs:continueOperation()
         if code == "busy" then
             work.retry = true
             self.view.waiting = "Waiting for your current action to finish. This job will continue automatically."
-        else self:finishOperation(work, false, reason, code) end
+        else self:finishOperation(work, false, reason, code, "dispatch", operation) end
         return
     end
     self.pending = {work = work, op = operation}
@@ -892,7 +948,7 @@ function Jobs:carryStep()
                 end
             end
             self:capacityChanged()
-        else self:diagnostic("gear-unavailable", reason) end
+        else self:diagnostic("gear-unavailable", jobReason(reason, code, "gear-unavailable"), op) end
         execution.phase = "carry"
     end)
 end
@@ -921,7 +977,7 @@ function Jobs:onCapacityBlocked(record, reason)
                 self:beginRecovery("stage", "source")
                 return true
             end
-            self:diagnostic("staging-unavailable", failure, record)
+            self:diagnostic("staging-unavailable", jobReason(failure, nil, "no-safe-staging"))
             reason = reason .. "; " .. tostring(failure)
         end
     end
@@ -930,7 +986,7 @@ function Jobs:onCapacityBlocked(record, reason)
     if not execution.deferred[record] then self.view.deferred = self.view.deferred + 1 end
     execution.deferred[record] = {revision = execution.capacityRevision, reason = reason}
     self.view.reason = "This item is waiting for a later load after carrying space is freed."
-    self:diagnostic("capacity-deferred", reason, record)
+    self:diagnostic("capacity-deferred", "capacity")
 end
 
 function Jobs:beginRecovery(mode, after)
@@ -952,6 +1008,8 @@ function Jobs:recoverPersonalGear()
     self.plan = self.plan or {bins = {}}
     self.view.state, self.view.reason = "running", "Returning to the personal gear staging container."
     self.view.reasons, self.view.skipped = self.view.reasons or {}, self.view.skipped or 0
+    self.diagnostics = self.diagnostics or {count = 0, seen = {}}
+    self:diagnostic("start")
     return true
 end
 
@@ -992,12 +1050,12 @@ function Jobs:recoveryStep()
             saved.execution.recovery, saved.execution.heavyRecord = nil, nil
             if saved.execution.phase == "recovery" then saved.execution.phase = "source" end
         end
-        self.execution, self.operation, self.pending, self.activeGraph, self.suspended = nil, nil, nil, nil, saved
         self.recoveryRequired = nil
         self.view.state = saved and "paused" or "finished"
         self.view.reason = saved and "Personal gear recovered. Choose Resume job to continue the paused job." or "Personal gear recovered to its original places."
-        self:diagnostic("recovered", self.view.reason)
-        if not saved then self.reviewed, self.plan, self.carry, self.hauled = nil, nil, nil, nil end
+        self:diagnostic("terminal", "gear-recovered", nil, nil, "finished")
+        self.execution, self.operation, self.pending, self.activeGraph, self.suspended = nil, nil, nil, nil, saved
+        if not saved then self.reviewed, self.plan, self.carry, self.hauled, self.diagnostics = nil, nil, nil, nil, nil end
     else execution.recovery, execution.phase = nil, work.after or "source" end
 end
 
@@ -1721,9 +1779,12 @@ function Jobs:carriedCount()
     return count
 end
 
-function Jobs:complete(state, reason)
+function Jobs:complete(state, reason, diagnostic)
     local recoveryOnly = self.execution and self.execution.recoveryOnly
     local completion, plan = self.completion, self.plan
+    local code = diagnostic or self.ending and self.ending.code or jobReason(reason, nil, state == "finished" and "completed"
+        or state == "finished_with_skips" and "completed-with-notes" or state == "paused" and "paused"
+        or state == "cancelled" and "player-cancelled" or "job-failed")
     if self.execution and self.execution.condense then
         self.view.condense = self.execution.condense:status()
         if (self.view.condense.buffered or 0) > 0 then
@@ -1749,7 +1810,7 @@ function Jobs:complete(state, reason)
         for _, target in ipairs(self.plan.bins or {}) do target.approved, target.needsInspection = {}, true end
         self.view.reason = (self.view.reason or "Stopped") .. ". Choose Resume job to continue."
     end
-    self:diagnostic("complete", self.view.reason)
+    self:diagnostic(state == "paused" and "paused" or "terminal", code, self.operation and self.operation.op)
     self.execution, self.pending, self.operation, self.activeGraph, self.ending, self.binReview = nil, nil, nil, nil, nil, nil
     self.view.waiting = nil
     if state == "cancelled" then
@@ -1760,7 +1821,7 @@ function Jobs:complete(state, reason)
     if not self.suspended then
         -- Terminal status is a display snapshot, not an owner of planning graphs.
         -- A failed recovery may still own a paused checkpoint and must retain it.
-        self.reviewed, self.plan, self.carry, self.hauled, self.completion = nil, nil, nil, nil, nil
+        self.reviewed, self.plan, self.carry, self.hauled, self.completion, self.diagnostics = nil, nil, nil, nil, nil, nil
     end
     if completion and state ~= "paused" and (not recoveryOnly or state == "cancelled") then
         Completion.job(self.player, plan, self.view, completion, now())
@@ -1776,7 +1837,7 @@ function Jobs:advance()
         if done == false and (code == "yielded" or code == "busy") then
             pending.work.retry, pending.work.sourcePrepared, pending.work.walk = true, nil, nil
             self.view.waiting = "Waiting for your current action to finish. This job will continue automatically."
-        elseif not done then self:finishOperation(pending.work, false, reason, code)
+        elseif not done then self:finishOperation(pending.work, false, reason, code, "receipt", pending.op)
         elseif pending.op == pending.work.op then self:finishOperation(pending.work, true)
         else pending.work.index = pending.work.index + 1 end
         return
@@ -1822,12 +1883,14 @@ function Jobs:advance()
     else error("Unknown job execution phase") end
 end
 
-function Jobs:finishWhenSettled(state, reason)
-    self.ending = self.ending or {state = state, reason = reason}
+function Jobs:finishWhenSettled(state, reason, code)
+    self.ending = self.ending or {state = state, reason = reason, code = code}
     self.view.state = state == "paused" and "pausing" or "cancelling"
-    self:diagnostic("stopping", reason)
     local ok, result, err = pcall(self.native.cancel, self.native, self.operation and self.operation.op)
-    if not ok or result == false then self.ending.reason = (self.ending.reason or "") .. "; cancellation error: " .. tostring(ok and err or result) end
+    if not ok or result == false then
+        self.ending.reason = (self.ending.reason or "") .. "; cancellation error: " .. tostring(ok and err or result)
+        self:diagnostic("cleanup-failure", "native-cancel-error", self.operation and self.operation.op, "cleanup")
+    end
 end
 
 function Jobs:tick()
@@ -1840,7 +1903,7 @@ function Jobs:tick()
             local ok, result, err = pcall(self.native.poll, self.native)
             if not ok then
                 self.view.reason = "Native cleanup error: " .. tostring(result)
-                self:diagnostic("cleanup-failure", self.view.reason, self.operation)
+                self:diagnostic("cleanup-failure", "native-cleanup-error", self.operation and self.operation.op, "cleanup")
                 return
             end
             if result == nil then return end
@@ -1850,7 +1913,6 @@ function Jobs:tick()
         end
         self:complete(self.ending.state, self.ending.reason)
     elseif self.execution then
-        self:diagnostic("transition")
         if not self.native:isBusy() and self.native:isPlayerBusy() then
             if self.operation and not self.operation.completed then
                 self.operation.retry, self.operation.sourcePrepared, self.operation.walk = true, nil, nil
@@ -1860,7 +1922,7 @@ function Jobs:tick()
         end
         self.view.waiting = nil
         local ok, err = pcall(self.advance, self)
-        if not ok then self:finishWhenSettled("failed", "Job execution failed: " .. tostring(err)) end
+        if not ok then self:finishWhenSettled("failed", "Job execution failed: " .. tostring(err), "job-binding-error") end
     end
 end
 
@@ -1874,6 +1936,7 @@ function Jobs:resume()
     self.execution, self.operation, self.activeGraph, self.binReview = saved.execution, saved.operation, saved.graph, nil
     self.reviewed = nil
     self.suspended, self.view.state, self.view.reason = nil, "running", "Continuing the stopped job with current item and destination checks."
+    self:diagnostic("resume")
     if self.execution.condense then self.execution.condense:onResume() end
     if self.operation and not self.operation.completed then
         self.operation.retry, self.operation.sourcePrepared, self.operation.walk = true, nil, nil
@@ -1914,7 +1977,7 @@ end
 function Jobs:pause()
     if self.ending then return true end
     if not self.execution then return nil, "There is no running job to pause" end
-    self:finishWhenSettled("paused", "Paused by the player")
+    self:finishWhenSettled("paused", "Paused by the player", "player-paused")
     return true
 end
 
@@ -1922,15 +1985,15 @@ function Jobs:cancel(silent)
     if silent then self.completion = nil end
     if self.ending then
         -- Cancel supersedes an in-flight Pause without issuing native cleanup twice.
-        self.ending.state, self.ending.reason = "cancelled", "Cancelled"
+        self.ending.state, self.ending.reason, self.ending.code = "cancelled", "Cancelled", silent and "session-cleanup" or "player-cancelled"
         self.view.state = "cancelling"
         return true
     end
     if not self.execution and not self.native:isBusy() then
-        if self.suspended then self:complete("cancelled", "Cancelled") end
+        if self.suspended then self:complete("cancelled", "Cancelled", silent and "session-cleanup" or "player-cancelled") end
         return true
     end
-    self:finishWhenSettled("cancelled", "Cancelled")
+    self:finishWhenSettled("cancelled", "Cancelled", silent and "session-cleanup" or "player-cancelled")
     return true
 end
 

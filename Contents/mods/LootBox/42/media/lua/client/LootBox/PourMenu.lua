@@ -18,18 +18,22 @@ end
 local function already(menu)
     for _,o in ipairs(menu.options or {}) do
         -- The native pool clears/reassigns target even when reusing an option.
-        if o.name=="Pour Into" and o.target==marker then return true end
+        if o.target==marker and (o.name=="Pour Into" or o.name=="Fill From") then return true end
     end
     return false
 end
 
-local function otherPourMenu(parent)
+local function otherTitle(parent,title)
     for _,o in ipairs(parent.options or {}) do
         if type(o.name)=="string" and o.target~=marker then
             local name=o.name:lower():gsub("[%s%.]+$","")
-            if name=="pour into" then return true end
+            if name==title then return true end
         end
     end
+end
+
+local function otherPourMenu(parent)
+    if otherTitle(parent,"pour into") then return true end
     local mods=getActivatedMods and getActivatedMods()
     return mods and (mods:contains("PourIntoContainer") or mods:contains("\\PourIntoContainer"))
 end
@@ -71,14 +75,55 @@ local function run(pick)
     pick.click.used=true
     local app,err=pick.app.get(pick.index)
     local ok
-    if app==pick.instance then ok,err=app:startPour(pick.source,pick.targets,pick.prefs) end
+    if app==pick.instance then
+        local options={}
+        for k,v in pairs(pick.prefs) do options[k]=v end
+        options.pourRoute=pick.route
+        ok,err=app:startPour(pick.source,pick.targets,options,pick.receiver)
+    end
     if not ok then
-        local reason="Pour Into: "..tostring(err or "The selected vessels are no longer available.")
+        local reason=(pick.receiver and "Fill From: " or "Pour Into: ")..tostring(err or "The selected vessels are no longer available.")
         local p=getSpecificPlayer(pick.index)
         if p and HaloTextHelper and HaloTextHelper.addBadText then HaloTextHelper.addBadText(p,reason)
         else print("[LootBox] "..reason) end
     end
     return ok,err
+end
+
+local function fillFrom(host,plan,index,instance,options,app,click,tooltip,world)
+    if otherTitle(host,"fill from") then return end
+    local dst=plan.target
+    local root=host:addOption("Fill From",marker,nil)
+    if not root then return end
+    builtinIcon(root,"Item_WaterDrop",dst.item)
+    if #plan.donors==0 and #plan.fixtures==0 then
+        root.notAvailable=true
+        local help="No compatible source with liquid. Carry a donor or stand beside a usable fixture, then reopen this menu."
+        if not options.pourLootToLoot then help=help.." Enable loot-to-loot to use another vessel in this same loot container." end
+        tooltip(root,"Fill From",help)
+        return
+    end
+    local help="Fill "..dst.label.." ("..destinationText(dst)..") from one exact source."
+    if plan.truncated then help=help.." Inventory scan limit reached; only verified individual sources are shown." end
+    tooltip(root,"Fill From",help)
+    local child=ISContextMenu:getNew(host)
+    host:addSubMenu(root,child)
+    WorldMenu.addLootSources(child,world,plan.fixtures,dst)
+    local counts={}
+    for _,e in ipairs(plan.donors) do counts[e.label]=(counts[e.label] or 0)+1 end
+    for _,e in ipairs(plan.donors) do
+        local name=e.label
+        if counts[name]>1 then name=name.." #"..tostring(e.id) end
+        local ok,liquid=pcall(function() return e.fluid:getUiName() end)
+        if ok and type(liquid)=="string" and liquid~="" and not name:find(liquid,1,true) then name=name.." ("..liquid..")" end
+        local title=name.." | "..liters(e.amount).."L"
+        local row=child:addOption(title,{app=app,click=click,index=index,instance=instance,source=e,
+            targets={dst},receiver=dst.item,prefs=options,route="portable-fill-from"},run)
+        if row then
+            row.iconTexture,row.itemForTexture=nil,e.item
+            tooltip(row,"Fill From",name.." ("..destinationText(e).."). Destination: "..dst.label..". Uses only these two vessels.")
+        end
+    end
 end
 
 -- Do not change stock Fluid or replace callbacks installed by another mod.
@@ -95,9 +140,30 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
     local holder=members[1]:getContainer()
     local viewed=Pour.displayed(index,holder)
     local snapshot=Inventory.snapshot(getSpecificPlayer(index),instance.world,holder,viewed)
+    -- Forward and inverse entrances share one click and the physical holder
+    -- captured here, including an explicit section of a combined loot view.
+    local app,click=require "LootBox/App",{}
+    local checkedAnchor,anchor=false,nil
+    local function pin(e)
+        if e.scope~="loot" or e.container:getType()=="floor" then return true end
+        if not checkedAnchor then anchor=instance.world:pourShelfAnchor(e.container);checkedAnchor=true end
+        e.pourAnchor=anchor
+        return anchor~=nil
+    end
+    local inverse
+    if #members==1 and viewed and holder==viewed then
+        inverse=Inventory.fillFrom(snapshot,members[1],options)
+        if inverse and not pin(inverse.target) then inverse=nil end
+    end
     -- Empty carried vessels still need Fill From even when they cannot pour.
     local worldOK,world=pcall(WorldMenu.inventory,index,parent,branded,members,snapshot,instance,options,tooltip)
     if not worldOK then world=nil end
+    if inverse then
+        local ok,fixtures=pcall(WorldMenu.lootSources,world,inverse.target,click)
+        inverse.fixtures=ok and fixtures or {}
+        fillFrom(parent,inverse,index,instance,options,app,click,tooltip,world)
+        fillFrom(branded,inverse,index,instance,options,app,click,tooltip,world)
+    end
     local mounted=MountedMenu.nearby(index,instance)
     local function mountedTargets(e) return MountedMenu.targets(mounted,e,instance.world) end
     -- A collapsed row delegates the choice; an expanded individual never does.
@@ -121,14 +187,11 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
                 return unavailable(parent,branded,candidate,tooltip,reason or "That vessel cannot pour from here.")
             end
         end
-        return
+        return inverse~=nil or nil
     end
     local item=plan.source.item
-    if plan.source.scope=="loot" and plan.source.container:getType()~="floor" then
-        plan.source.pourAnchor=instance.world:pourShelfAnchor(plan.source.container)
-        if not plan.source.pourAnchor then
-            return unavailable(parent,branded,item,tooltip,"The selected storage is out of reach or cannot return this vessel. Move closer or carry the source.")
-        end
+    if not pin(plan.source) then
+        return unavailable(parent,branded,item,tooltip,"The selected storage is out of reach or cannot return this vessel. Move closer or carry the source.")
     end
     local targets,fill=plan.targets,plan.fill
     local fixtures=WorldMenu.destinations(world,plan.source)
@@ -141,7 +204,6 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
         source=source..string.format(" (%.1f%% full; least-filled eligible vessel in this stack)",
             100*plan.source.amount/plan.source.capacity)
     end
-    local app,click=require "LootBox/App",{}
     local groups=Stacks.targets({targets=targets},index)
     local function render(host)
         local root=host:addOption("Pour Into",marker,nil)
@@ -159,12 +221,12 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
         tooltip(root,"Pour Into",source)
         local child=ISContextMenu:getNew(host)
         host:addSubMenu(root,child)
-        local function choice(title,list)
+        local function choice(title,list,route)
             return child:addOption(title,{app=app,click=click,index=index,instance=instance,source=plan.source,
-                targets=list,prefs=options},run)
+                targets=list,prefs=options,route=route},run)
         end
         if #fill>0 then
-            local batch=choice("Fill All",fill)
+            local batch=choice("Fill All",fill,"fill-all")
             builtinIcon(batch,"media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",item)
             local order=options.pourFillScope=="main-only" and "main inventory only" or
                 options.pourFillScope=="equipped-first" and "equipped first" or "main inventory first"
@@ -176,7 +238,7 @@ function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
         -- A direct stack entry binds one exact vessel; Fill All uses the whole list.
         for _,group in ipairs(groups) do
             local e=group.entry
-            local row=choice(destinationText(e),{e})
+            local row=choice(destinationText(e),{e},"single")
             if row then
                 row.iconTexture,row.itemForTexture=nil,e.item
                 local detail=group.count>1 and (" Uses the least-filled of "..group.count.." compatible vessels in this stack.") or ""

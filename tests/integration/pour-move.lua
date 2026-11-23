@@ -54,7 +54,8 @@ local function reset(mp)
     place(f.item,f.source)
     f.q={queue={},addToQueue=function(q,a) q.queue[#q.queue+1]=a;q.current=q.current or a end,
         removeFromQueue=function(q,a) for i,v in ipairs(q.queue)do if a==v then table.remove(q.queue,i);return end end end}
-    f.player={isDead=function()return false end,isAsleep=function()return false end,
+    f.player={isLocalPlayer=function()return true end,getCurrentSquare=function()return f.source end,
+        isShoving=function()return false end,isClimbing=function()return false end,isKnockedDown=function()return false end,isDead=function()return false end,isAsleep=function()return false end,
         isMoving=function()return f.moving end,isRunning=function()return false end,isSprinting=function()return false end,
         isAiming=function()return f.aiming end,isAttacking=function()return false end,hasTimedActions=function()return false end,
         isEquipped=function()return f.worn end}

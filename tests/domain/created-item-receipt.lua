@@ -8,6 +8,7 @@ local function fixture()
         function v:getItems()
             return {size=function() return #self.items end,get=function(_,index) return self.items[index+1] end}
         end
+        function v:getContainingItem() return self.owner end
         return v
     end
     local main=container()
@@ -16,6 +17,8 @@ local function fixture()
         local item={id=id,fullType=fullType or "Base.CannedPeachesOpen",container=dest or main}
         function item:getID() return self.id end
         function item:getContainer() return self.container end
+        function item:getFullType() return self.fullType end
+        function item:getWorldItem() return self.worldItem end
         item.container.items[#item.container.items+1]=item
         return item
     end
@@ -161,5 +164,92 @@ test("expiry, bounded inventory, and cancelled/refused actions are terminal",fun
     local stopped=assert(f:watch());stopped:cancel("User cancelled")
     assert(not stopped:complete(f.owner,{id=3}))
     local ok,reason=stopped:poll();assert(ok==false and reason=="User cancelled")
+end)
+local function orderedReplacement(f,shell,options)
+    local mode={guard=function(owner,pane) return owner==f.owner and pane==f.main and not f.interrupted end,
+        value=function(i) return i.safe~=false end,settleMs=100,strictDelta=true,retiredItem=shell,readyAtPerform=true}
+    for k,v in pairs(options or {}) do mode[k]=v end
+    return f:watch({correlation=mode,timeoutMs=500})
+end
+test("strict replacement permits one exact retired input and preserves identical carried spares",function()
+    local f=fixture()
+    local shell=f:add(10,"Base.CannedPeaches")
+    local previous=f:add(11)
+    local bag=f:add(12,"Base.Bag")
+    local pocket=f.elsewhere;pocket.owner=bag
+    function bag:getInventory() return pocket end
+    local nested=f:add(13,nil,pocket)
+    local r=assert(orderedReplacement(f,shell));assert(r:poll()==nil and r:start(f.owner))
+    f.at=10;local good=f:add(14)
+    assert(r:poll()==nil)
+    f:remove(shell);f.anchored=true
+    assert(r:complete(f.owner,{correlated=true}));assert(r:poll()==nil)
+    f.at=111
+    local ok,out=r:poll()
+    assert(ok and out==good and previous.container==f.main and nested.container==pocket)
+end)
+test("strict replacement never adopts a missing or post-barrier output, an overlap or a restored shell",function()
+    for _,mode in ipairs({"late","second","not-retired","wrong-order","decoy-first","unrelated-add","unrelated-remove","restore","replaced"}) do
+        local f=fixture()
+        local shell=f:add(10,"Base.CannedPeaches")
+        local old=f:add(11)
+        local r=assert(orderedReplacement(f,shell))
+        if mode=="decoy-first" then f:add(8);assert(not r:start(f.owner))
+        else
+            assert(r:start(f.owner))
+            local good
+            if mode~="late" and mode~="wrong-order" then good=f:add(12) end
+            if mode=="second" then f:add(13) end
+            if mode=="unrelated-add" then f:add(13,"Base.Nails") end
+            if mode=="unrelated-remove" then f:remove(old) end
+            if mode~="not-retired" then f:remove(shell);f.anchored=true end
+            if mode=="wrong-order" then assert(r:poll()==false);f:add(12) end
+            local ok=r:complete(f.owner,{correlated=true})
+            if mode=="restore" or mode=="replaced" then
+                assert(ok)
+                if mode=="restore" then shell.container=f.main;f.main.items[#f.main.items+1]=shell
+                else f:remove(good);f:add(12) end
+            else assert(not ok,mode) end
+            if mode=="late" then f:add(12) end
+        end
+        assert(r:poll()==false,mode)
+    end
+end)
+
+test("strict typed companion validators preserve primary identity and exact cardinality",function()
+    for _,mode in ipairs({"split","bad-companion-role","nested-companion","wrong-value","double-companion","post-done-change","native-disagrees"}) do
+        local f=fixture()
+        local shell=f:add(10,"Base.CannedPeaches")
+        local old=f:add(12,"Base.Lid")
+        local bag=f:add(13,"Base.Bag")
+        f.elsewhere.owner=bag
+        function bag:getInventory() return f.elsewhere end
+        local options={
+            companions={lid=function(i) return i.condition==6 end},
+            companionRole=function(i)
+                if i.fullType=="Base.Lid" then return mode=="bad-companion-role" and "other" or "lid" end
+            end,
+            atPerform=function(primary) return mode~="native-disagrees" and primary.id==15 end,
+        }
+        local r=orderedReplacement(f,shell,options)
+        if mode=="bad-companion-role" then assert(not r)
+        else
+            assert(r:start(f.owner))
+            local lid=f:add(16,"Base.Lid",mode=="nested-companion" and f.elsewhere or f.main)
+            lid.condition=mode=="wrong-value" and 4 or 6
+            if mode=="split" then assert(r:poll()==nil) end
+            if mode=="double-companion" then f:add(17,"Base.Lid").condition=6 end
+            local actual=f:add(15)
+            f:remove(shell);f.anchored=true
+            local good=mode=="split" or mode=="post-done-change"
+            assert((r:complete(f.owner,{correlated=true})==true)==good)
+            if mode=="post-done-change" then lid.condition=0 end
+            if mode=="split" then
+                assert(r:poll()==nil);f.at=101
+                local ok,checked=r:poll();assert(ok and checked==actual and checked~=lid)
+            else assert(r:poll()==false,mode) end
+            assert(old.container==f.main)
+        end
+    end
 end)
 print("PASS "..count.." exact created item receipt scenarios")

@@ -1,3 +1,4 @@
+local Actor = require "LootBox/PourActor"
 require "TimedActions/ISTimedActionQueue"
 require "TimedActions/ISInventoryTransferUtil"
 
@@ -30,9 +31,7 @@ local function endpoints(s)
 end
 
 local function safe(player)
-    return not isServer() and not player:isDead() and not player:isAsleep() and not player:isMoving()
-        and not player:isRunning() and not player:isSprinting() and not player:isAiming()
-        and not player:isAttacking()
+    return not isServer() and not Actor.blocked(player)
 end
 
 local function status(s)

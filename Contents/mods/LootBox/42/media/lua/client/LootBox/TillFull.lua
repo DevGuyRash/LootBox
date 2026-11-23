@@ -160,6 +160,22 @@ function TillFull:resolveTransferred(record, confirming)
     local main, source = self.player:getInventory(), record.source
     local direct = record.item:getContainer()
     record.identityUnresolved, record.absentAtEndpoints = nil, nil
+    if record.pinOpened then
+        -- A mapped replacement arrived in main and uses no stock item move.
+        -- A new object with the same ID is not the exact observed result.
+        local observed=main:getItemWithID(record.id)
+        if main~=source or (observed and observed~=record.item)
+            or direct and (direct~=main or observed~=record.item) then return "The exact opened item moved or changed" end
+        if confirming then
+            local exact,problem=OpenFull.networkItem(main,main,record.id,record.fullType)
+            if problem or exact~=observed then return "The exact opened item could not be uniquely confirmed" end
+        end
+        if direct==main then return end
+        if record.item:getWorldItem() then return "The exact opened item was dropped" end
+        record.identityUnresolved=true
+        if confirming then record.absentAtEndpoints=true end
+        return
+    end
     if not main.getItemWithID or not source or not source.getItemWithID then
         if direct == main then record.seenInMain = true; return end
         if direct == source then return end
@@ -276,10 +292,12 @@ function TillFull:inspect(record)
     if protected then return nil, "Protected: " .. tostring(reason or "selected item") end
     -- The native selected recipe is authoritative for a closed food package.
     -- E.g. closed canned milk has neither CantEat nor a fluid seal.
-    local opening = self.openingRecipe and not record.opened and (item:isSealed() or (self.kind == "food"
+    local newFluid=self.openingRecipe and self.kind=="fluid" and not record.opened
+        and OpenFull.opensNewFluid(self.player,item,self.openingRecipe)
+    local opening = self.openingRecipe and not record.opened and (newFluid or item:isSealed() or (self.kind == "food"
         and (item:getScriptItem():isCantEat() or OpenFull.recipeKind(self.player, item, self.openingRecipe) ~= nil)))
     if self.menuSource and self.openingRecipe and (opening or record.opened)
-        and not OpenFull.recipeMenuAllowed(self.player, item, self.kind, self.kind == "fluid" and self:fluidFor(item)) then
+        and not OpenFull.recipeMenuAllowed(self.player, item, self.kind, self.kind == "fluid" and self:fluidFor(item),self.openingRecipe) then
         return nil, "The game does not currently allow eating or drinking this item"
     end
     if self.openingRecipe and self.kind == "fluid" and not opening and not record.opened and not self.opening then
@@ -296,6 +314,7 @@ function TillFull:inspect(record)
         hunger, thirst = -item:getHungerChange(), -item:getThirstChange()
     else
         if instanceof(item, "Food") and not safeFood(item) then return nil, "This fluid's food container is unsafe" end
+        if newFluid then return {opening=true,newFluid=true} end
         local fluid = self:fluidFor(item)
         if not fluid or fluid:getCapacity() > 3 then return nil, "Use an open drinking vessel" end
         hunger, thirst = fluidEffects(fluid, opening)
@@ -308,7 +327,7 @@ end
 -- The shell of a replacement food may have no nutrition at all. Ask only
 -- whether opening is useful; never fix a bite/sip before the output exists.
 function TillFull:plannedPortion(h, t, effects, both)
-    if effects.opening and self.kind == "food" then
+    if effects.opening and (self.kind == "food" or effects.newFluid) then
         return (self.goal == "fluid" and t or h) > 0 and 1 or 0
     end
     return TillFull.portion(h, t, effects.hunger, effects.thirst, both, self.goal)
@@ -403,14 +422,14 @@ function TillFull:step()
             if reason ~= "opened" or not opened then
                 self:finish("failed", "The opened item was not confirmed"); return
             end
-            -- The adapter supplies only the causally identified native output.
-            -- Never discover another item by type or position in the inventory.
+            -- The adapter supplies the one exact observed item. Do not look up
+            -- a different object by type or position if that item later changes.
             local previous = self.records[self.index]
             local source = self.player:getInventory()
             if opened:getID() == previous.id and tostring(opened:getFullType()) == previous.fullType
                 and (opened == previous.item or self.kind == "fluid" or receipt == "sameItem") then source = previous.source end
             self.records[self.index] = {item = opened, id = opened:getID(), fullType = tostring(opened:getFullType()),
-                source = source, opened = true, dispatched = true}
+                source = source, opened = true, dispatched = true, pinOpened=receipt=="mappedItem"}
             hunger, thirst = needs(self.player)
         else
             self.inflight.receipt = receipt
@@ -645,7 +664,7 @@ function TillFull:step()
         local fraction = self:plannedPortion(h, t, effects, self.both)
         self.targetReached = fraction ~= nil and fraction <= 0
         return self.targetReached
-    end, function() return needs(self.player) end, autoGuard)
+    end, function() return needs(self.player) end, autoGuard,record.pinOpened)
     self.attempts = self.attempts + 1
     self.launched = self.launched or ok or self.native:isBusy()
     if not ok then

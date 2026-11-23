@@ -568,21 +568,26 @@ local function consumptionMenu(playerIndex, parent, items)
         local drink = kind ~= "food"
         local title = recipe and (drink and "Open and Drink Til Full" or "Open and Eat Til Full") or "Til Full"
         local added
-        if recipe and isClient() and not OpenFull.keeps(player, anchor, recipe) then
-            -- No second Open button: the only stock MP receipt with a new ID
-            -- also orders an immediate fixed bite. Leave both actions to PZ.
+        local replacement=recipe and isClient() and not OpenFull.keeps(player,anchor,recipe)
+        local mapped=replacement and OpenFull.replacement(player,anchor,recipe)
+        if replacement and not mapped then
+            -- Unsupported producers still have no safe one-click handoff.
             title = "Til Full (use the opened item)"
             added = menu:addOption(title, manualOpenHint, nil)
             if added then added.notAvailable = true end
             local cmd = drink and "Drink" or "Eat"
             tooltip(added, title, "Use the normal Open action without eating. Right-click the opened item and choose "
-                .. cmd .. " > Til Full. Multiplayer does not identify this recipe's new item after plain Open.")
+                .. cmd .. " > Til Full. LootBox cannot safely identify this recipe's new item in this multiplayer session.")
         else
             added = menu:addOption(title, {playerIndex = playerIndex, items = snapshot,
                 kind = kind, openingRecipe = recipe, source = anchor:getContainer()}, runTillFull)
             if recipe then
-                tooltip(added, title, "Open the selected item normally, then measure your current "
-                    .. (drink and "thirst before drinking." or "hunger before eating."))
+                local how="Open the selected item normally, then measure your current "
+                    .. (drink and "thirst before drinking." or "hunger before eating.")
+                if mapped then
+                    how=how.." Keep the opener in main inventory. Only continues if one matching result from this opening can be isolated."
+                end
+                tooltip(added,title,how)
             end
         end
         if added then added.itemForTexture = root.itemForTexture or anchor end
@@ -610,7 +615,7 @@ local function consumptionMenu(playerIndex, parent, items)
                     local selected = inventoryItem(option.target)
                     local r = option.param1
                     local k = selected and r and OpenFull.recipeKind(player, selected, r)
-                    if k and OpenFull.recipeMenuAllowed(player, selected, k) then
+                    if k and OpenFull.recipeMenuAllowed(player, selected, k, nil, r) then
                         local p = plain[selected]
                         if p and p.recipe ~= r then p.ambiguous = true
                         elseif not p then plain[selected] = {menu = menu, root = option, recipe = r, kind = k} end

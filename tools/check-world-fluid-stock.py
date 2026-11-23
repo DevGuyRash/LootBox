@@ -11,7 +11,8 @@ WORLD = Path("tests/integration/world-fluids.lua")
 INVENTORY = Path("tests/integration/pour-native.lua")
 STOCK = ("shared/ISBaseObject", "shared/TimedActions/ISBaseTimedAction",
          "client/TimedActions/ISTimedActionQueue", "shared/TimedActions/ISTakeWaterAction",
-         "shared/TimedActions/ISAddFluidFromItemAction", "client/ISUI/ISWorldObjectContextMenu")
+         "shared/TimedActions/ISAddFluidFromItemAction", "shared/TimedActions/ISDropWorldItemAction",
+         "client/ISUI/ISWorldObjectContextMenu")
 
 def stock_loader(install, name, sources):
     body = [f"function {name}()"]

@@ -22,7 +22,7 @@ local function descriptors(anchors)
     end
 end
 local function detail(a)
-    local amount=a.capacity>=9999 and getText("Tooltip_WaterUnlimited") or string.format("%.3f / %.3f L",a.amount,a.capacity)
+    local amount=a.unlimited and getText("Tooltip_WaterUnlimited") or string.format("%.3f / %.3f L",a.amount,a.capacity)
     local fluid=a.object:getFluidUiName()
     return a.name.." ("..a.place.."): "..tostring(fluid or "").." | "..amount
 end
@@ -32,7 +32,7 @@ local function run(v)
     local s=v.state
     local app=require("LootBox/App").get(s.index)
     local ok,reason
-    if app==s.app then ok,reason=app:worldPour(v.anchor,v.take,v.entries,s.origin,s.options) end
+    if app==s.app then ok,reason=app:worldPour(v.anchor,v.take,v.entries,s.origin,s.options,v.loan) end
     if not ok then
         local p=getSpecificPlayer(s.index)
         local text=tostring(reason or "The selected world fluid or vessel is no longer available.")
@@ -41,8 +41,8 @@ local function run(v)
     end
     return ok,reason
 end
-local function row(host,title,s,a,take,entries,help,icon)
-    local o=host:addOption(title,{state=s,anchor=a,take=take,entries=entries},run)
+local function row(host,title,s,a,take,entries,help,icon,loan)
+    local o=host:addOption(title,{state=s,anchor=a,take=take,entries=entries,loan=loan},run)
     if o then
         if icon then o.itemForTexture=icon else o.iconTexture=getTexture("Item_WaterDrop") end
         s.tip(o,title,detail(a)..". "..help)
@@ -79,7 +79,7 @@ function Menu.inventory(index,parent,branded,members,snapshot,app,options,tip)
     local refs,selected={},{}
     for _,i in ipairs(members) do refs[i]=true end
     for _,e in ipairs(snapshot.entries) do if refs[e.item] and e.scope~="loot" then selected[#selected+1]=e end end
-    if #selected==0 then return end
+    if #selected==0 then return s end
     local sources={}
     for _,a in ipairs(anchors) do
         local available=eligible(s,a,selected,true)
@@ -99,6 +99,28 @@ function Menu.inventory(index,parent,branded,members,snapshot,app,options,tip)
     end
     render(parent);render(branded)
     return s
+end
+-- The clicked loot receiver already has a Fill From submenu for portable
+-- donors. Add fixtures to that same frozen plan (including world-only picks).
+function Menu.lootSources(s,dst,click)
+    local out={}
+    if not s then return out end
+    local Loan=require "LootBox/WorldLootFill"
+    local lease=Loan.bind(s.player,s.world,dst)
+    if not lease then return out end
+    s.once=click
+    for _,a in ipairs(s.anchors) do
+        local source=Loan.source(s.player,a,dst)
+        if source then out[#out+1]={a=a,lease=lease,source=source} end
+    end
+    return out
+end
+function Menu.addLootSources(host,s,choices,dst)
+    for _,c in ipairs(choices) do
+        row(host,c.a.label,s,c.a,true,{dst},
+            "Borrow "..dst.label..", fill it using the game's fixture action, then return the same vessel.",
+            nil,c)
+    end
 end
 function Menu.destinations(s,source)
     local list={}

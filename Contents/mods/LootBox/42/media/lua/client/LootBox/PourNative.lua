@@ -1,3 +1,4 @@
+local Actor = require "LootBox/PourActor"
 local PourNative = {}
 PourNative.__index = PourNative
 local SETTLE, MOVE_MAX = 7000, 120000
@@ -132,10 +133,7 @@ local function sameAddress(a,b)
 end
 
 local function actorSafe(player)
-    return not (player:isMoving() or player:isRunning() or player:isSprinting()
-        or player:isAiming() or player:isAttacking() or player:isShoving()
-        or player:isClimbing() or player:isKnockedDown() or player:isbFalling()
-        or player:isPerformingGrappleAnimation())
+    return not Actor.blocked(player)
 end
 
 local function livePair(self,s, phase)

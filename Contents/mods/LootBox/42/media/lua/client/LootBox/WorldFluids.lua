@@ -38,6 +38,10 @@ local function capture(p,o,nearby)
     local cap,amount=o:getFluidCapacity(),o:getFluidAmount()
     if not (cap>0 and (o:hasFluid() or amount<cap and not o:isFluidInputLocked())) then return end
     a.capacity,a.amount,a.primary,a.tainted=cap,amount,o:getPrimaryFluid(),o:isTaintedWater()
+    -- A large, full finite tank is not natural/mains unlimited water.
+    local component=o:getFluidContainer()
+    a.unlimited=cap>=9999 and amount==cap and not o:getUsesExternalWaterSource()
+        and (not component or component:getAmount()==0)
     local name=ISWorldObjectContextMenu.getMoveableDisplayName(o)
     a.name=name or (o:hasWater() and getText("ContextMenu_NaturalWaterSource")) or o:getFluidUiName() or "Fluid source"
     -- Co-located fixtures and separate sections of shoreline are distinct.
@@ -72,13 +76,19 @@ function W.objects(p,clicked)
     return out
 end
 
+-- The installed stock fill menu requires a non-full Water-accepting receiver
+-- AND the exact fixture's directional check (also checks its actual fluid).
+function W.canReceive(p,a,e)
+    local o=a.object
+    return o:hasFluid() and o:getFluidAmount()>0 and e.free>0 and not p:hasFullInventory()
+        and p:getFreeInventoryCapacity()>0 and not e.fluid:isFull() and e.fluid:canAddFluid(Fluid.Water)
+        and o:canTransferFluidTo(e.fluid)
+end
 function W.can(p,world,a,e,take)
     if not e or e.scope=="loot" or e.object~=e.item or world:protected(e.item,take and receiverPolicy or donorPolicy) then return false end
     local o=a.object
     if take then
-        return o:hasFluid() and o:getFluidAmount()>0 and e.free>0 and not p:hasFullInventory()
-            and p:getFreeInventoryCapacity()>0 and not e.fluid:isFull() and e.fluid:canAddFluid(Fluid.Water)
-            and o:canTransferFluidTo(e.fluid)
+        return W.canReceive(p,a,e)
     end
     -- Stock ISAddFluidFromItemAction requires the donor in main inventory.
     -- It does not require a free primary hand, nor a particular equipped item.

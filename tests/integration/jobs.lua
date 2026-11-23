@@ -3057,4 +3057,60 @@ test("cancelling a paused job shows one stopped card and no planned moves", func
     PZActionCompletionHUD = nil
 end)
 
+local function withJobLog(body)
+    local output, savedPrint = {}, print
+    print = function(line) output[#output + 1] = line end
+    local ok, err = pcall(body, output)
+    print = savedPrint
+    assert(ok, err)
+end
+
+test("job diagnostics deduplicate failures and never serialize identifiers or native text", function()
+    withJobLog(function(log)
+        local f = fixture(3)
+        f.client = true
+        local first = item(f.source, "Private.NamedCopy", 1)
+        item(f.source, "Private.OtherCopy", 1)
+        local denials = 0
+        function f.adapter:begin(op)
+            if op.kind == "transfer" then
+                denials = denials + 1
+                return nil, "Private native explanation\nevent=spoof name=PrivateUser id=" .. op.item:getID()
+            end
+            return Native.begin(self, op)
+        end
+        start(f)
+        local outcome = finish(f)
+        for _ = 1, 5 do tick(f) end
+        assert(outcome.state == "finished_with_skips" and outcome.skipped == 2 and denials == 2)
+        assert(outcome.reasons[1].reason:find("Private native explanation", 1, true), "UI should keep actionable details")
+        assert(f.source:contains(first) and #log == 4)
+        assert(log[1]:find("action=transfer event=start state=running", 1, true))
+        assert(log[2]:find("event=operation-failure", 1, true) and log[2]:find("mode=MP reason=native-refused operation=transfer stage=dispatch", 1, true))
+        assert(log[3]:find("event=left-in-place", 1, true))
+        assert(log[4]:find("event=terminal state=finished_with_skips", 1, true) and log[4]:find("skipped=2", 1, true))
+        for _, line in ipairs(log) do
+            assert(not line:find("Private", 1, true) and not line:find("id=", 1, true) and not line:find("\n", 1, true))
+        end
+    end)
+end)
+
+test("terminal diagnostics survive the decision cap; raw exceptions stay in the UI", function()
+    withJobLog(function(log)
+        local f = fixture(3)
+        item(f.source)
+        local started, problem = f.jobs:start({})
+        assert(not started and problem == "Preview this job again before starting")
+        start(f)
+        f.jobs.diagnostics.count = 48
+        function f.jobs:advance() error("Private path or object details") end
+        local outcome = finish(f)
+        assert(outcome.state == "failed" and outcome.reason:find("Private path or object details", 1, true))
+        tick(f); tick(f)
+        assert(#log == 3 and log[1]:find("event=rejected state=not-started phase=prepare mode=SP reason=stale-preview", 1, true))
+        assert(log[3]:find("event=terminal state=failed", 1, true)
+            and log[3]:find("reason=job-binding-error", 1, true) and not log[3]:find("Private", 1, true))
+    end)
+end)
+
 print("PASS " .. tests .. " Jobs integration scenarios")

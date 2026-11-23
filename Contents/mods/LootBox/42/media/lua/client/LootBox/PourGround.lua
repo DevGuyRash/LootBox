@@ -1,3 +1,4 @@
+local Actor = require "LootBox/PourActor"
 -- Ordinary, portable item-owned vessels selected from the native Ground pane.
 -- No inventory or fluid writes: the stock pickup transaction and stock Place
 -- Item action are the only operations. The recreated wrapper is not the item ID.
@@ -62,15 +63,22 @@ local function room(square,it,alreadyHere)
     -- action (<=50). Original item already counts when previewing its pickup.
     return finite(total) and total>=0 and finite(weight) and weight>=0 and total+(alreadyHere and 0 or weight)<50
 end
-local function capture(p,it,floor)
+local function capture(p,it,floor,allowWorldFluid)
     if not it or not display(p,floor) or it:getContainer()~=floor or not floor:getItems():contains(it) or not ordinary(p,it) then return nil end
     local w=it:getWorldItem()
     local sq=w and w:getSquare()
     if not exactWorld(it,w,sq) or w:isExtendedPlacement()~=false then return nil end
     local fc,wfc=it:getFluidContainer(),w:getFluidContainer()
-    if not fc or fc:getOwner()~=it or not fc:canPlayerEmpty() or fc:isMultiTileMoveable() or it:isSealed()
-        or (wfc and wfc~=fc) then return nil end
-    local a={player=p, floor=floor, square=sq, item=it, world=w, id=it:getID(),fullType=it:getFullType(),
+    -- Stock moves a placed vessel's fluid component from the world wrapper
+    -- back to the InventoryItem on pickup. Only explicit fixture fills need
+    -- that loan; ordinary portable pours still use world components in place.
+    local worldFluid=allowWorldFluid and wfc and wfc:getOwner()==w
+    if worldFluid then
+        if fc and fc~=wfc then return nil end
+        fc=wfc
+    elseif not fc or fc:getOwner()~=it or (wfc and wfc~=fc) then return nil end
+    if not fc:canPlayerEmpty() or fc:isMultiTileMoveable() or it:isSealed() then return nil end
+    local a={player=p, floor=floor, square=sq, item=it, world=w, worldFluid=worldFluid==true, id=it:getID(),fullType=it:getFullType(),
         x=sq:getX(),y=sq:getY(),z=sq:getZ(),ox=w:getOffX(),oy=w:getOffY(),oz=w:getOffZ(),
         rx=it:getWorldXRotation(),ry=it:getWorldYRotation(),rz=it:getWorldZRotation()}
     if not finite(a.id) or type(a.fullType)~="string" or a.fullType=="" or not finite(a.ox) or not finite(a.oy)
@@ -81,10 +89,10 @@ local function capture(p,it,floor)
         or not reachable(p,a) or not room(sq,it,true) then return nil end
     return a
 end
-function Ground.capture(p,it,floor) return optional(capture,p,it,floor) end
+function Ground.capture(p,it,floor,allowWorldFluid) return optional(capture,p,it,floor,allowWorldFluid) end
 function Ground.sameAnchor(a,b)
     return a~=nil and b~=nil and a.player==b.player and a.floor==b.floor and a.square==b.square
-        and a.world==b.world and a.item==b.item and a.id==b.id and a.fullType==b.fullType
+        and a.world==b.world and a.worldFluid==b.worldFluid and a.item==b.item and a.id==b.id and a.fullType==b.fullType
         and near(a.ox,b.ox) and near(a.oy,b.oy) and near(a.oz,b.oz)
         and angle(a.rx,b.rx) and angle(a.ry,b.ry) and angle(a.rz,b.rz)
 end
@@ -122,8 +130,7 @@ local function inQueue(q,a)
 end
 local function granted(s,phase)
     return not s.problem and s.mp==isClient() and Ground.reachable(s.p,s.a)
-        and not s.p:isMoving() and not s.p:isRunning() and not s.p:isSprinting()
-        and not s.p:isAiming() and not s.p:isAttacking()
+        and not Actor.blocked(s.p)
         and s.guard(phase,s.it,s.from,s.to)==true and getTimestampMs()<s.untilAt
 end
 local function ownOrIdle(s)
@@ -145,7 +152,7 @@ local function exactStart(s)
     local projected,clean=locate(s.a.floor:getItems(),s.a,false)
     if not unambiguous or not clean then return false end
     if s.taking then
-        return projected==s.it and g==s.it and not m and Ground.sameAnchor(s.a,Ground.capture(s.p,s.it,s.a.floor))
+        return projected==s.it and g==s.it and not m and Ground.sameAnchor(s.a,Ground.capture(s.p,s.it,s.a.floor,s.a.worldFluid))
             and s.a.floor:isRemoveItemAllowed(s.it) and s.main:isItemAllowed(s.it) and s.main:hasRoomFor(s.p,s.it)
     end
     return m==s.it and not projected and not g and s.it:getWorldItem()==nil and s.main:isRemoveItemAllowed(s.it)

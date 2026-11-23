@@ -1,5 +1,7 @@
 local Inventory = require "LootBox/PourInventory"
 local Fluid = require "LootBox/PourNative"
+local Actor = require "LootBox/PourActor"
+local Log = require "LootBox/Diagnostics"
 local CreatedItemReceipt = require "LootBox/CreatedItemReceipt"
 local nativeClientAvailable = require("LootBox/MountedClientPolicy").enabled
 local D = {}
@@ -16,9 +18,7 @@ local function idle(p)
     return q and not q.current and #q.queue==0 and not p:hasTimedActions()
 end
 local function safe(p)
-    return not isServer() and p:isLocalPlayer() and not (p:isDead() or p:isAsleep() or p:isMoving()
-        or p:isRunning() or p:isSprinting() or p:isAiming() or p:isAttacking() or p:isShoving()
-        or p:isClimbing() or p:isKnockedDown() or p:isbFalling() or p:isPerformingGrappleAnimation())
+    return not isServer() and not Actor.blocked(p)
 end
 local function kind(obj)
     local script=obj and obj.getEntityScript and obj:getEntityScript()
@@ -207,7 +207,8 @@ local function jugRefs(main)
     return seen
 end
 -- Passive, once-per-stage local receipts for an explicitly selected MP job.
--- No callback is installed and a missing reading cannot change job behavior.
+-- The serial is local to this session. No world coordinates, object handles,
+-- raw inventory IDs, or custom names belong in the console.
 local receiptSerial=0
 local function receipt(self,phase,read)
     if not self.observed then return end
@@ -216,37 +217,40 @@ local function receipt(self,phase,read)
             receiptSerial=receiptSerial+1
             self.receiptSerial=receiptSerial
         elseif not self.receiptSerial then return end
-        print(string.format("[LootBox] action=dispenser-refill receipt=%s job=%d %s",phase,self.receiptSerial,read()))
+        print(string.format("[LootBox] action=dispenser-refill receipt=%s job=%d schema=2 %s",phase,self.receiptSerial,read()))
     end)
 end
 local function fluidRecord(it)
     local fc=it:getFluidContainer()
     if not fc then return nil end
-    return {ref=it,amount=fc:getAmount(),cap=fc:getCapacity(),locked=fc:isInputLocked(),mix=Inventory.mix({fluid=fc}) or {}}
+    local amount,cap=fc:getAmount(),fc:getCapacity()
+    if not finite(amount) or not finite(cap) then return nil end
+    local mix=amount==0 and {} or Inventory.mix({fluid=fc})
+    if not mix then return nil end
+    return {ref=it,amount=amount,cap=cap,locked=fc:isInputLocked(),mix=mix}
 end
 local function spareReading(self,initial)
     local rows=jugRefs(self.observed.main)
-    if not rows then return "unavailable" end
-    local ids={}
+    if not rows then return "spares=unavailable" end
     if initial then
-        self.receiptSpares={}
+        local baseline={}
         for id,it in pairs(rows) do
             local rec=fluidRecord(it)
-            if rec then self.receiptSpares[id]=rec end
+            if not rec then return "spares=unavailable" end
+            baseline[id]=rec
         end
+        self.receiptSpares=baseline
     end
-    if not self.receiptSpares then return "unavailable" end
-    for id in pairs(self.receiptSpares) do ids[#ids+1]=id end
-    table.sort(ids)
-    local out={}
-    for _,id in ipairs(ids) do
-        local old=self.receiptSpares[id]
+    if not self.receiptSpares then return "spares=unavailable" end
+    local observed,sameVolume,changed=0,0,0
+    for id,old in pairs(self.receiptSpares) do
+        observed=observed+1
+        if near(old.amount,self.original.amount) then sameVolume=sameVolume+1 end
         local rec=rows[id] and fluidRecord(rows[id])
-        local unchanged=rec and rec.ref==old.ref and rec.locked==old.locked and sameFluid(old,rec)
-        out[#out+1]=string.format("%.0f:%.6f:%s",id,rec and rec.amount or -1,
-            initial and "baseline" or unchanged and "unchanged" or "changed")
+        if rows[id] and not rec then return "spares=unavailable" end
+        if not (rec and rec.ref==old.ref and rec.locked==old.locked and sameFluid(old,rec)) then changed=changed+1 end
     end
-    return #out>0 and table.concat(out,",") or "none"
+    return string.format("sparesObserved=%d sameVolumeSpares=%d sparesChanged=%d",observed,sameVolume,changed)
 end
 local function removed(before,after,item)
     if before[item:getID()]~=item or after[item:getID()] then return false end
@@ -419,26 +423,34 @@ local function captureDonors(selection)
     return records,batch
 end
 
+local function rejected(code,reason)
+    Log.emit("dispenser-refill","rejected","not-started","prepare",code)
+    return nil,reason
+end
 function D.new(p,world,a,selection,destination,allow)
-    if type(allow)~="function" or not a or not safe(p) or not idle(p) or not activeSlot(p,a) then return nil,"Stand next to the selected dispenser and finish your current action." end
+    local blocked=type(allow)~="function" and "settings-unavailable" or not a and "stand-unavailable"
+        or not safe(p) and "actor-unavailable" or not idle(p) and "queue-busy" or not activeSlot(p,a) and "stand-unavailable"
+    if blocked then return rejected(blocked,"Stand next to the selected dispenser and finish your current action.") end
     local mp,observed=isClient(),isClient() and a.kind=="mounted"
     if mp and a.kind~="bare" and (not observed or not D.mountedMPEnabled()) then
-        return nil,"Use the stock Take Bottle action first and select the exact detached bottle."
+        return rejected("stock-actions-unavailable","Use the stock Take Bottle action first and select the exact detached bottle.")
     end
     local donors,batch=captureDonors(selection)
-    if not donors then return nil,"The selected sources are invalid, ambiguous, or too numerous; reopen the menu." end
+    if not donors then return rejected("invalid-sources","The selected sources are invalid, ambiguous, or too numerous; reopen the menu.") end
     local f=setmetatable({player=p,world=world,anchor=a,donors=donors,batch=batch,mp=mp,allow=allow,
         state="running",phase=a.kind=="mounted" and "take" or "pour",liters=0,count=0,verified=0,skipped=0,cursor=1,
         name="Refill Dispenser",fluid=Fluid.new(p)},D)
     if a.kind=="mounted" then
         f.original=mounted(a)
-        if not sameFluid(f.original,destination.state) then return nil,"The mounted bottle changed; reopen the menu." end
+        if not sameFluid(f.original,destination.state) then return rejected("mounted-jug-changed","The mounted bottle changed; reopen the menu.") end
         f.preview,f.test=preview(f.original)
     else
         f.jug,f.jugID=destination.item,destination.id
         f.original=destination.state
         f.test=bottle(f.jug,p)
-        if not f.jug or f.jugID~=f.jug:getID() or not sameFluid(f.test,f.original) then return nil,"The selected bottle changed; reopen the menu." end
+        if not f.jug or f.jugID~=f.jug:getID() or not sameFluid(f.test,f.original) then
+            return rejected("selected-jug-changed","The selected bottle changed; reopen the menu.")
+        end
     end
     if observed then
         local square,main,index,online=a.square,p:getInventory(),p:getPlayerNum(),p:getOnlineID()
@@ -446,15 +458,17 @@ function D.new(p,world,a,selection,destination,allow)
         f.observed={square=square,here=p:getCurrentSquare(),main=main,index=index,online=online,
             cell=cell,queue=qFor(p),x=square:getX(),y=square:getY(),z=square:getZ()}
         if not finite(online) or online<0 or not cell or not f:scope() or not activeSlot(p,a,true) then
-            return nil,"The mounted bottle or receiving space does not qualify."
+            return rejected("mount-unavailable","The mounted bottle or receiving space does not qualify.")
         end
     end
     local first,index,amount=f:nextDonor(f.test)
-    if not first then return nil,"No selected source can still pour into the exact bottle; reopen the menu." end
+    if not first then return rejected("no-compatible-donor","No selected source can still pour into the exact bottle; reopen the menu.") end
     f:setDonor(first,amount)
     f.cursor,f.skipped=index,index-1
     f.expected=f.original
-    if observed and not f:canUse(false) then return nil,"The mounted bottle, donor, or receiving space does not qualify." end
+    if observed and not f:canUse(false) then
+        return rejected("take-not-admitted","The mounted bottle, donor, or receiving space does not qualify.")
+    end
     return f
 end
 function D:scope()
@@ -537,12 +551,13 @@ function D:status()
         canResume=false,canPause=false,done=done,moved=done,total=self.batch and #self.donors or 1,
         pourLiters=self.liters,skipped=self.skipped,reasons={}}
 end
-function D:finish(state,reason)
+function D:finish(state,reason,code)
     if not self:isBusy() then return end
     self.state,self.reason=state,reason
+    Log.emit("dispenser-refill","terminal",state,self.phase,code or "unclassified",
+        " job=%d nativeQueued=%s donorsConfirmed=%d mountedConfirmed=%s confirmedLitres=%.3f",
+        self.receiptSerial or 0,tostring(self.launched==true),self.verified,tostring(self.count>0),self.liters)
     if self.launched then
-        pcall(function() print(string.format("[LootBox] action=dispenser-refill event=terminal state=%s phase=%s confirmedLitres=%.3f reason=%s",
-            state,self.phase,self.liters,reason)) end)
         if not self.silent and PZActionCompletionHUD then
             pcall(function()
                 PZActionCompletionHUD.show(self.player:getPlayerNum(),{brand="LOOTBOX",theme="loot",
@@ -558,17 +573,17 @@ function D:fitted()
     local why="The exact refilled bottle is fitted to its stand."
     if self.skipped>0 then
         why=why.." Unavailable or incompatible sources were left untouched."
-        self:finish("finished_with_skips",why)
-    else self:finish("finished",why) end
+        self:finish("finished_with_skips",why,"refit-confirmed-with-skips")
+    else self:finish("finished",why,"refit-confirmed") end
 end
-function D:stopped(reason)
+function D:stopped(reason,code)
     -- Unverified attempts never trigger another native leg or refit.
     if self.jug or self.phase=="take" and self.launched then
         local ok,held=pcall(self.heldJug,self)
         if ok and held then reason=reason.." The selected bottle is visible in main inventory. Check the stand before fitting."
         else reason=reason.." Bottle location unconfirmed. Check main inventory and the selected stand." end
     end
-    self:finish("cancelled",reason)
+    self:finish("cancelled",reason,self.silent and "session-cleanup" or code or (self.cancelled and "interrupted" or "unconfirmed"))
 end
 local function cancelAction(p,s)
     if not s then return end
@@ -612,7 +627,7 @@ function D:step()
         local ok,result=s:poll()
         if ok==nil then return end
         self.native=nil
-        if not ok then self:stopped(result);return end
+        if not ok then self:stopped(result,self.phase=="take" and "take-unconfirmed" or "refit-unconfirmed");return end
         if self.phase=="take" then
             local a=slot(result.square,result.facing,true)
             if not a or a.object~=result.stand or a.kind~="bare" or a.object:getFluidContainer()
@@ -620,24 +635,23 @@ function D:step()
                 or self.world:protected(result.item) or not sameFluid(bottle(result.item,p),self.original)
                 or self.original.amount==0 and (result.item:getFluidContainer():getAmount()~=0
                     or result.item:getFluidContainer():isEmpty()~=true) then
-                self:stopped("The exact dispenser bottle or its stand changed.");return
+                self:stopped("The exact dispenser bottle or its stand changed.","take-endpoint-changed");return
             end
             self.anchor,self.jug,self.jugID,self.phase=a,result.item,result.id,"pour"
             receipt(self,"take",function()
-                return string.format("stand=bare facing=%s freshJug=%.0f jugLitres=%.6f spares=%s",
-                    tostring(a.facing),result.id,self.original.amount,spareReading(self,false))
+                return string.format("stand=bare exactJug=true jugLitres=%.6f %s",self.original.amount,spareReading(self,false))
             end)
         elseif self.phase=="refit" and activeSlot(p,result,true) and sameFluid(mounted(result),self.after) then
             receipt(self,"refit",function()
                 local read=mounted(result)
-                local retired=CreatedItemReceipt.findCarried(self.observed.main,self.jugID)==nil
+                local item,problem=CreatedItemReceipt.findCarried(self.observed.main,self.jugID)
+                local retired=not problem and not item
                     and self.jug:getContainer()==nil and self.jug:getWorldItem()==nil
-                return string.format("stand=mounted facing=%s retiredJug=%.0f retired=%s mountedLitres=%.6f locked=%s donor=%.0f donorLitres=%.6f spares=%s",
-                    tostring(result.facing),self.jugID,tostring(retired),read.amount,tostring(read.fluid:isInputLocked()),
-                    self.donor.id,self.afterDonor.amount,spareReading(self,false))
+                return string.format("stand=mounted exactJug=true retired=%s mountedLitres=%.6f locked=%s donorLitres=%.6f %s",
+                    tostring(retired),read.amount,tostring(read.fluid:isInputLocked()),self.afterDonor.amount,spareReading(self,false))
             end)
             self:fitted()
-        else self:stopped("The stock refit could not be confirmed.") end
+        else self:stopped("The stock refit could not be confirmed.","refit-endpoint-changed") end
         return
     end
     if s then
@@ -652,7 +666,7 @@ function D:step()
         if s.restore then local f=s.restore;s.restore=nil;f() end
         if not idle(p) and not s.problem then return end
         self.native=nil
-        if self.cancelled or s.problem then self:stopped(s.problem or "Refill cancelled.");return end
+        if self.cancelled or s.problem then self:stopped(s.problem or "Refill cancelled.","native-stopped");return end
         if self.phase=="take" and s.result and s.jug then
             if activeSlot(p,s.result) and s.jug:getID()==s.jugID and sameFluid(bottle(s.jug,p),self.original) then
                 self.anchor,self.jug,self.jugID,self.phase=s.result,s.jug,s.jugID,"pour";return
@@ -663,14 +677,14 @@ function D:step()
                 if activeSlot(p,s.result) and sameFluid(mounted(s.result),self.after) and current and not current[self.jugID] then
                     self:fitted();return
                 end
-                self:stopped("The stand changed after the stock refit.");return
+                self:stopped("The stand changed after the stock refit.","refit-endpoint-changed");return
             end
             if self.mp and s.performed and s.started then
                 self.refitRequested=true
-                self:finish("finished_with_skips","The bottle was filled and stock refit was requested. Verify the stand.");return
+                self:finish("finished_with_skips","The bottle was filled and stock refit was requested. Verify the stand.","refit-requested");return
             end
         end
-        self:stopped("The stock dispenser result could not be confirmed.");return
+        self:stopped("The stock dispenser result could not be confirmed.","native-result-unconfirmed");return
     end
     if self.fluid:isBusy() then
         if not self.cancelled and not self:guard() then self:cancel() end
@@ -692,15 +706,15 @@ function D:step()
         local paired=self:heldJug() and pairedMix(self.from,self.before,afterDonor,after,amount)
         if paired then paired=self:matchedDonor(afterDonor)~=nil and self:exactBatchJug() end
         if paired then self.liters=self.liters+amount end
-        if not ok or self.cancelled then self:stopped(why or "Refill cancelled.");return end
+        if not ok or self.cancelled then self:stopped(why or "Refill cancelled.","pour-unconfirmed");return end
         if not paired or (self.observed or self.batch) and not near(amount,self.amount) then
-            self:stopped("The exact filled bottle and its mixture could not be confirmed.");return
+            self:stopped("The exact filled bottle and its mixture could not be confirmed.","pour-balance-unconfirmed");return
         end
         self.after,self.expected,self.afterDonor=after,after,afterDonor
         self.verified,self.cursor=self.verified+1,self.cursor+1
         receipt(self,"pour",function()
-            return string.format("jug=%.0f jugFrom=%.6f jugTo=%.6f donor=%.0f donorFrom=%.6f donorTo=%.6f transferred=%.6f spares=%s",
-                self.jugID,self.before.amount,self.after.amount,self.donor.id,self.from.amount,afterDonor.amount,
+            return string.format("exactJug=true sourceOrdinal=%d jugFrom=%.6f jugTo=%.6f donorFrom=%.6f donorTo=%.6f transferred=%.6f %s",
+                self.cursor-1,self.before.amount,self.after.amount,self.from.amount,afterDonor.amount,
                 amount,spareReading(self,false))
         end)
         if not self.batch or self.cursor>#self.donors or FluidUtil.roundTransfer(after.fluid:getFreeCapacity())<=0 then
@@ -708,18 +722,17 @@ function D:step()
         end
         return
     end
-    if self.cancelled or not self:guard() or not idle(p) then self:stopped("Refill cancelled or no longer in reach.");return end
+    local blocked=self.cancelled and "interrupted" or not self:guard() and "scope-changed" or not idle(p) and "queue-busy"
+    if blocked then self:stopped("Refill cancelled or no longer in reach.",blocked);return end
     if self.phase=="take" or self.phase=="refit" then
         local why
         if self.observed then self.native,why=observedAction(self,self.phase=="refit")
         else self.native=makeAction(self,self.phase=="refit") end
-        if not self.native then self:stopped(why or "The game could not start the stock dispenser action.");return end
+        if not self.native then self:stopped(why or "The game could not start the stock dispenser action.","stock-action-not-queued");return end
         if self.phase=="take" then
             receipt(self,"take-start",function()
-                local r=self.observed
-                return string.format("xyz=%d,%d,%d facing=%s mountedLitres=%.6f locked=%s donor=%.0f donorLitres=%.6f spares=%s",
-                    r.x,r.y,r.z,tostring(self.anchor.facing),self.original.amount,tostring(self.original.fluid:isInputLocked()),
-                    self.donor.id,self.from.amount,spareReading(self,true))
+                return string.format("stand=mounted mountedLitres=%.6f locked=%s donorLitres=%.6f %s",
+                    self.original.amount,tostring(self.original.fluid:isInputLocked()),self.from.amount,spareReading(self,true))
             end)
         end
         self.launched=true;return
@@ -727,14 +740,14 @@ function D:step()
     local target=bottle(self.jug,p)
     if self.anchor.kind~="bare" or self.anchor.object:getFluidContainer()
         or not self:heldJug() or not self:exactBatchJug() or not sameFluid(target,self.expected)
-        or self.world:protected(self.jug) then self:stopped("The exact bottle or stand changed.");return end
+        or self.world:protected(self.jug) then self:stopped("The exact bottle or stand changed.","pour-endpoint-changed");return end
     local record,index,planned,live=self:nextDonor(target)
     if not record then
         if self.batch and self.after then
             self.skipped=self.skipped+#self.donors-self.cursor+1
             self.phase="refit";return
         end
-        self:stopped("No selected source still qualifies for this bottle.");return
+        self:stopped("No selected source still qualifies for this bottle.","no-compatible-donor");return
     end
     self.skipped,self.cursor=self.skipped+index-self.cursor,index
     self:setDonor(record,planned)
@@ -762,7 +775,7 @@ function D:step()
         end
         return true
     end,self.observed~=nil)
-    if not ok then self:stopped(why or "The game refused the pour.");return end
+    if not ok then self:stopped(why or "The game refused the pour.","pour-not-queued");return end
     if (self.observed or self.batch) and not near(amount,self.amount) then self:cancel();return end
     self.launched=true
 end
@@ -771,7 +784,7 @@ function D:tick()
     local ok=pcall(self.step,self)
     if not ok then
         pcall(self.cancel,self)
-        self:stopped("The game did not expose the required dispenser action.")
+        self:stopped("The game did not expose the required dispenser action.","binding-error")
     end
 end
 return D

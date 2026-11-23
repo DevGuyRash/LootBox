@@ -46,7 +46,7 @@ end
 
 local function entryFor(player, item, container, scope, path)
     local id,fullType = call(item, "getID"), call(item,"getFullType")
-    local object,groundAnchor = item,nil
+    local object,groundAnchor,groundSquare = item,nil,nil
     if not finite(id) or call(item, "isSealed") ~= false then return nil end
     local fluid=call(item,"getFluidContainer")
     if call(container, "getType") == "floor" then
@@ -57,7 +57,7 @@ local function entryFor(player, item, container, scope, path)
         if call(floorObject,"getItem")~=item or not adjacentFloor(player,floorObject) then return nil end
         if component and call(component,"getOwner")==floorObject then
             if call(component,"isMultiTileMoveable")~=false then return nil end
-            object,fluid=floorObject,component
+            object,fluid,groundSquare=floorObject,component,call(floorObject,"getSquare")
         elseif fluid and (not component or component==fluid) then
             groundAnchor=require("LootBox/PourGround").capture(player,item,container)
             if not groundAnchor then return nil end
@@ -69,7 +69,8 @@ local function entryFor(player, item, container, scope, path)
     if not finite(capacity) or capacity <= 0 or not finite(amount) or amount < 0 or not finite(free) or free < 0 then return nil end
     local where=path or (scope=="main" and "Main inventory" or scope=="equipped" and "Equipped" or scope=="carried" and "Carried" or "Displayed loot")
     local label=itemName(item) .. " | " .. where
-    return {id=id, fullType=fullType, item=item, object=object, container=container, scope=scope, fluid=fluid,groundAnchor=groundAnchor,
+    return {id=id, fullType=fullType, item=item, object=object, container=container, scope=scope, fluid=fluid,
+        groundAnchor=groundAnchor,groundSquare=groundSquare,
         capacity=capacity, amount=amount, free=free, label=label, icon=call(item, "getTex")}
 end
 
@@ -154,9 +155,13 @@ local function copy(entry)
     return duplicate
 end
 
-local function legalScope(source, target, options)
-    return target.scope ~= "loot" or source.scope == "loot" and source.container == target.container
-        and options.pourLootToLoot == true
+-- A clicked receiver authorizes one inverse portable pour, not a wider
+-- search from a carried source. Loot-to-loot always needs the opt-in.
+function Pour.legalScope(source,target,options,clickedReceiver)
+    if target.scope~="loot" then return true end
+    if source.scope=="loot" then return source.container==target.container and options.pourLootToLoot==true end
+    return target.item==clickedReceiver and clickedReceiver~=nil and
+        (source.scope=="main" or source.scope=="carried" or source.scope=="equipped")
 end
 
 function Pour.snapshot(player, world, container, lootPane)
@@ -203,6 +208,34 @@ local function mixture(snapshot,entry)
     return result
 end
 
+-- Invert a single explicitly selected loot vessel. Never infer the receiver
+-- from item type, label, a collapsed stack, or the active tab after the click.
+function Pour.fillFrom(snapshot,receiver,options)
+    local target
+    for _,e in ipairs(snapshot.entries) do
+        if e.item==receiver and e.scope=="loot" and round(e.free)>0 then target=copy(e);break end
+    end
+    if not target then return end
+    if target.amount>0 then
+        target.pourSignature=mixture(snapshot,target)
+        if not target.pourSignature then return end
+    end
+    local donors,refs={},{}
+    local truncated=snapshot.truncated
+    for _,e in ipairs(snapshot.entries) do
+        if not refs[e.fluid] and Pour.legalScope(e,target,options,receiver) and Pour.compatible(e,target) then
+            local mix=mixture(snapshot,e)
+            if mix then
+                if #donors>=MAX_TARGETS then truncated=true;break end
+                local donor=copy(e)
+                donor.pourSignature=mix
+                donors[#donors+1],refs[e.fluid]=donor,true
+            end
+        end
+    end
+    return {target=target,donors=donors,truncated=truncated}
+end
+
 function Pour.sortFill(fill,options)
     local weight=options.pourFillScope=="equipped-first" and {equipped=1,main=2,carried=3,loot=4}
         or {main=1,equipped=2,carried=3,loot=4}
@@ -231,7 +264,7 @@ local function plan(snapshot, sourceItem, options, budget, capture)
             if budget.left<=0 then return nil,"Too many vessel combinations; select one exact vessel." end
             budget.left=budget.left-1
         end
-        if not refs[template.fluid] and legalScope(source,template,options) and Pour.compatible(source,template) then
+        if not refs[template.fluid] and Pour.legalScope(source,template,options) and Pour.compatible(source,template) then
             refs[template.fluid]=true
             local signature=not capture or mixture(snapshot,template)
             if signature then
@@ -326,7 +359,8 @@ function Pour.accessible(player, world, entry, lootPane, allowFluidRefresh)
     end
     if scope~=entry.scope then return false end
     local live=entryFor(player,entry.item,entry.container,scope)
-    if not live or live.id~=entry.id or live.fullType~=entry.fullType or (not allowFluidRefresh and live.fluid~=entry.fluid) or live.object~=entry.object then return false end
+    if not live or live.id~=entry.id or live.fullType~=entry.fullType or (not allowFluidRefresh and live.fluid~=entry.fluid)
+        or live.object~=entry.object or live.groundSquare~=entry.groundSquare then return false end
     if (entry.groundAnchor or live.groundAnchor)
         and not require("LootBox/PourGround").sameAnchor(entry.groundAnchor,live.groundAnchor) then return false end
     return true,live
@@ -337,14 +371,22 @@ function Pour.stillHere(player, world, entry, lootPane, options)
     return ok == true
 end
 
-function Pour.rebind(player, world, entry, returnedItem, holder, lootPane)
+function Pour.rebind(player, world, entry, returnedItem, holder, lootPane, groundLoan)
     local main=call(player,"getInventory")
-    if not entry or not returnedItem or not holder or entry.object~=entry.item
+    -- A verified fixture loan may cross the native ground/item component
+    -- ownership boundary. The original ground wrapper is never used in main.
+    local worldLoan=groundLoan and groundLoan.worldFluid and entry and entry.groundSquare==groundLoan.square
+        and entry.object==groundLoan.world and entry.item==groundLoan.item and entry.container==groundLoan.floor
+    if not entry or not returnedItem or not holder or (entry.object~=entry.item and not worldLoan)
         or (holder~=main and (entry.scope~="loot" or holder~=entry.container or holder~=lootPane))
         or call(returnedItem,"getContainer")~=holder or not member(holder,returnedItem) then return nil end
     local fresh=entryFor(player,returnedItem,holder,holder==main and "main" or "loot")
     if not fresh or fresh.id~=entry.id or type(fresh.fullType)~="string"
-        or fresh.fullType~=entry.fullType or fresh.object~=returnedItem then return nil end
+        or fresh.fullType~=entry.fullType then return nil end
+    if worldLoan and holder~=main then
+        if fresh.groundSquare~=groundLoan.square or fresh.object~=returnedItem:getWorldItem()
+            or fresh.fluid:getOwner()~=fresh.object then return nil end
+    elseif fresh.object~=returnedItem then return nil end
     local ok=Pour.accessible(player,world,fresh,lootPane)
     if ok then return fresh end
 end
@@ -377,12 +419,12 @@ function Pour.sameMix(entry, original)
     return true
 end
 
-function Pour.revalidate(player, world, entry, lootPane, options, sourceEntry)
+function Pour.revalidate(player, world, entry, lootPane, options, sourceEntry, clickedReceiver)
     local admitted,live=Pour.accessible(player,world,entry,lootPane)
     if not admitted then return false end
     if sourceEntry then
         local sourceAllowed,source=Pour.accessible(player,world,sourceEntry,lootPane)
-        if not sourceAllowed or not legalScope(source,live,options or {}) or not Pour.compatible(source,live) then
+        if not sourceAllowed or not Pour.legalScope(source,live,options or {},clickedReceiver) or not Pour.compatible(source,live) then
             return false
         end
     elseif round(live.amount)<=0 then return false end

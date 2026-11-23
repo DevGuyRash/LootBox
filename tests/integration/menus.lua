@@ -1358,24 +1358,31 @@ test("nearby loot Eat/Drink follows nested native rows and preserves exact click
     ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
 end)
 
-test("stock plain recipe rows on a shelf or bag get one actionable combined entry only where identity is provable",function(f)
+test("stock plain recipe rows retain the exact source for mapped MP opening and fall back for unknown producers",function(f)
     local oldPane,oldManager,oldCraft,oldFlags,oldMoodle,oldClient = ISInventoryPane,getScriptManager,CraftRecipeManager,InputFlag,MoodleType,isClient
+    local oldResource=ResourceType
     local oldNew,oldEat = ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems
     ISInventoryPane={getActualItems=function(rows) return rows end}
     ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems=function() end,function() end
     InputFlag={IsSealed={},Unseal={}};MoodleType={FOOD_EATEN={}}
+    ResourceType={Item={}}
     f.preferences.tillFullEnabled=true
     local drink={getName=function() return "OpenCanOfBeverage" end,isVanilla=function() return true end,getOutputCount=function() return 0 end}
     local food={getName=function() return "OpenCannedFood" end,isVanilla=function() return true end,getOutputCount=function() return 1 end}
     local unknown={getName=function() return "UnpackEverything" end,isVanilla=function() return true end,getOutputCount=function() return 1 end}
-    getScriptManager=function() return {getCraftRecipe=function(_,n) return ({OpenCanOfBeverage=drink,OpenCannedFood=food,UnpackEverything=unknown})[n] end} end
+    local ration={getName=function() return "OpenWaterRationCan" end,isVanilla=function() return true end,getOutputCount=function() return 0 end}
+    local jar={getName=function() return "OpenJarOfFood" end,isVanilla=function() return true end,getOutputCount=function() return 1 end}
+    local registry={OpenCanOfBeverage=drink,OpenCannedFood=food,UnpackEverything=unknown,OpenWaterRationCan=ration,OpenJarOfFood=jar}
+    local catalog={}
+    getScriptManager=function() return {getCraftRecipe=function(_,n) return registry[n] end,getItem=function(_,n) return catalog[n] end} end
     local mealLevel=0;f.player.getMoodles=function() return {getMoodleLevel=function() return mealLevel end} end
-    for _,name in ipairs({"CannedPeaches","CannedMilk","CannedFruitBeverage","Pop"}) do
-        for _,mode in ipairs({"plain","amount-and-plain","multiplayer","unknown","disabled","full","not-selected","wrong-player"}) do
-            isClient=function() return mode=="multiplayer" end
+    for _,name in ipairs({"CannedPeaches","CannedMilk","CannedFruitBeverage","Pop","WaterRationCan","CannedTomato"}) do
+        for _,mode in ipairs({"plain","amount-and-plain","multiplayer","unmapped-mp","unknown","disabled","full","not-selected","wrong-player"}) do
+            isClient=function() return mode=="multiplayer" or mode=="unmapped-mp" end
             local source = name=="Pop" and f.inventory or f.crate
             local chosen,decoy=item(source),item(source)
-            local r=mode=="unknown" and unknown or (name=="Pop" and drink or food)
+            local r=mode=="unknown" and unknown or (name=="Pop" and drink or name=="WaterRationCan" and ration
+                or name=="CannedTomato" and jar or food)
             chosen.classes.Food=name~="Pop"
             chosen.getFullType=function() return "Base."..name end;decoy.getFullType=chosen.getFullType
             chosen.getOpeningRecipe=function()
@@ -1386,10 +1393,34 @@ test("stock plain recipe rows on a shelf or bag get one actionable combined entr
                 if name=="Pop" then return {isEmpty=function() return false end,getCapacity=function() return .3 end,
                     getProperties=function() return {getHungerChange=function() return -.05 end} end} end
             end
+            local slot={isKeep=function() return name=="Pop" end,
+                hasFlag=function(_,k) return name=="Pop" and (k==InputFlag.IsSealed or k==InputFlag.Unseal) end,
+                getResourceType=function() return ResourceType.Item end,getAmount=function() return 1 end}
             CraftRecipeManager={getValidInputScriptForItem=function(recipe,selected,player)
                 assert(selected==chosen and player==f.player)
-                return {isKeep=function() return recipe==drink end,hasFlag=function(_,k) return recipe==drink and (k==InputFlag.IsSealed or k==InputFlag.Unseal) end}
+                return slot
             end}
+            local function pack(value) return {size=function() return 1 end,get=function() return value end} end
+            local closed={}
+            chosen.getScriptItem=function() return closed end
+            local opened={getFullName=function() return "Base."..name.."Open" end,
+                getActualWeight=function() return .25 end,isCantEat=function() return false end}
+            catalog["Base.WaterRationCanEmpty"]=mode~="unmapped-mp" and {getFullName=function() return "Base.WaterRationCanEmpty" end,
+                getActualWeight=function() return .2 end} or nil
+            catalog["Base.JarLid"]={getFullName=function() return "Base.JarLid" end,
+                getActualWeight=function() return .1 end,getConditionMax=function() return 10 end}
+            local mapper={getResultItems=function() return pack(opened) end,
+                getPatternForResult=function() return pack(closed) end}
+            local out={getAmount=function() return 1 end,getResourceType=function() return ResourceType.Item end,
+                getOutputMapper=function() if mode~="unmapped-mp" then return mapper end end}
+            for _,route in ipairs({food,jar,ration}) do
+                route.getInputs=function() return pack(slot) end
+                route.getIndexForIO=function() return 1 end
+                route.isInHandCraftCraft=function() return true end
+            end
+            food.getOutputs=function() return pack(out) end
+            jar.getOutputs=food.getOutputs
+            ration.getOutputs=function() return {size=function() return 0 end} end
             mealLevel=mode=="full" and 3 or 0
             local parent,recipes,amounts=Menu:new(),Menu:new(),Menu:new()
             parent.getSubMenu=function(_,id) return id==1 and recipes or amounts end
@@ -1406,19 +1437,19 @@ test("stock plain recipe rows on a shelf or bag get one actionable combined entr
             local rows=mode=="not-selected" and {decoy} or {chosen}
             Menus.inventoryMenu(0,parent,rows);Menus.inventoryMenu(0,parent,rows)
             assert(recipes.options[1]==standard and standard.onSelect==ISInventoryPaneContextMenu.OnNewCraft)
-            local supported=mode=="plain" or mode=="multiplayer" or mode=="amount-and-plain"
+            local supported=mode=="plain" or mode=="multiplayer" or mode=="unmapped-mp" or mode=="amount-and-plain"
             assert(#recipes.options==(supported and not both and 2 or 1),name..":"..mode)
             assert(#amounts.options==(both and 2 or 0))
             if supported then
                 local added=both and amounts.options[2] or recipes.options[2]
-                local drinkIntent=name~="CannedPeaches"
-                if mode=="multiplayer" and name~="Pop" then
+                local drinkIntent=name~="CannedPeaches" and name~="CannedTomato"
+                if mode=="unmapped-mp" and name~="Pop" then
                     assert(added.notAvailable and not added.onSelect and added.toolTip.description:find(drinkIntent and "choose Drink" or "choose Eat",1,true))
                 else
                     assert(added.name==(drinkIntent and "Open and Drink Til Full" or "Open and Eat Til Full"))
                     f.app.tillFull=function(_,list,kind,recipe,container)
                         assert(#list==1 and list[1]==chosen and recipe==r and container==source)
-                        assert(kind==(name=="Pop" and "fluid" or (drinkIntent and "drinkFood" or "food")));return true
+                        assert(kind==((name=="Pop" or name=="WaterRationCan") and "fluid" or (drinkIntent and "drinkFood" or "food")));return true
                     end
                     assert(added.onSelect(added.target))
                 end
@@ -1426,6 +1457,7 @@ test("stock plain recipe rows on a shelf or bag get one actionable combined entr
         end
     end
     ISInventoryPane,getScriptManager,CraftRecipeManager,InputFlag,MoodleType,isClient=oldPane,oldManager,oldCraft,oldFlags,oldMoodle,oldClient
+    ResourceType=oldResource
     ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems=oldNew,oldEat
 end)
 test("opened stock Food drinks retain the Food callback while selecting thirst even from the loot pane",function(f)
@@ -1547,8 +1579,8 @@ local function pourFixture(f)
     local shelf=vessel(f.crate,13,"Base.Milk","Shelf Milk",2,1)
     local shelfTarget=vessel(f.crate,14,"Base.Bottle","Shelf Bottle",.5,0)
     local calls={}
-    f.app.startPour=function(_,source,targets,options)
-        calls[#calls+1]={source=source,targets=targets,options=options}
+    f.app.startPour=function(_,source,targets,options,receiver)
+        calls[#calls+1]={source=source,targets=targets,options=options,receiver=receiver}
         return true
     end
     return a,b,d,shelf,shelfTarget,calls,restore,vessel
@@ -1591,7 +1623,8 @@ test("Pour Into renders a separate native-spanning menu and dispatches one froze
         mirrored.onSelect(mirrored.target)
         assert(#calls==1 and calls[1].source.item==src and #calls[1].targets==2)
         assert(calls[1].targets[1].item==equipped and calls[1].targets[2].item==main)
-        assert(calls[1].options.pourFillScope=="equipped-first" and calls[1].options.pourFillOrder=="largest-first")
+        assert(calls[1].options.pourFillScope=="equipped-first" and calls[1].options.pourFillOrder=="largest-first"
+            and calls[1].options.pourRoute=="fill-all")
         assert(not package.loaded["Fluids/ISFluidTransferAction"],"native actions must remain lazy at menu render")
     end)
     restore();assert(ok,err)
@@ -1629,7 +1662,7 @@ test("Pour Into shows exact target icon and compact fill data; identical row tex
             local child=render()
             local row=assert(pourDestination(child,entry))
             assert(row.onSelect(row.target))
-            assert(calls[#calls].targets[1].item==entry and #calls[#calls].targets==1)
+            assert(calls[#calls].targets[1].item==entry and #calls[#calls].targets==1 and calls[#calls].options.pourRoute=="single")
         end
     end)
     restore();assert(ok,err)
@@ -1752,6 +1785,55 @@ local function stockPourRow(pane,key,representative,...)
     pane.itemslist[#pane.itemslist+1]=row
     return row
 end
+
+test("loot Fill From on an exact receiver lists allowed donors and shares one frozen click",function(f)
+    local carried,empty,bagged,shelfDonor,receiver,calls,restore=pourFixture(f)
+    local ok,err=pcall(function()
+        f.preferences.pourMainOnly=true -- a batch policy cannot hide an explicit bagged donor
+        bagged:getFluidContainer().amount=.75
+        local anchor={f.crate}
+        f.app.world.pourShelfAnchor=function(_,c) if c==f.crate then return anchor end end
+        local function open(rows)
+            local parent=Menu:new();Menus.inventoryMenu(0,parent,rows or {receiver})
+            local branded=needed(parent,"LootBox").child
+            return option(parent,"Fill From"),option(branded,"Fill From"),option(parent,"Pour Into")
+        end
+        local items={receiver}
+        local top,mirror,forward=open(items)
+        assert(top and mirror and not forward and not top.notAvailable and #top.child.options==2)
+        for _,root in ipairs({top,mirror}) do
+            local donor=assert(pourDestination(root.child,bagged))
+            assert(donor.name:find("Field Bag",1,true) and donor.name:find("0.75L",1,true))
+            assert(not pourDestination(root.child,shelfDonor) and not pourDestination(root.child,empty))
+            assert(not option(root.child,"Fill All") and not option(root.child,"Fill from All"))
+        end
+        items[1]=empty
+        local chosen=assert(pourDestination(mirror.child,bagged))
+        assert(#calls==0 and chosen.onSelect(chosen.target))
+        local other=assert(pourDestination(top.child,carried));other.onSelect(other.target)
+        assert(#calls==1 and calls[1].source.item==bagged and calls[1].receiver==receiver
+            and #calls[1].targets==1 and calls[1].targets[1].item==receiver and calls[1].targets[1].pourAnchor==anchor
+            and calls[1].options.pourRoute=="portable-fill-from")
+        f.preferences.pourLootToLoot=true;receiver:getFluidContainer().amount=.1
+        top,mirror,forward=open()
+        assert(top and forward and pourDestination(top.child,shelfDonor))
+        local from=assert(pourDestination(top.child,shelfDonor));from.onSelect(from.target)
+        local again=needed(forward.child,"Fill All");again.onSelect(again.target)
+        assert(#calls==2 and calls[2].source.item==shelfDonor and calls[2].targets[1].item==receiver)
+        assert(not open({receiver,shelfDonor}),"a mixed selection cannot fill a guessed receiver")
+        local row=stockPourRow(f.lootPage.inventoryPane,"Shelf stack",receiver,receiver,shelfDonor)
+        assert(not open({row}),"expand multiple physical members before choosing a receiver")
+        receiver:getFluidContainer().amount=.5;assert(not open())
+        receiver:getFluidContainer().amount=0
+        local parent=Menu:new();local foreign=parent:addOption("Fill from ...",nil,function() end)
+        Menus.inventoryMenu(0,parent,{receiver})
+        assert(needed(parent,"Fill from ...")==foreign and not option(parent,"Fill From")
+            and needed(needed(parent,"LootBox").child,"Fill From").child)
+        f.visible=false;assert(not open());f.visible=true
+        f.app.world.pourShelfAnchor=function() return nil end;assert(not open())
+    end)
+    restore();assert(ok,err)
+end)
 
 test("a visible composite loot section authorizes only the actual clicked holder",function(f)
     local carried,main,_,milk,_,calls,restore,vessel=pourFixture(f)

@@ -124,7 +124,7 @@ local function fixture(mp,adjacent)
     t.page={visible=true,getIsVisible=get("visible"),inventoryPane={inventory=t.floor}}
     t.p={main=t.main,here=t.grounds[1],getPlayerNum=zero,getInventory=get("main"),getCurrentSquare=get("here"),
         isLocalPlayer=yes,isDead=no,isAsleep=no,getVehicle=nothing,isEquipped=no,isAttachedItem=no,hasTimedActions=no,
-        isMoving=no,isRunning=no,isSprinting=no,isAiming=no,isAttacking=no,isTimedActionInstant=yes,playSound=nothing,
+        isMoving=no,isShoving=no,isClimbing=no,isKnockedDown=no,isRunning=no,isSprinting=no,isAiming=no,isAttacking=no,isTimedActionInstant=yes,playSound=nothing,
         getEmitter=function() return {isPlaying=yes} end}
     t.cell={getGridSquare=function(_,x,y,z)
         for _,sq in ipairs(t.grounds) do if sq.loaded and sq.x==x and sq.y==y and sq.z==z then return sq end end

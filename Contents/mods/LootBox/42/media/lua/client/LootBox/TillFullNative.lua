@@ -5,6 +5,8 @@ require "ISUI/ISInventoryPaneContextMenu"
 -- and its server effects remain native; a completed client action is not an MP ack.
 local OpenFull = require "LootBox/OpenFull"
 local CreatedItemReceipt = require "LootBox/CreatedItemReceipt"
+local OpenResult = require "LootBox/OpenResult"
+local Actor = require "LootBox/PourActor"
 local Native = {}
 Native.__index = Native
 local TIMEOUT = 120000
@@ -21,6 +23,10 @@ local function interrupted(player)
     return flag(player, "isDead") or flag(player, "isAsleep") or flag(player, "isRunning")
         or flag(player, "isSprinting") or flag(player, "isAiming") or flag(player, "isAttacking")
 end
+local function blocked(player, observed)
+    if observed then return Actor.blocked(player) end
+    return interrupted(player)
+end
 
 function Native.new(player) return setmetatable({player = player}, Native) end
 function Native:isBusy() return self.active ~= nil end
@@ -31,7 +37,7 @@ end
 local function pack(...) return {n = select("#", ...), ...} end
 
 local function liveCancellation(self, state)
-    return state.reason or interrupted(self.player)
+    return state.reason or blocked(self.player,state.observedOpening)
         or (Keyboard and isKeyDown and isKeyDown(Keyboard.KEY_ESCAPE))
 end
 
@@ -146,10 +152,69 @@ local function hook(self, state, action)
     if action == state.consume and state.needSampler and not isClient() and not isServer() then
         observeNeeds(self, state, action)
     end
+    local replacement=action==state.consume and state.openResult
+    local exactBite=action==state.consume and state.pinOpened
+    local function biteAllowed(deep)
+        if liveCancellation(self,state) or action.item~=state.item or action.character~=self.player then return false end
+        local main=self.player:getInventory()
+        if main~=state.source or state.item:getContainer()~=main or state.item:getID()~=state.itemId
+            or state.item:getFullType()~=state.fullType or main:getItemWithID(state.itemId)~=state.item
+            or state.item:getWorldItem() then return false end
+        if state.kind=="fluid" and (action.fluidContainer~=state.fluid or state.item:getFluidContainer()~=state.fluid) then return false end
+        if deep then
+            local q=queueFor(self)
+            if q.current~=action then return false end
+            for _,pending in ipairs(q.queue) do if not state.owned[pending] then return false end end
+            return OpenFull.networkItem(main,main,state.itemId,state.fullType)==state.item and not state.atTarget()
+        end
+        return true
+    end
+    local function verifyBite(deep)
+        local ok,valid=pcall(biteAllowed,deep)
+        if ok and valid then return true end
+        state.reason=state.reason or "The exact opened item or consumption context changed"
+        return false
+    end
+    if replacement then
+        local wait=action.waitToStart
+        if type(wait)~="function" or type(originalStart)~="function" then return nil,"The stock opening lifecycle is unavailable" end
+        function action:waitToStart(...)
+            -- Do not submit the stock request until the exact input/receiver
+            -- are ready. A false return from Lua start itself is too late.
+            if state.reason or wait(self,...)~=false then return true end
+            local ready,why=replacement:admit()
+            if ready==false then state.reason=why end
+            return ready~=true
+        end
+        action.stopOnWalk,action.stopOnRun,action.stopOnAim=true,true,true
+    elseif exactBite then
+        local wait, valid=action.waitToStart,action.isValid
+        if type(wait)~="function" or type(originalStart)~="function" or type(valid)~="function" then
+            return nil,"The stock eating lifecycle is unavailable"
+        end
+        function action:waitToStart(...)
+            state.pinAdmitted=verifyBite(true) and wait(self,...)==false and verifyBite(true)
+            return not state.pinAdmitted
+        end
+        function action:isValid(...)
+            if not state.performSucceeded and action.item~=state.item then return false end
+            return valid(self,...)
+        end
+    end
     if action == state.consume and type(originalStart) == "function" then
         action.start = function(started)
             state.reachedConsumption = true
-            return originalStart(started)
+            local result=originalStart(started)
+            if exactBite then
+                state.pinStarted=state.pinAdmitted and started.item==state.item
+                    and (state.kind~="fluid" or started.fluidContainer==state.fluid)
+                if not state.pinStarted then state.reason="The exact opened item changed at native start" end
+            end
+            if replacement and not state.reason then
+                local opened,why=replacement:started()
+                if not opened then state.reason=why end
+            end
+            return result
         end
     end
     if type(originalCancel) == "function" then
@@ -181,6 +246,14 @@ local function hook(self, state, action)
     end
     action.perform = function(performed)
         if performed == state.consume then state.performed = true end
+        if exactBite and (not state.pinStarted or performed.item~=state.item
+            or (state.kind=="fluid" and performed.fluidContainer~=state.fluid)) then
+            state.reason=state.reason or "The exact opened item consumption did not complete"
+        end
+        if replacement and not state.reason then
+            local owned,why=replacement:beforePerform()
+            if not owned then state.reason=why end
+        end
         local queue, foreign = queueFor(self), {}
         if performed == state.consume then deferReturn(self, state, queue) end
         for _, pending in ipairs(queue.queue) do
@@ -200,7 +273,11 @@ local function hook(self, state, action)
         if ok and performed == state.consume and state.opening and performed.craftStarted ~= true then
             state.reason = "The native opening did not start successfully; no consumption was queued"
         end
-        if ok and performed == state.consume and state.opening and not state.reason and not isClient() then
+        if replacement and ok and not state.reason then
+            local owned,why=replacement:performed()
+            if not owned then state.reason=why end
+        end
+        if ok and performed == state.consume and state.opening and not replacement and not state.reason and not isClient() then
             local captured, captureProblem = pcall(function()
                 local data, created = performed.logic:getRecipeData()
                 local outputs = data:getAllCreatedItems()
@@ -240,6 +317,7 @@ function Native:cancel(reason)
     if not state then return true end
     state.reason = state.reason or reason or "Cancelled"
     if state.creation then state.creation:cancel(state.reason) end
+    if state.openResult then state.openResult:cancel(state.reason) end
     settleReturn(self, state, false)
     local queue = queueFor(self)
     -- Remove only our pending preparation/consumption; leave native restoration
@@ -464,7 +542,7 @@ local function dispatchAuto(self, state, phase)
     return true
 end
 
-function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard)
+function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard, pinOpened)
     if self.active then return nil, "A consumption action is already active" end
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption kind" end
     if type(portion) ~= "number" or portion ~= portion or portion <= 0 or portion > 1 then
@@ -474,7 +552,14 @@ function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard)
     local sourceProblem = missingSource(item)
     if sourceProblem then return nil, sourceProblem end
     if item.isSealed and item:isSealed() then return nil, "Open the item before using Til Full" end
-    if interrupted(self.player) then return nil, "The player cannot begin consumption now" end
+    if blocked(self.player,pinOpened) then return nil, "The player cannot begin consumption now" end
+    if pinOpened then
+        local main=self.player:getInventory()
+        if isServer() or autoGuard or item:getContainer()~=main
+            or OpenFull.networkItem(main,main,item:getID(),item:getFullType())~=item then
+            return nil,"The exact opened item is not in main inventory"
+        end
+    end
     if kind == "food" and item.getRequireInHandOrInventory then
         local required = item:getRequireInHandOrInventory()
         if required and required:size() > 0 then return nil, "Use the normal Eat action for food requiring another item" end
@@ -485,7 +570,9 @@ function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard)
     if not ok then return nil, "Could not read current fullness" end
     if target then return nil, "Already at the requested limit" end
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget,
-        item = item, itemId = item:getID(), source = item:getContainer(), kind = kind, needSampler = type(needSampler) == "function" and needSampler or nil}
+        item = item, itemId = item:getID(), source = item:getContainer(), kind = kind, needSampler = type(needSampler) == "function" and needSampler or nil,
+        pinOpened=pinOpened,observedOpening=pinOpened,fullType=pinOpened and item:getFullType(),
+        fluid=pinOpened and kind=="fluid" and item:getFluidContainer()}
     if kind == "food" and item.getHungChange and item.getBaseHunger then
         local remaining, base = item:getHungChange(), item:getBaseHunger()
         state.allFood = finite(remaining) and finite(base) and remaining < 0 and base < 0
@@ -556,7 +643,11 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     if not declared and (not plainKind or (plainKind == "fluid") ~= (kind == "fluid")) then
         return nil, "The selected opening recipe changed"
     end
-    if interrupted(self.player) then return nil, "The player cannot begin opening now" end
+    local kept=OpenFull.keeps(self.player,item,recipe)
+    local plan=not kept and OpenFull.replacement(self.player,item,recipe)
+    local mapped=plan and (isClient() or plan.sideEffect) and plan
+    local remoteReplacement=kind=="food" and isClient() and not kept
+    if blocked(self.player,mapped~=nil and mapped~=false) then return nil, "The player cannot begin opening now" end
     if not ISEntityUI or type(ISEntityUI.HandcraftStart) ~= "function" then
         return nil, "The native opening action is unavailable"
     end
@@ -571,8 +662,7 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     end
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget,
         opening = true, kind = kind, item = item, itemId = item:getID(), fullType = item:getFullType(), source = item:getContainer(),
-        wasSealed = item:isSealed(),
-        chooseOpened = kind == "food" and isClient() and not OpenFull.keeps(self.player, item, recipe)}
+        wasSealed = item:isSealed(), chooseOpened = remoteReplacement and not mapped, observedOpening=mapped~=nil and mapped~=false}
     self.active = state
     -- Zero means opening only. Native Open-and-Eat percentages enqueue a
     -- separate, unowned consumption action, including through the MP server.
@@ -593,7 +683,15 @@ function Native:beginOpen(item, kind, recipe, atTarget)
             state.restoreFrom = #queue.queue
             return nil
         end
-        if not isClient() then
+        if mapped then
+            local watcher,failure=OpenResult.new(self.player,queue,action,item,state.source,mapped,
+                function() return not liveCancellation(self,state) end,function() return not atTarget() end)
+            if not watcher then
+                state.reason,state.restoreFrom=failure,#queue.queue
+                return nil
+            end
+            state.openResult=watcher
+        elseif not isClient() then
             local receipt, failure = CreatedItemReceipt.begin(action, {
                 inventory = function() return self.player:getInventory() end,
                 matches = function(created) return openingResult(kind, created) end,
@@ -755,18 +853,26 @@ function Native:poll()
         -- may move the item back to Floor or replace the original opened food.
         -- Let cleanup drain; the controller verifies final quantity/fullness.
         local ok, target = true, false
-        if not state.performed then ok, target = pcall(state.atTarget) end
+        if not state.performed and not state.openResult then ok, target = pcall(state.atTarget) end
         if not ok then state.reason = "Could not read current fullness"
         elseif target then state.reason = "Requested limit reached"
-        elseif interrupted(self.player) then state.reason = "Player interrupted consumption"
+        elseif liveCancellation(self,state) then state.reason = "Player interrupted consumption"
         elseif now() - state.started >= TIMEOUT then state.reason = "Native consumption timed out" end
         for _, action in ipairs(queue.queue) do
             if not state.owned[action] then state.reason = state.reason or "Another player action was queued" end
         end
     end
+    local correlated,item
+    if state.openResult and not state.reason then
+        correlated,item=state.openResult:poll()
+        if correlated==false then state.reason=item;item=nil end
+    end
     if state.reason then self:cancel(state.reason) end
     for action in pairs(state.owned) do if present(queue, action) then return nil end end
-    if state.reason then self.active = nil; return false, state.reason end
+    if state.reason then
+        self.active=nil
+        return false,state.reason .. (state.openResult and state.performed and ". No food or drink was queued. If it opened, choose Til Full on the result." or "")
+    end
     if not state.performed then self.active = nil; return false, "Native consumption ended without completion" end
     if state.opening then
         if liveCancellation(self, state) then
@@ -776,6 +882,11 @@ function Native:poll()
         if state.chooseOpened then
             self.active = nil
             return true, "chooseOpened"
+        end
+        if state.openResult then
+            if correlated==nil then return nil end
+            self.active=nil
+            return true,"opened",item,"mappedItem"
         end
         local item = state.item
         if state.hasCreatedReceipt then
