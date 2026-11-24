@@ -425,11 +425,23 @@ function TillFull:step()
             -- The adapter supplies the one exact observed item. Do not look up
             -- a different object by type or position if that item later changes.
             local previous = self.records[self.index]
-            local source = self.player:getInventory()
+            local main=self.player:getInventory()
+            if receipt=="sameItem" and isClient() and opened:getContainer()~=main then
+                -- Stock OpenCanOfBeverage uses DontPutBack. Don't chain a
+                -- second pickup for an unexpected externally held result.
+                self.openedFoodPrompt="Opened item confirmed outside main inventory. Choose Til Full on that item; nothing was consumed."
+                self:finish("finished",self.openedFoodPrompt,"open_only");return
+            end
+            local source=main
             if opened:getID() == previous.id and tostring(opened:getFullType()) == previous.fullType
                 and (opened == previous.item or self.kind == "fluid" or receipt == "sameItem") then source = previous.source end
+            -- A kept can may be reconstructed by the native pickup. Once
+            -- confirmed in main no move remains: pin that observed instance
+            -- and fluid component before native start, just as for a new item.
+            local pin=receipt=="mappedItem" or (receipt=="sameItem" and isClient() and opened:getContainer()==main)
+            if pin then source=main end
             self.records[self.index] = {item = opened, id = opened:getID(), fullType = tostring(opened:getFullType()),
-                source = source, opened = true, dispatched = true, pinOpened=receipt=="mappedItem"}
+                source = source, opened = true, dispatched = true, pinOpened=pin}
             hunger, thirst = needs(self.player)
         else
             self.inflight.receipt = receipt

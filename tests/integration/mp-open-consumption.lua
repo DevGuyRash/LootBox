@@ -14,8 +14,9 @@ end
 local function fixture(name,loot,producer,sp)
     local f={at=1000,rows={},outside={},pockets={},java={},opens={},bites={},dropped={},h=.1,t=.2}
     local jar,ration=producer=="jar",producer=="ration"
+    local kept=producer=="kept"
     local unknown=producer=="mystery" or producer=="dented"
-    local recipeName=jar and "OpenJarOfFood" or ration and "OpenWaterRationCan" or producer=="mystery" and "OpenUnlabeledCan"
+    local recipeName=kept and "OpenCanOfBeverage" or jar and "OpenJarOfFood" or ration and "OpenWaterRationCan" or producer=="mystery" and "OpenUnlabeledCan"
         or producer=="dented" and "OpenDentedUnlabeledCan" or "OpenCannedFood"
     local function container(items)
         local c={rows=items,capacity=20,weight=5}
@@ -72,8 +73,9 @@ local function fixture(name,loot,producer,sp)
             i[k]=function() return false end
         end
         function i:isRotten() return self.unsafe==true end
+        if kept and script==base then i.food=false;i.sealed=true;function i:isSealed() return self.sealed end end
         function i:getFluidContainer() return self.fluid end
-        if ration and script==opened then
+        if (ration and script==opened) or (kept and script==base) then
             local fluid={amount=.3,water=.3,owner=i}
             i.fluid=fluid
             function fluid:getOwner() return self.owner end
@@ -103,7 +105,7 @@ local function fixture(name,loot,producer,sp)
         i.holder=nil
     end
     f.shell=item(1,base,f.source)
-    if not jar then f.tool=item(2,toolScript,f.main) end
+    if not jar and not kept then f.tool=item(2,toolScript,f.main) end
     local bag=item(3,bagScript,f.main);f.pocket.bag=bag
     function bag:getInventory() return f.pocket end
     f.old,f.nested=item(4,opened,f.main),item(5,opened,f.pocket)
@@ -123,17 +125,37 @@ local function fixture(name,loot,producer,sp)
         p[k]=function() return false end
     end
     local q={queue={}}
-    function q:addToQueue(action)
-        assert(not self.current)
-        self.queue[1],self.current=action,action
+    -- Stock addToQueue -> begin -> IsoGameCharacter.StartAction pushes the
+    -- Java owner, then validates/waits/starts synchronously on an idle actor.
+    function f:engine(a)
+        if a.isValid and not a:isValid() or a:waitToStart()~=false then return false end
+        a:start()
+        self.sends=self.sends or {}
+        self.sends[a.Type]=(self.sends[a.Type] or 0)+1
+        return true
+    end
+    function f:admit(action)
         action.action={}
         f.java[1]=action.action
+        if (action.Type=="ISHandcraftAction" and f.eagerOpen)
+            or (action.Type~="ISHandcraftAction" and f.eagerBite) then
+            if f.atAdmission then f.atAdmission(action) end
+            f:engine(action)
+        end
+    end
+    function q:addToQueue(action)
+        self.queue[#self.queue+1]=action
+        if self.current then return end
+        self.current=action;f:admit(action)
     end
     function q:removeFromQueue(action)
         for n,v in ipairs(self.queue) do if v==action then table.remove(self.queue,n);break end end
     end
     f.p,f.q=p,q
-    ISTimedActionQueue={getTimedActionQueue=function() return q end,add=function(a) q:addToQueue(a) end}
+    ISTimedActionQueue={getTimedActionQueue=function() return q end,add=function(a)
+        if f.rejectBefore and f.rejectBefore(a) then return end
+        q:addToQueue(a)
+    end}
     isClient=function() return not sp end
     isServer=function() return false end
     getCell=function() return cell end
@@ -155,7 +177,10 @@ local function fixture(name,loot,producer,sp)
     ResourceType={Item={}}
     Fluid={Water={}}
     FluidCategory={Water={},Beverage={},Hazardous={},Alcoholic={}}
-    local shellSlot={isKeep=function() return false end}
+    InputFlag={IsSealed={},Unseal={}}
+    local shellSlot={isKeep=function() return kept end,hasFlag=function(_,flag)
+        return kept and (flag==InputFlag.IsSealed or flag==InputFlag.Unseal)
+    end}
     local toolSlot={isKeep=function() return true end}
     local out={}
     for _,entry in ipairs({shellSlot,toolSlot,out}) do
@@ -168,9 +193,9 @@ local function fixture(name,loot,producer,sp)
     function mapper:getOutputItem() return not f.changedMap and opened or nil end
     function out:getOutputMapper() return mapper end
     local recipe={getName=function() return recipeName end,isVanilla=function() return true end,
-        isInHandCraftCraft=function() return true end,getInputs=function() return list(jar and {shellSlot} or {toolSlot,shellSlot}) end,
-        getOutputCount=function() return (ration or unknown) and 0 or 1 end,
-        getOutputs=function() return list((ration or unknown) and {} or {out}) end,
+        isInHandCraftCraft=function() return true end,getInputs=function() return list((jar or kept) and {shellSlot} or {toolSlot,shellSlot}) end,
+        getOutputCount=function() return (ration or unknown or kept) and 0 or 1 end,
+        getOutputs=function() return list((ration or unknown or kept) and {} or {out}) end,
         getIndexForIO=function(_,slot) return slot==shellSlot and 2 or 1 end}
     local scripts={}
     getScriptManager=function() return {
@@ -188,13 +213,17 @@ local function fixture(name,loot,producer,sp)
     CraftRecipeManager={getValidInputScriptForItem=function() return shellSlot end}
     f.recipe=recipe
     local function stop(a) q.current=nil;q.queue={};f.java={};a.stopped=true end
-    local function perform(a) q:removeFromQueue(a);q.current=q.queue[1] end -- Java handle retires after callback
+    local function perform(a)
+        q:removeFromQueue(a);q.current=q.queue[1]
+        if f.eagerAdvance and q.current then f:admit(q.current) end
+    end
+    local function forceStop(a) a:stop() end
     ISHandcraftAction={}
     ISEntityUI={HandcraftStart=function(player,_,force,addToQueue,percent)
         assert(player==p and not force and not addToQueue and percent==0)
         local a=setmetatable({Type="ISHandcraftAction",character=p,eatPercentage=percent,craftRecipe=recipe,
             manualInputs={[1]=not jar and list({f.tool}) or nil,[2]=list({f.shell})},waitToStart=function() return false end,
-            stop=stop,forceStop=stop,forceCancel=function() end,perform=perform},ISHandcraftAction)
+            stop=stop,forceStop=forceStop,forceCancel=function() end,perform=perform},ISHandcraftAction)
         function a:start()
             local shell=f.picked or f.shell
             self.manualInputs[2]=list({shell})
@@ -215,20 +244,34 @@ local function fixture(name,loot,producer,sp)
     function ISInventoryPaneContextMenu.OnNewCraft(shell,r,index,all,eat)
         assert(shell==f.shell and r==recipe and index==0 and all==false and eat==0)
         f.opens[#f.opens+1]=eat
+        if f.nativePickup then
+            ISTimedActionQueue.add({Type="ISInventoryTransferAction",character=p,item=shell,srcContainer=f.source,destContainer=f.main,
+                waitToStart=function() return false end,start=function() end,perform=perform,stop=stop,forceStop=forceStop})
+        end
         f.action=ISEntityUI.HandcraftStart(p,{},false,true,eat)
     end
-    local function request(value,portion,index,kind)
-        assert(index==0)
+    local function make(value,portion,kind)
         f.bites[#f.bites+1]={value=value,portion=portion}
         local a={Type=kind,item=value,character=p,fluidContainer=value:getFluidContainer(),stop=stop,forceStop=stop,perform=perform,
             waitToStart=function() return false end,isValid=function() return true end}
         function a:start() self.item=f.main:getItemWithID(self.item:getID());f.requested=self.item end
-        q:addToQueue(a)
+        return a
     end
-    function ISInventoryPaneContextMenu.eatItem(value,portion,index) request(value,portion,index,"ISEatFoodAction") end
-    function ISInventoryPaneContextMenu.onDrinkFluid(value,portion,who) assert(who==p);request(value,portion,0,"ISDrinkFluidAction") end
+    ISEatFoodAction={new=function(_,who,value,portion) assert(who==p);return make(value,portion,"ISEatFoodAction") end}
+    ISDrinkFluidAction={new=function(_,who,value,portion) assert(who==p);return make(value,portion,"ISDrinkFluidAction") end}
+    function ISInventoryPaneContextMenu.getEatingMask(who,remove) assert(who==p and not remove);return f.mask end
+    local function clothing(kind)
+        return {new=function(_,who,item)
+            assert(who==p and item==f.mask)
+            return {Type=kind,character=who,item=item,waitToStart=function() return false end,
+                start=function() end,perform=perform,stop=stop,forceStop=forceStop,forceCancel=function() end}
+        end}
+    end
+    ISUnequipAction,ISWearClothing=clothing("ISUnequipAction"),clothing("ISWearClothing")
+    function ISInventoryPaneContextMenu.eatItem(value,portion,index) assert(index==0);q:addToQueue(make(value,portion,"ISEatFoodAction")) end
+    function ISInventoryPaneContextMenu.onDrinkFluid(value,portion,who) assert(who==p);q:addToQueue(make(value,portion,"ISDrinkFluidAction")) end
     local world={protected=function() return false end,consumptionSource=function(_,i,c) return i.holder==c end}
-    f.job=assert(Full.new(p,world,{f.shell},ration and "fluid" or drink and "drinkFood" or "food",false,recipe,f.source))
+    f.job=assert(Full.new(p,world,{f.shell},(ration or kept) and "fluid" or drink and "drinkFood" or "food",false,recipe,f.source))
     function f:menu() f.job:tick();assert(#f.opens==1 and #f.bites==0 and f.action) end
     function f:start()
         assert(f.action:waitToStart())
@@ -260,6 +303,115 @@ local function fixture(name,loot,producer,sp)
     end
     return f
 end
+
+test("an idle native enqueue cannot send the mapped craft before its receipt is armed",function()
+    local f=fixture()
+    f.eagerOpen=true
+    f:menu()
+    assert(not f.action.craftStarted and not f.sends,"stock Open started inside add() before its quiet baseline")
+    f.at=f.at+201
+    assert(f:engine(f.action) and f.sends.ISHandcraftAction==1)
+    local exact=f:add(6);f:retire();f:done();f:settle()
+    assert(#f.bites==1 and f.q.current.item==exact,f.job.reason)
+end)
+
+test("idle mapped food and fluid follow-ups arm their exact guards before native enqueue can start",function()
+    for _,entry in ipairs({{"CannedPeaches",false,"ISEatFoodAction"},{"WaterRationCan","ration","ISDrinkFluidAction"}}) do
+        local f=fixture(entry[1],false,entry[2]);f.eagerBite=true
+        f:menu();f:start()
+        local exact=f:add(6);f:retire();f:done();f:settle()
+        assert(f.requested==exact and f.sends and f.sends[entry[3]]==1,f.job.reason)
+        assert(f.job.native.active.pinStarted==true,"stock bite/sip started before its exact guard")
+    end
+end)
+
+test("a swapped opened item at eager admission cannot send the stock bite",function()
+    local f=fixture();f.eagerOpen,f.eagerBite=true,true
+    f:menu();f.at=f.at+201;assert(f:engine(f.action))
+    local exact=f:add(6);f:retire();f:done()
+    f.atAdmission=function(a)
+        assert(a.item==exact)
+        f:remove(exact);f:add(6)
+    end
+    f:settle();f.job:tick()
+    assert(not f.requested and not f.sends.ISEatFoodAction and f.job.count==0)
+end)
+
+test("a stock kept soda in main waits for unseal and never sips a substituted fluid component",function()
+    for _,swap in ipairs({false,true}) do
+        local f=fixture("Pop2",false,"kept");f.eagerOpen,f.eagerBite=true,true
+        f.t=.05;f:menu()
+        assert(f.sends.ISHandcraftAction==1 and f.shell:isSealed())
+        f:done();f.job:tick();assert(not f.requested and not f.q.current)
+        f.shell.sealed=false
+        if swap then f.atAdmission=function(a)
+            assert(a.Type=="ISDrinkFluidAction")
+            f.shell.fluid=setmetatable({owner=f.shell},{__index=f.shell.fluid})
+        end end
+        f.job:tick()
+        if swap then
+            assert(not f.requested and not f.sends.ISDrinkFluidAction,"sent a sip for a changed soda component")
+        else
+            assert(f.requested==f.shell and f.sends.ISDrinkFluidAction==1 and f.job.native.active.pinStarted)
+            f.q.current:perform();f.java={};f.shell.fluid.amount=.2;f.t=0;f.job:tick()
+            assert(f.job.count==1 and not f.job:isBusy(),f.job.reason)
+        end
+    end
+end)
+
+test("shelf soda uses its stock pickup, then the exact same-ID unsealed copy in main; an external survivor is not consumed",function()
+    for _,stock in ipairs({true,false}) do
+        local f=fixture("Pop2",true,"kept");f.eagerOpen,f.eagerBite,f.eagerAdvance=true,true,true;f.t=.05
+        f.nativePickup=stock;f:menu()
+        if stock then
+            assert(f.q.current.Type=="ISInventoryTransferAction" and f.sends.ISInventoryTransferAction==1)
+            f:pickup();f.q.current:perform()
+            assert(f.q.current==f.action and f.picked~=f.shell and f.picked:getID()==f.shell:getID())
+        end
+        assert(f.sends.ISHandcraftAction==1)
+        f:done();f.job:tick();assert(not f.requested)
+        local result=f.picked or f.shell;result.sealed=false;f.job:tick()
+        if stock then
+            assert(f.requested==result and f.sends.ISDrinkFluidAction==1 and f.job.native.active.pinStarted)
+            assert(#f.q.queue==1 and result:getContainer()==f.main) -- no stock return for this recipe
+        else
+            assert(not f.job:isBusy() and f.job.count==0 and f.job.reason==f.job.openedFoodPrompt
+                and not f.sends.ISDrinkFluidAction and result:getContainer()==f.source)
+        end
+    end
+end)
+
+test("a mapped bite queued behind a mask keeps native mask restoration even when bite submission is declined",function()
+    for _,reject in ipairs({false,true}) do
+        local f=fixture();f.eagerBite,f.eagerAdvance=true,true;f.mask={}
+        f:menu();f:start()
+        local exact=f:add(6);f:retire();f:done()
+        if reject then f.rejectBefore=function(a) return a.Type=="ISEatFoodAction" end end
+        f:settle()
+        if not reject then
+            assert(f.q.current.Type=="ISUnequipAction" and #f.q.queue==3 and not f.requested)
+            f.q.current:perform()
+            assert(f.q.current.Type=="ISEatFoodAction" and f.requested==exact and f.job.native.active.pinStarted)
+            f.q.current:perform()
+        end
+        assert(f.q.current and f.q.current.Type=="ISWearClothing" and f.q.current.item==f.mask)
+        f.q.current:perform();f.java={};f.h=0;exact.h=.3;f.job:tick()
+        assert(not f.q.current and (not reject or not f.requested))
+    end
+end)
+
+test("reentrant work at eager craft admission is never claimed, stopped or lost",function()
+    local f=fixture();f.eagerOpen=true
+    local original=ISEntityUI.HandcraftStart
+    local foreign={Type="ISReadABook",stop=function() error("foreign stop") end}
+    f.atAdmission=function(a)
+        assert(a.Type=="ISHandcraftAction" and ISEntityUI.HandcraftStart==original)
+        f.q:addToQueue(foreign)
+    end
+    f:menu();f.job:tick()
+    assert(f.q.current==foreign and #f.q.queue==1 and not f.sends and not f.requested)
+    assert(ISEntityUI.HandcraftStart==original)
+end)
 
 test("real adapter uses exact stock mapped peach, milk and fruit beverage and samples need after opening",function()
     for _,name in ipairs({"CannedPeaches","CannedMilk","CannedFruitBeverage"}) do
