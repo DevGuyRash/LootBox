@@ -312,6 +312,51 @@ local function hook(self, state, action)
     return true
 end
 
+-- An observed opening left this exact ready item directly in main.
+-- No pickup, tool or item return belongs here. Use the stock menu's mask
+-- choice and actions, but bind the specific instances before add can start
+-- them. Do not intercept queue.add or rescan the queue to claim other work.
+local function dispatchPinned(self,state,portion,queue)
+    local p,item=self.player,state.item
+    local food=state.kind=="food"
+    local ctor=food and ISEatFoodAction or not food and ISDrinkFluidAction
+    if not ctor or not ISInventoryPaneContextMenu.getEatingMask then return nil,"Native consumption is unavailable" end
+    local action=ctor:new(p,item,portion)
+    if not action or action.Type~=(food and "ISEatFoodAction" or "ISDrinkFluidAction")
+        or action.character~=p or action.item~=item or not food and action.fluidContainer~=state.fluid then
+        return nil,"The native action did not bind the exact opened item"
+    end
+    local mask=ISInventoryPaneContextMenu.getEatingMask(p,false)
+    local actions={action}
+    local remove
+    if mask then
+        remove=ISUnequipAction:new(p,mask,50)
+        local wear=ISWearClothing:new(p,mask,50)
+        if not remove or remove.Type~="ISUnequipAction" or remove.character~=p or remove.item~=mask
+            or not wear or wear.Type~="ISWearClothing" or wear.character~=p or wear.item~=mask then
+            return nil,"The native eating mask actions could not be bound"
+        end
+        actions={remove,action,wear}
+        state.restore[wear]=true
+    end
+    state.consume=action
+    for _,a in ipairs(actions) do
+        state.owned[a]=true
+        local ok,why=hook(self,state,a)
+        if not ok then return nil,why end
+    end
+    local removedQueued,failure
+    for _,a in ipairs(actions) do
+        if not failure or removedQueued and state.restore[a] then
+            local ok=pcall(ISTimedActionQueue.add,a)
+            local queued=present(queue,a)
+            if a==remove then removedQueued=queued end
+            if not ok or not queued then failure="The game declined a native consumption action" end
+        end
+    end
+    return not failure and not state.reason,failure or state.reason
+end
+
 function Native:cancel(reason)
     local state = self.active
     if not state then return true end
@@ -562,7 +607,7 @@ function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard, pin
     end
     if kind == "food" and item.getRequireInHandOrInventory then
         local required = item:getRequireInHandOrInventory()
-        if required and required:size() > 0 then return nil, "Use the normal Eat action for food requiring another item" end
+        if required and (pinOpened or required:size() > 0) then return nil, "Use the normal Eat action for food requiring another item" end
     end
     local queue = queueFor(self)
     if #queue.queue > 0 or queue.current then return nil, "Finish the current player action first" end
@@ -579,6 +624,13 @@ function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard, pin
             and portion >= remaining / base
     end
     self.active = state
+    if pinOpened then
+        local checked,ok,why=pcall(dispatchPinned,self,state,portion,queue)
+        if checked and ok then return true end
+        local failure=checked and why or "Native opened-item preparation failed"
+        self:cancel(failure)
+        return nil,failure
+    end
     if autoGuard then
         state.autoGuard, state.portion = autoGuard, portion
         local phase = state.source == self.player:getInventory() and "consume" or "prepare"
@@ -667,7 +719,14 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     -- Zero means opening only. Native Open-and-Eat percentages enqueue a
     -- separate, unowned consumption action, including through the MP server.
     local startCraft = ISEntityUI.HandcraftStart
-    ISEntityUI.HandcraftStart = function(player, logic, force, addToQueue, eatPercentage)
+    local armedCraft,intercept
+    intercept = function(player, logic, force, addToQueue, eatPercentage)
+        if player~=self.player or force or eatPercentage~=0 or (logic and logic.getRecipe and logic:getRecipe()~=recipe) then
+            return startCraft(player,logic,force,addToQueue,eatPercentage)
+        end
+        -- Restore the original before it or any eager native start calls
+        -- back into crafting. Only our one synchronous menu call is scoped.
+        if ISEntityUI.HandcraftStart==intercept then ISEntityUI.HandcraftStart=startCraft end
         local action = startCraft(player, logic, force, false, eatPercentage)
         local bound = false
         if action and not force and not action.force and action.character == self.player and action.craftRecipe == recipe
@@ -691,6 +750,10 @@ function Native:beginOpen(item, kind, recipe, atTarget)
                 return nil
             end
             state.openResult=watcher
+            state.consume,state.owned[action]=action,true
+            local ok,why=hook(self,state,action)
+            if not ok then state.reason,state.restoreFrom=why,#queue.queue;return nil end
+            armedCraft=action
         elseif not isClient() then
             local receipt, failure = CreatedItemReceipt.begin(action, {
                 inventory = function() return self.player:getInventory() end,
@@ -712,6 +775,7 @@ function Native:beginOpen(item, kind, recipe, atTarget)
         if addToQueue then ISTimedActionQueue.add(action) end
         return action
     end
+    ISEntityUI.HandcraftStart=intercept
     local dispatched, err = pcall(function()
         -- Stock Open-and-Drink first transfers its world wrapper, then gives
         -- crafting the canonical selected inventory item, never the wrapper.
@@ -719,21 +783,31 @@ function Native:beginOpen(item, kind, recipe, atTarget)
         if target ~= item then ISInventoryPaneContextMenu.transferIfNeeded(self.player, target) end
         ISInventoryPaneContextMenu.OnNewCraft(item, recipe, self.player:getPlayerNum(), false, 0)
     end)
-    ISEntityUI.HandcraftStart = startCraft
+    if ISEntityUI.HandcraftStart==intercept then ISEntityUI.HandcraftStart=startCraft end
     local seenCraft = false
     for index, action in ipairs(queue.queue) do
-        state.owned[action] = true
-        if action.Type == "ISHandcraftAction" then
-            if state.consume then state.reason = "Unexpected multiple native opening actions" end
-            state.consume, seenCraft = action, true
-        elseif seenCraft or (state.restoreFrom and index > state.restoreFrom) then state.restore[action] = true end
+        if mapped then
+            if action==armedCraft then seenCraft=true
+            elseif not seenCraft and action.Type=="ISInventoryTransferAction" and action.character==self.player
+                and action.item==item and action.srcContainer==state.source and action.destContainer==self.player:getInventory() then
+                state.owned[action]=true
+            else state.reason=state.reason or "Other work was queued during opening; keep the opener in main inventory" end
+        else
+            state.owned[action] = true
+            if action.Type == "ISHandcraftAction" then
+                if state.consume then state.reason = "Unexpected multiple native opening actions" end
+                state.consume, seenCraft = action, true
+            elseif seenCraft or (state.restoreFrom and index > state.restoreFrom) then state.restore[action] = true end
+        end
     end
     for action in pairs(state.owned) do
-        local supported, problem = hook(self, state, action)
-        if not supported then state.reason = problem end
+        if action~=armedCraft then
+            local supported, problem = hook(self, state, action)
+            if not supported then state.reason = problem end
+        end
     end
     if not dispatched then state.reason = "Native opening failed: " .. tostring(err) end
-    if not state.consume then state.reason = state.reason or "The game did not queue an opening action" end
+    if not state.consume or not present(queue,state.consume) then state.reason = state.reason or "The game did not queue an opening action" end
     if state.reason then self:cancel(state.reason); return nil, state.reason end
     return true
 end
