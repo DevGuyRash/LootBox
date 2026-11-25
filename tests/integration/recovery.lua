@@ -326,6 +326,15 @@ test("forgetting releases protections, reports the gear and moves nothing", func
     assert(not Recovery.new(f.player, f.world, "fixture"):status().pending)
 end)
 
+test("a saved plan that never moved any gear reserves nothing in the next session", function()
+    local f, bag, nested, _, heavy = wholeBagFixture()
+    assert(f.recovery:prepare(heavy) and f.documents["fixture/recovery"].pending)
+    local loaded = Recovery.new(f.player, f.world, "fixture")
+    assert(not loaded:status().pending and not loaded:isProtected(bag) and not loaded:isProtected(nested) and not loaded:isReservedContainer(f.safe))
+    assert(f:run("stage"))
+    assert(Recovery.new(f.player, f.world, "fixture"):status().blocking, "Gear that was put down is still owed back")
+end)
+
 test("a failed write is reported without inventing pending gear", function()
     local f, _, _, _, heavy = wholeBagFixture()
     f.failSave = true
