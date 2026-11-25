@@ -293,7 +293,7 @@ function App.get(playerIndex, passiveNeeds)
     end
     for _, text in ipairs(notes) do Log.warn(nil, "world-data-repaired", "note", text) end
     instance.world = World.new(player, state)
-    instance.world.graph = graph
+    instance.world.graph, instance.world.preference = graph, App.preference
     instance.recovery = Recovery.new(player, instance.world, path)
     local receipt = instance.recovery.receipt
     if receipt and instance.world.currentKey then receipt.endpointKey = instance.world.currentKey(receipt.endpointKey) end

@@ -2388,8 +2388,8 @@ test("bag preparation keeps capacity-dependent selected items in the preview ins
     item(f.source, "Base.Plank", 2)
     local Carry = require "LootBox/Carry"
     local previous = Carry.next
-    Carry.next = function(_, _, incoming)
-        assert(incoming == 4)
+    Carry.next = function(_, _, work)
+        assert(#work == 2)
         return {kind = "gear"}
     end
     local plan = assert(f.jobs:preview(request("inventory")))
@@ -2666,7 +2666,8 @@ end)
 
 local function condenseFixture()
     local f = fixture(50)
-    f.world.player = f.player
+    f.world.player, f.world.state = f.player, {containerLabels = {}}
+    for _, name in ipairs({"bags", "kinds", "meantFor"}) do f.world[name] = require("LootBox/World")[name] end
     function f.world:carryFactor(value) return value.carryFactor or 1 end
     function f.inventory:isRemoveItemAllowed() return true end
     function f.player:isEquipped(value) return value.equipped == true end
@@ -2676,7 +2677,9 @@ local function condenseFixture()
         local value = item(parent, "Test." .. name, 0)
         value.equipped = equipped ~= false
         function value:IsInventoryContainer() return true end
+        function value:getCategory() return "Container" end
         function value:getInventory() return inside end
+        function value:getEquipParent() return self.held and f.player or nil end
         function value:getMaxItemSize() return self.maximumItem or 0 end
         function value:getAttachedSlot() return -1 end
         function inside:isRemoveItemAllowed() return true end
@@ -2746,13 +2749,29 @@ test("Condense avoids equal-weight full-bag exchanges and respects temporary har
     strong = f:addBag("Strong", 10, 0.1)
     weak = f:addBag("Weak", 10, 0.5)
     item(strong, "Test.Nine", 9); item(weak, "Test.Eight", 8); item(weak, "Test.Two", 2)
+    -- Carrying 5.9: the nine needs 14.9 to pass through the inventory.
     f.hardLimit = 14
     f:startCondense({rebalance = true})
     local blocked = finish(f)
-    assert(blocked.state == "finished" and #f.transfers == 0 and blocked.reason:find("temporary", 1, true))
-    f.hardLimit = 22
+    assert(blocked.state == "finished" and #f.transfers == 0 and blocked.reason:find("for a moment", 1, true))
+    f.hardLimit = 15
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished" and math.abs(f.world:carrying() - 5.5) < 0.0001)
+end)
+
+test("Condense needs full carrying room only for a bag held in a hand, as the game does", function()
+    for _, held in ipairs({false, true}) do
+        local f = condenseFixture()
+        local strong, strongItem = f:addBag("Strong", 10, 0.2)
+        local weak = f:addBag("Weak", 100, 0.5)
+        strongItem.held = held
+        item(f.inventory, "Test.Keep", 47).protected = true
+        local selected = item(weak, "Test.Can", 2.8)
+        -- Carrying 48.4 of 50.
+        f:startCondense({rebalance = true})
+        assert(finish(f).state == "finished")
+        assert(strong:contains(selected) == not held and weak:contains(selected) == held)
+    end
 end)
 
 test("Condense uses unequipped loot bags only when enabled and honors native item size", function()
@@ -2836,7 +2855,7 @@ test("Condense pauses on failed inventory capture and resumes from current stora
     f:startCondense()
     local status = awaitState(f, "paused")
     assert(status.canResume and #f.transfers == 1 and bag:contains(selected))
-    assert(status.reason:find("unavailable", 1, true))
+    assert(status.reason:find("cannot be read", 1, true))
     f.inventory.owned, f.onTransfer = true, nil
     assert(f.jobs:resume())
     assert(finish(f).state == "finished" and #f.transfers == 1)
@@ -2954,10 +2973,10 @@ test("Condense prefers even tiny reduction gains and rejects tiny increases for 
     assert(finish(f).state == "finished" and #f.transfers == 1 and stronger:contains(selected))
 end)
 
-test("Condense rejects a grouping exchange with a tiny positive net mass delta", function()
+test("Condense never adds weight to keep things together", function()
     local f = condenseFixture()
     local stronger = f:addBag("Stronger", 3, 0.5)
-    local weaker = f:addBag("Weaker", 4, 0.50001)
+    local weaker = f:addBag("Weaker", 4, 0.51)
     local firstA = item(stronger, "Test.A", 2)
     local firstB = item(stronger, "Test.B", 1)
     local secondA = item(weaker, "Test.A", 2)
@@ -2965,7 +2984,7 @@ test("Condense rejects a grouping exchange with a tiny positive net mass delta",
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished" and #f.transfers == 0)
     assert(stronger:contains(firstA) and stronger:contains(firstB) and weaker:contains(secondA) and weaker:contains(secondB))
-    assert(math.abs(f.world:carrying() - 3.00003) < 0.0000001)
+    assert(math.abs(f.world:carrying() - 3.03) < 0.0000001)
     weaker.carryFactor = 0.5
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished")
@@ -2974,6 +2993,103 @@ test("Condense rejects a grouping exchange with a tiny positive net mass delta",
     local count = #f.transfers
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished" and #f.transfers == count)
+end)
+
+local function randomizer(seed)
+    return function(low, high)
+        seed = seed * 16807 % 2147483647
+        return low + math.floor(seed / 2147483647 * (high - low + 1))
+    end
+end
+
+-- The least that could be carried, from trying every placement.
+local function lightest(f, bags, rebalance)
+    local places, loads, fixed = {{factor = 1, room = math.huge}}, {}, 0
+    for _, value in ipairs(f.inventory.items) do if value.weight > 0 then loads[#loads + 1] = value.weight end end
+    for _, bag in ipairs(bags) do
+        local room = bag.capacity
+        for _, value in ipairs(bag.items) do
+            if rebalance then loads[#loads + 1] = value.weight else room, fixed = room - value.weight, fixed + value.weight * bag.carryFactor end
+        end
+        places[#places + 1] = {factor = bag.carryFactor, room = room}
+    end
+    table.sort(loads, function(a, b) return a > b end)
+    local best = math.huge
+    local function place(index, mass)
+        if mass >= best then return end
+        if not loads[index] then best = mass; return end
+        for _, target in ipairs(places) do
+            if loads[index] <= target.room + 0.00001 then
+                target.room = target.room - loads[index]
+                place(index + 1, mass + loads[index] * target.factor)
+                target.room = target.room + loads[index]
+            end
+        end
+    end
+    place(1, fixed)
+    return best
+end
+
+test("Condense reaches the least weight possible, in either mode, on small inventories", function()
+    local weights, factors = {0.1, 0.2, 0.3, 0.5, 0.8, 1, 1.5, 2, 2.5, 3, 4, 5, 6}, {0.15, 0.2, 0.3, 0.35, 0.5}
+    for seed = 1, 40 do
+        for _, rebalance in ipairs({true, false}) do
+            local random, f, bags = randomizer(seed * 7919), condenseFixture(), {}
+            f.hardLimit = 1000
+            for index = 1, 2 + seed % 2 do bags[index] = f:addBag("Bag" .. index, random(4, 10), factors[random(1, #factors)]) end
+            for _ = 1, 7 do
+                local weight, source = weights[random(1, #weights)], f.inventory
+                local bag = bags[random(1, #bags)]
+                if random(1, 2) == 1 and bag:getCapacityWeight() + weight <= bag.capacity then source = bag end
+                item(source, "Test.Kind" .. random(1, 4), weight)
+            end
+            local best, kept = lightest(f, bags, rebalance), {}
+            for _, bag in ipairs(bags) do for _, value in ipairs(bag.items) do kept[value] = bag end end
+            local plan = assert(f.jobs:previewCondense({rebalance = rebalance}))
+            if #plan.moves > 0 then assert(f.jobs:start(plan)); assert(finish(f).state == "finished") end
+            assert(math.abs(f.world:carrying() - best) < 0.0001, "Seed " .. seed .. " carries " .. f.world:carrying() .. ", not " .. best)
+            if not rebalance then for value, bag in pairs(kept) do assert(bag:contains(value)) end end
+            assert(#assert(f.jobs:previewCondense({rebalance = rebalance})).moves == 0, "Seed " .. seed .. " is not settled")
+        end
+    end
+end)
+
+test("Condense starts moving at once and moves almost nothing twice in a large inventory", function()
+    local random, f, bags = randomizer(4), condenseFixture(), {}
+    f.hardLimit = 1000
+    for index, entry in ipairs({{28, 0.15}, {18, 0.35}, {6, 0.5}}) do bags[index] = f:addBag("Bag" .. index, entry[1], entry[2]) end
+    local weights, total = {0.1, 0.1, 0.2, 0.3, 0.5, 0.8, 1, 1.5, 2, 3}, 0
+    for _ = 1, 80 do
+        local weight, source = weights[random(1, #weights)], f.inventory
+        local bag = bags[random(1, #bags)]
+        if random(1, 10) < 8 and bag:getCapacityWeight() + weight <= bag.capacity then source = bag end
+        item(source, "Test.Kind" .. random(1, 20) .. ":" .. weight, weight)
+        total = total + weight
+    end
+    f:startCondense({rebalance = true})
+    for _ = 1, 2 do tick(f) end
+    assert(f.adapter.active, "The first move waits for planning")
+    local status = finish(f)
+    -- Every bag filled to the brim, the best first.
+    local least = 28 * 0.15 + 18 * 0.35 + 6 * 0.5 + (total - 52)
+    assert(status.state == "finished" and total > 52 and math.abs(f.world:carrying() - least) < 0.0001)
+    local moves, again = {}, 0
+    for _, entry in ipairs(f.transfers) do
+        moves[entry.item.id] = (moves[entry.item.id] or 0) + 1
+        if moves[entry.item.id] == 2 then again = again + 1 end
+        assert(moves[entry.item.id] <= 2)
+    end
+    assert(#f.transfers < 80 and again <= 4, #f.transfers .. " moves, " .. again .. " items moved twice")
+end)
+
+test("Condense leaves an arrangement alone when no real weight can be saved", function()
+    local f = condenseFixture()
+    local strong, weak = f:addBag("Strong", 6, 0.15), f:addBag("Weak", 20, 0.35)
+    -- 0.1, 0.2 and 0.3 add up to slightly different sums in different orders.
+    for index = 1, 10 do item(strong, "Test.A", 0.1); item(strong, "Test.B", 0.2); item(strong, "Test.C", 0.3) end
+    for index = 1, 10 do item(weak, "Test.D", 0.1); item(weak, "Test.E", 0.2); item(weak, "Test.F", 0.3) end
+    local plan = assert(f.jobs:previewCondense({rebalance = true}))
+    assert(#plan.moves == 0 and plan.condense.reason == "Your bags are packed.")
 end)
 
 test("new manager preview preserves pause until start and Resume invalidates it", function()

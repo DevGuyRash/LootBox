@@ -878,23 +878,23 @@ case("Carried rearrangement subtracts the source contribution before adding the 
     assert(f.world:carryDelta(fromBag, f.remote) <= 0, "Unloading carried contents cannot increase character mass")
 end)
 
-case("Carried bags remain destinations when source-bag searching is disabled and main inventory is last", function(f)
+case("Worn bags are destinations whether or not source bags are searched, best reduction first and main inventory last", function(f)
     local weak, weakStorage = weightedBag(f, f.inventory, "Equipped shoulder bag", 50)
     local strong, strongStorage = weightedBag(f, f.inventory, "Equipped backpack", 80)
     local _, unusedStorage = weightedBag(f, f.inventory, "Unequipped bag", 90)
     weak.equipped, strong.equipped = true, true
     local selected = weightedItem(f, f.remote, 3)
-    local destinations = assert(f.world:destinations({includeBags = true, destination = {kind = "inventory"}}, selected))
-    equal(destinations[1], strongStorage)
-    equal(destinations[2], weakStorage)
+    for _, includeBags in ipairs({true, false}) do
+        local destinations = assert(f.world:destinations({includeBags = includeBags, destination = {kind = "inventory"}}, selected))
+        equal(#destinations, 3)
+        equal(destinations[1], strongStorage)
+        equal(destinations[2], weakStorage)
+        equal(destinations[3], f.inventory)
+    end
+    f.world.preference = function(key) return key == "condenseUseUnequipped" end
+    local destinations = assert(f.world:destinations({includeBags = false, destination = {kind = "inventory"}}, selected))
     equal(destinations[3], unusedStorage)
     equal(destinations[4], f.inventory)
-    local noSourceBags = assert(f.world:destinations({includeBags = false, destination = {kind = "inventory"}}, selected))
-    equal(#noSourceBags, 4)
-    equal(noSourceBags[1], strongStorage)
-    equal(noSourceBags[2], weakStorage)
-    equal(noSourceBags[3], unusedStorage)
-    equal(noSourceBags[4], f.inventory)
 end)
 
 case("Zero-reduction and nested carried bags precede main inventory on equal carry cost", function(f)
@@ -902,6 +902,7 @@ case("Zero-reduction and nested carried bags precede main inventory on equal car
     outer.equipped = true
     local _, innerStorage = weightedBag(f, outerStorage, "Nested bag", 90)
     local _, spareStorage = weightedBag(f, f.inventory, "Spare bag", 90)
+    f.world.preference = function() return true end
     local selected = weightedItem(f, f.remote, 1)
     local destinations = assert(f.world:destinations({includeBags = false, destination = {kind = "inventory"}}, selected))
     equal(#destinations, 4)
@@ -1128,15 +1129,20 @@ case("Moving outside does not change the captured building source scope", functi
     equal(missing, 0)
 end)
 
-case("Gear discovery includes carried nested bags and only the reviewed source containers", function(f)
-    local bag = f.item(f.inventory, "PersonalBag", "Container")
-    bag.inventory = f.container("bag")
-    bag.inventory.bag = bag
-    f.item(bag.inventory, "InsidePersonalBag")
-    local found = f.world:gearRecords({f.junk, f.junk})
-    local names = f.names({items = found})
-    equal(names, "Beans,CarriedFood,InsidePersonalBag,PersonalBag,Scrap")
-    assert(not names:find("Apple", 1, true))
+case("Gear discovery finds each bag carried or in the reviewed sources once, bags inside bags too", function(f)
+    local function holder(source, name)
+        local value = f.item(source, name, "Container")
+        value.inventory = f.container("bag")
+        value.inventory.bag = value
+        return value
+    end
+    local outer, found, missed = holder(f.inventory, "PersonalBag"), holder(f.junk, "FoundBag"), holder(f.tools, "OtherBag")
+    local inner = holder(outer.inventory, "InsidePersonalBag")
+    local bags = {}
+    for _, record in ipairs(f.world:gearRecords({f.junk, f.junk})) do bags[#bags + 1] = record.item end
+    equal(#bags, 3)
+    equal(bags[1], outer); equal(bags[2], inner); equal(bags[3], found)
+    assert(missed:getContainer() == f.tools)
 end)
 
 case("Safe staging uses ordinary accessible world storage and excludes trash and nested bags", function(f)
