@@ -72,9 +72,7 @@ do
     assert(eq.fill[1].item==gear and eq.fill[2].item==deeper and eq.fill[3].item==nested and eq.fill[4].item==large)
     local only=assert(Pour.collect(p,w,source,loot,{pourFillScope="main-only"}))
     assert(#only.targets==7 and #only.fill==3)
-    assert(result.fill[1].label~=result.fill[2].label and result.fill[1].icon)
-    assert(result.fill[1].label:find("Main inventory",1,true) and result.fill[1].label:find("0.5 L free",1,true))
-    assert(eq.fill[3].label:find("Hydration bag",1,true))
+    assert(result.fill[1].place=="Main inventory" and eq.fill[3].place=="Hydration bag")
     assert(Pour.revalidate(p,w,result.fill[4],loot,{},result.source))
     local inBag=result.fill[#result.fill]
     assert(inBag.item==inStray and inBag.scope=="carried" and Pour.revalidate(p,w,inBag,loot,{},result.source))
@@ -233,8 +231,8 @@ do
     function w:consumptionSource(i,c) reached=reached+1;return check(self,i,c) end
     local snap=Pour.snapshot(p,w,loot,loot)
     local once=reached
-    local first,other=assert(Pour.source(snap,a)),assert(Pour.source(snap,b))
-    assert(first.label~=other.label and not Pour.source(snap,m))
+    local first=assert(Pour.source(snap,a));assert(Pour.source(snap,b))
+    assert(not Pour.source(snap,m))
     assert(not Pour.source(snap,conflict) and not Pour.source(snap,alias))
     assert(not Pour.source(Pour.snapshot(p,w,loot,nil),a) and reached==once)
     local x,y=assert(Pour.plan(snap,a)),assert(Pour.plan(snap,b))
@@ -308,30 +306,94 @@ do
     local unreadable=item(p.main,"Unknown",1,.5);unreadable.fluid.createFluidSample=function() return nil end
     FluidContainer.CanTransfer=function(from,to) return from~=bad.fluid and to==receiver.fluid end
     local function inverse(prefs)
-        return Pour.fillFrom(Pour.snapshot(p,w,loot,loot),receiver,prefs or {})
+        return Pour.fillFrom(Pour.snapshot(p,w,loot,loot),{receiver},prefs or {})
     end
     local a=assert(inverse())
-    assert(a.target.item==receiver and a.target.pourSignature and #a.donors==2)
-    assert(a.donors[1].item==main and a.donors[2].item==bagged and a.donors[2].scope=="equipped")
-    assert(a.donors[1].pourSignature and a.donors[2].pourSignature)
+    local target=a.targets[1]
+    assert(#a.targets==1 and target.item==receiver and target.pourSignature and #a.donors==2)
+    local one,two=a.donors[1].source,a.donors[2].source
+    assert(one.item==main and two.item==bagged and two.scope=="equipped")
+    assert(one.pourSignature and two.pourSignature and a.donors[1].targets[1].relation=="same")
     local opt={pourLootToLoot=true}
     local b=assert(inverse(opt))
-    assert(#b.donors==3 and b.donors[3].item==sibling)
-    for _,e in ipairs(b.donors) do assert(e.item~=receiver and e.item~=hidden and e.item~=empty) end
-    assert(not Pour.revalidate(p,w,a.target,loot,opt,a.donors[1]),"normal carried-source action cannot target loot")
-    assert(Pour.revalidate(p,w,a.target,loot,{},a.donors[1],receiver))
-    assert(not Pour.revalidate(p,w,a.target,loot,{},a.donors[1],sibling))
-    assert(not Pour.revalidate(p,w,b.target,loot,{},b.donors[3],receiver))
-    assert(Pour.revalidate(p,w,b.target,loot,opt,b.donors[3],receiver))
-    assert(not Pour.fillFrom(Pour.snapshot(p,w,loot,nil),receiver,opt),"an unshown holder is not a destination")
-    assert(not Pour.fillFrom(Pour.snapshot(p,w,p.main,loot),main,opt),"this route never guesses a loot vessel")
+    assert(#b.donors==3 and b.donors[3].source.item==sibling)
+    for _,d in ipairs(b.donors) do local i=d.source.item;assert(i~=receiver and i~=hidden and i~=empty) end
+    assert(not Pour.revalidate(p,w,target,loot,opt,one),"normal carried-source action cannot target loot")
+    assert(Pour.revalidate(p,w,target,loot,{},one,receiver))
+    assert(not Pour.revalidate(p,w,target,loot,{},one,sibling))
+    assert(not Pour.revalidate(p,w,target,loot,{},b.donors[3].source,receiver))
+    assert(Pour.revalidate(p,w,target,loot,opt,b.donors[3].source,receiver))
+    assert(not Pour.fillFrom(Pour.snapshot(p,w,loot,nil),{receiver},opt),"an unshown holder is not a destination")
+    assert(not Pour.fillFrom(Pour.snapshot(p,w,loot,loot),{receiver,sibling},opt),"several loot receivers are never one choice")
     assert(#assert(Pour.collect(p,w,main,loot,opt)).targets==0,"inverse menu cannot widen regular Pour Into")
     pack.bag.lock=true;assert(#assert(inverse()).donors==1)
     loot.lock=true;assert(not inverse(opt));loot.lock=false
     receiver.fluid.amount=2;assert(not inverse(opt));receiver.fluid.amount=0
-    local fromEmpty=assert(inverse());assert(not fromEmpty.target.pourSignature and #fromEmpty.donors==1)
+    local fromEmpty=assert(inverse());assert(not fromEmpty.targets[1].pourSignature and #fromEmpty.donors==1)
     receiver.sealed=true;assert(not inverse(opt));receiver.sealed=false
     w.deny=true;assert(not inverse(opt));w.deny=false
     item(p.main,"Collision",1,.4).id=receiver.id;assert(not inverse(opt))
+end
+do
+    -- Water into: empty, water, a 0.2% trace, milk. Only milk would be contaminated.
+    local p,w=fixture()
+    local water,milk={},{}
+    local function vessel(name,capacity,amount,parts)
+        local i=item(p.main,name,capacity,amount)
+        i.fluid.createFluidSample=function(self)
+            return {size=function() return self.amount>0 and #parts or 0 end,getFluid=function(_,n) return parts[n+1][1] end,
+                getPercentage=function(_,n) return parts[n+1][2] end,release=function() end}
+        end
+        return i
+    end
+    local source=vessel("Bucket",10,5,{{water,1}})
+    local empty,same=vessel("Empty",1,0,{}),vessel("Same",1,.4,{{water,1}})
+    local trace=vessel("Trace",1,.5,{{water,.998},{milk,.002}})
+    local other=vessel("Milk",1,.95,{{milk,1}})
+    local plan=assert(Pour.collect(p,w,source,nil,{}))
+    local relation={}
+    for _,e in ipairs(plan.targets) do relation[e.item]=e.relation end
+    assert(relation[empty]=="empty" and relation[same]=="same" and relation[trace]=="same" and relation[other]=="mixes")
+    assert(#plan.fill==3)
+    for _,e in ipairs(plan.fill) do assert(e.item~=other,"the fullest vessel of another liquid used to be filled first") end
+    local inverse=assert(Pour.fillFrom(Pour.snapshot(p,w,p.main,nil),{empty,other},{}))
+    for _,donor in ipairs(inverse.donors) do
+        local fill=Pour.batch(donor.targets,{})
+        assert(#fill==1 and fill[1].item==empty)
+    end
+end
+do
+    -- Favorite and Keep guard against moving and deleting; a pour does neither.
+    local w={protected=function(_,i) return i.reason~=nil,i.reason end}
+    assert(not Pour.reserved(w,{reason="Favorite"}) and not Pour.reserved(w,{reason="Keep"}) and not Pour.reserved(w,{}))
+    assert(Pour.reserved(w,{reason="Personal gear reserved for recovery"}) and Pour.reserved(w,{reason="Equipped"}))
+end
+do
+    local p,w=fixture()
+    local source=item(p.main,"Source",3,2)
+    local nails,equipment=600,0
+    for _=1,nails do item(p.main,"Nails") end
+    item(p.main,"Bottle",1,0)
+    function p:getWornItems() equipment=equipment+1;return nil end
+    assert(Pour.collect(p,w,source,nil,{}))
+    assert(equipment<=4,"cargo without liquid is not tested against the player's equipment")
+    local bottle=item(p.main,"Bottle",1,.5)
+    bottle.fluid.getTranslatedContainerName=function() return "Water Bottle" end
+    bottle.fluid.getPrimaryFluid=function() return {getTranslatedName=function() return "Water" end} end
+    local e={item=bottle,fluid=bottle.fluid,amount=.5,capacity=1}
+    assert(Pour.vesselName(e)=="Water Bottle" and Pour.liquid(bottle.fluid)=="Water" and Pour.litres(.5)=="0.5" and Pour.litres(1)=="1")
+    bottle.fluid.amount,e.amount=0,0
+    assert(Pour.vesselName(e)=="Bottle" and not Pour.liquid(bottle.fluid))
+end
+do
+    local p,w=fixture()
+    local source=item(p.main,"Source",3,2)
+    local target=item(p.main,"Bottle",1,0)
+    local e=assert(Pour.collect(p,w,source,nil,{})).targets[1]
+    local ok,live=Pour.accessible(p,w,e,nil);assert(ok and live.item==target)
+    target.id=999
+    local _,why=Pour.accessible(p,w,e,nil);assert(why=="vessel-identity")
+    target.id=e.id;target.container=container()
+    _,why=Pour.accessible(p,w,e,nil);assert(why=="item-moved")
 end
 print("PASS PourInventory scope, order, exact endpoints, inverse donor direction and native suitability")

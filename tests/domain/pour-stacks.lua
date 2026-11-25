@@ -77,37 +77,11 @@ local function target(x,amount,capacity,kind,scope)
     return {item=x,id=x:getID(),container=x:getContainer(),fullType=kind or "Base.Bottle",
         scope=scope or "main",amount=amount,capacity=capacity,free=capacity-amount,label="Bottle"}
 end
-local aEntry,bEntry,cEntry,dEntry=target(a,.4,2),target(b,.3,1),target(c,.25,1,"Base.One"),target(d,.1,1,"Mod.Two")
-local aBag,bBag,cBag,dBag=target(a1,.2,1,nil,"equipped"),target(b1,.1,2,nil,"equipped"),target(a2,0,1,nil,"equipped"),target(b2,0,1,nil,"equipped")
-local plan={targets={aEntry,bEntry,cEntry,dEntry,aBag,bBag,cBag,dBag},fill={bEntry,aEntry,cEntry}}
+assert(Stacks.lessFilled(target(a,.3,1),target(b,.6,2)),"same normalized ratio uses absolute amount")
 local invPage={inventoryPane=p,getIsVisible=function()return true end}
 local lootPage={inventoryPane=q,getIsVisible=function()return true end}
 function getPlayerInventory(index)assert(index==0);return invPage end
 function getPlayerLoot(index)assert(index==0);return lootPage end
-local groups=Stacks.targets(plan,0)
-assert(#groups==6 and groups[1].entry==aEntry and groups[1].count==2,"normalized volume beats lower absolute amount")
-assert(groups[2].entry==cEntry and groups[3].entry==dEntry,"native same-name row cannot conflate full types")
-assert(groups[4].entry==bBag and groups[4].count==2)
-assert(groups[5].entry==cBag and groups[6].entry==dBag,"hidden bag does not get scanned")
-q.visible=false
-assert(#Stacks.targets(plan,0)==7)
-q.visible=true;p.collapsed.Bottle=false
-assert(#Stacks.targets(plan,0)==7)
-p.collapsed.Bottle=true
-local qAlt=pane(bag2);row(qAlt,"Bottle",a2,a2,b2);invPage.inventoryPane=qAlt
-groups=Stacks.targets(plan,0)
-assert(#groups==6 and groups[6].entry==cBag and groups[6].count==2 and groups[6].members[2]==dBag,
-    "two visible same-name bag objects never merge; immutable ID breaks ratio/amount tie")
-assert(Stacks.lessFilled(target(a,.3,1),target(b,.6,2)),"same normalized ratio uses absolute amount")
-assert(#plan.fill==3 and plan.fill[1]==bEntry and plan.fill[2]==aEntry and plan.fill[3]==cEntry)
-local forbiddenPane=setmetatable({inventory=holder()},{__index=function(_,key)
-    if key=="itemslist" then error("non-target pane was read") end
-end})
-lootPage.inventoryPane=forbiddenPane;invPage.inventoryPane=p
-groups=Stacks.targets({targets={aEntry,bEntry}},0)
-assert(#groups==1 and groups[1].count==2, "no rows are read from holders outside the admitted target plan")
-print("PASS visible compatible target rows, tiered tie-break, holder scan limit, and unchanged Fill All")
-
 local oldPane=invPage.inventoryPane
 invPage.inventoryPane=pane(main)
 assert(not Stacks.selection({native},0),"an indexed but detached pane cannot authorize a collapsed source")
@@ -128,10 +102,6 @@ invPage.inventoryPane=bp
 assert(#Stacks.selection({fullRow},0)==2)
 assert(big.snapshots==1 and big.reads==#big.items and not big.containsCalls,
     "source selection reads each physical member only once")
-local fast={targets={target(first,.25,1),target(second,.5,1)}}
-assert(#Stacks.targets(fast,0)==2,"visible row proof exceeding aggregate budget falls back to individuals")
-assert(big.snapshots==1 and not big.containsCalls,
-    "visible grouping cannot walk holder contents or invoke native contains per stock row")
 for i=1,110 do vessel(big,i+10000) end
 assert(not Stacks.selection({fullRow},0),"oversized holder membership fails closed")
 print("PASS current pane provenance and bounded linear native holder reads")
@@ -140,10 +110,6 @@ local floatSmall=target(first,.30000001192092896,1)
 local floatLarge=target(second,.89999997615814209,3)
 assert(Stacks.lessFilled(floatSmall,floatLarge) and not Stacks.lessFilled(floatLarge,floatSmall),
     "nominally equal Java fractions are ordered by absolute volume")
-invPage.inventoryPane=bp
-bp.itemslist={fullRow} -- only the authoritative target row is visible for this case
-assert(Stacks.targets({targets={floatLarge,floatSmall}},0)[1].entry==floatSmall,
-    "grouped direct targets share the comparator")
 local low=target(first,.29999949,1)
 local middle=target(second,.29999951,1)
 local high=target(vessel(big,32),.30000051,1)

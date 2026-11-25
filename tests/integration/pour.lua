@@ -144,23 +144,43 @@ local function test(name,fn)
     tests=tests+1;print("PASS "..name)
 end
 
-local function withReceipts(fn)
-    local lines, original={}, print
-    print=function(line) lines[#lines+1]=line end
-    local ok, why=pcall(fn,lines)
-    print=original
+local Log=require "LootBox/Log"
+-- Records the trace: every line has its interaction, event and named fields.
+local function withTrace(fn)
+    local lines,saved={},{}
+    for _,level in ipairs({"trace","info","warn","error"}) do
+        saved[level]=Log[level]
+        Log[level]=function(id,event,...)
+            local line={id=id,event=event,level=level}
+            for n=1,select("#",...),2 do line[(select(n,...))]=(select(n+1,...)) end
+            lines[#lines+1]=line
+        end
+    end
+    local function only(event)
+        local found
+        for _,line in ipairs(lines) do if line.event==event then assert(not found,"two "..event.." lines");found=line end end
+        return found
+    end
+    local ok, why=pcall(fn,lines,only)
+    for level,write in pairs(saved) do Log[level]=write end
     assert(ok,why)
 end
 
-test("partial native stop reports exactly one terminal receipt without item names or IDs",function()
-    withReceipts(function(lines)
+test("the trace names the request, every target, and exactly one end with what was poured",function()
+    withTrace(function(lines,only)
         local f=fixture()
         local source=item(f.shelf,777001,"Custom Named Vessel",2,1.5)
         local target=item(f.main,777002,"Personal Bottle Name",1,0)
+        f.options.interaction,f.options.pourRoute=77,"single"
         local j=f:start(source)
+        assert(j.interaction==77)
+        local start,chosen=only("START"),only("TARGET")
+        assert(start.id==77 and start.targets==1 and start.route=="single" and start.source:find("#777001",1,true)
+            and start.source:find("litres=1.50000/2.00000",1,true) and start.shelf and start.player)
+        assert(chosen.vessel:find("#777002",1,true) and chosen.vessel:find("relation=empty",1,true))
         j:tick();local replica=moveAck(f,true)
         j:tick();isCall(f,2,"pour",777001,target)
-        assert(#lines==0,"starting a pour is not a terminal receipt")
+        assert(not only("END"),"starting a pour is not its end")
         local active=assert(j.pour.pending)
         local msg="The game poured only part of the requested amount."
         replica.fluid.amount=replica.fluid.amount-.25;target.fluid.amount=.25
@@ -168,7 +188,10 @@ test("partial native stop reports exactly one terminal receipt without item name
         j:tick();j:tick();j:cancel();j:tick()
         assert(j.state=="cancelled" and j.liters==.25 and j.count==0 and #f.calls==2)
         assert(j.reason:find("Custom Named Vessel",1,true) and j.reason:find("777001",1,true),"game UI still identifies an outstanding loan")
-        assert(#lines==1 and lines[1]=="[LootBox] action=pour event=terminal state=cancelled nativeSubmitted=true completed=0 confirmedLitres=0.250 phase=fluid route=portable mode=SP source=loot target=main destinations=1 reason="..msg)
+        local finish=only("END")
+        assert(finish.level=="warn" and finish.id==77 and finish.state=="cancelled" and finish.reason==msg and finish.phase=="fluid"
+            and finish.vessels==0 and finish.of==1 and finish.litres==.25 and finish.submitted==true)
+        assert(only("STOPPED").reason==msg and only("VESSEL-LEFT").place=="main")
     end)
 end)
 
@@ -179,14 +202,15 @@ test("ordinary early pour stops distinguish stale view, player movement and occu
         {update=function(f) f.queue.current={} end,reason="Another action was active."},
     }
     for _,case in ipairs(cases) do
-        withReceipts(function(lines)
+        withTrace(function(lines,only)
             local f=fixture()
             local source=item(f.shelf,17101,"Source",1,.5)
             local target=item(f.main,17102,"Target",1,0)
             local j=f:start(source,{target})
             case.update(f);j:tick();j:tick()
             assert(#f.calls==0 and j.state=="cancelled" and j.reason==case.reason)
-            assert(#lines==1 and lines[1]=="[LootBox] action=pour event=terminal state=cancelled nativeSubmitted=false completed=0 confirmedLitres=0.000 phase=prepare route=portable mode=SP source=loot target=main destinations=1 reason="..case.reason)
+            local finish=only("END")
+            assert(finish.reason==case.reason and finish.phase=="prepare" and finish.submitted==false and finish.litres==0)
         end)
     end
 end)
@@ -195,7 +219,7 @@ test("cupboard pickup rejection identifies a proven retained source without retr
     local shots,originalHUD={},PZActionCompletionHUD
     PZActionCompletionHUD={show=function(_,card) shots[#shots+1]=card end}
     local ok,err=pcall(function()
-        withReceipts(function(lines)
+        withTrace(function(lines,only)
             local f=fixture()
             local src=item(f.shelf,201,"Animal Milk Bucket",10,8)
             local dst=item(f.main,202,"Empty Dispenser Bottle",15,0)
@@ -207,7 +231,8 @@ test("cupboard pickup rejection identifies a proven retained source without retr
             assert(j.state=="cancelled" and j.count==0 and j.liters==0 and #f.calls==1)
             assert(src.container==f.shelf and src.fluid.amount==8 and dst.fluid.amount==0)
             assert(j.reason:find("confirmed in original displayed storage",1,true) and not j.reason:find("confirmed in main",1,true))
-            assert(#lines==1 and lines[1]:find("phase=source-pickup route=portable mode=SP source=loot target=main destinations=1 reason=The server rejected the inventory move.",1,true))
+            local finish=only("END")
+            assert(finish.phase=="source-pickup" and finish.reason=="The server rejected the inventory move.")
             assert(#shots==1 and shots[1].note:find("In original storage: 1.",1,true) and not shots[1].note:find("[ID",1,true))
         end)
     end)
@@ -215,7 +240,7 @@ test("cupboard pickup rejection identifies a proven retained source without retr
 end)
 
 test("confirmed denied return stays in main; no retry or silent fallback",function()
-    withReceipts(function(lines)
+    withTrace(function(lines,only)
         local f=fixture()
         local src=item(f.shelf,211,"Animal Milk Bucket",10,8)
         local dst=item(f.main,212,"Empty Dispenser Bottle",15,0)
@@ -230,7 +255,8 @@ test("confirmed denied return stays in main; no retry or silent fallback",functi
         assert(j.reason:find("confirmed in main inventory",1,true) and not j.reason:find("confirmed in original",1,true))
         assert(replica.container==f.main and f.main:getItems():contains(replica) and not f.shelf:getItems():contains(src))
         assert(dst.fluid.amount==8)
-        assert(#lines==1 and lines[1]:find("completed=1 confirmedLitres=8.000 phase=source-return route=portable mode=SP source=loot target=main destinations=1 reason=The server rejected the inventory move.",1,true))
+        local finish=only("END")
+        assert(finish.vessels==1 and finish.litres==8 and finish.phase=="source-return" and finish.reason=="The server rejected the inventory move.")
     end)
 end)
 
@@ -468,7 +494,7 @@ test("a frozen least-filled stack source cannot be replaced after its contents c
     local target=item(f.main,90,"Jar",2,0)
     local frozen=Inventory.snapshot(f.player,f.world,f.main,f.pane)
     local plan=assert(Inventory.choose(frozen,{first,picked},f.options))
-    assert(plan.source.item==picked and Pour.capture(plan.source))
+    assert(plan.source.item==picked and plan.source.pourSignature)
     local dest
     for _,entry in ipairs(plan.targets)do if entry.item==target then dest=entry end end
     local j=assert(Pour.new(f.player,f.world,plan.source,{assert(dest)},f.options,function()return f.options,f.pane end))
@@ -486,10 +512,10 @@ test("source or target capacity drift after menu capture never dispatches or sub
         local spare=item(f.main,91,"Jar",2,0)
         local frozen=Inventory.snapshot(f.player,f.world,f.main,f.pane)
         local plan=assert(Inventory.choose(frozen,{sibling,source},f.options))
-        assert(plan.source.item==source and Pour.capture(plan.source))
+        assert(plan.source.item==source and plan.source.pourSignature)
         local dest
         for _,entry in ipairs(plan.targets) do if entry.item==target then dest=entry end end
-        assert(dest and Pour.capture(dest))
+        assert(dest)
         if which=="source" then source.fluid.capacity=1 else target.fluid.capacity=.25 end
         local j=Pour.new(f.player,f.world,plan.source,{dest},f.options,function() return f.options,f.pane end)
         if j then j:tick(); assert(j.state=="cancelled",which.." capacity drift did not cancel") end
@@ -608,15 +634,15 @@ end)
 
 local function inversePlan(f,donor,receiver)
     local snap=Inventory.snapshot(f.player,f.world,receiver.container,f.pane)
-    local plan=assert(Inventory.fillFrom(snap,receiver,f.options))
-    local selected
-    for _,entry in ipairs(plan.donors) do if entry.item==donor then selected=entry end end
-    if f.shelf:getType()~="floor" then plan.target.pourAnchor=f.world:pourShelfAnchor(f.shelf) end
+    local plan=assert(Inventory.fillFrom(snap,{receiver},f.options))
+    local selected,target
+    for _,choice in ipairs(plan.donors) do if choice.source.item==donor then selected,target=choice.source,choice.targets[1] end end
+    if f.shelf:getType()~="floor" then target.pourAnchor=f.world:pourShelfAnchor(f.shelf) end
     local function contextFor(captured)
         assert(captured==f.shelf,"must ask about the clicked holder, not the currently active tab")
         return f.options,f.pane
     end
-    return assert(selected),plan.target,contextFor
+    return assert(selected),target,contextFor
 end
 local function inverseStart(f,donor,receiver)
     local source,target,read=inversePlan(f,donor,receiver)
@@ -704,6 +730,53 @@ test("Fill From uses the exact Ground loan for an item-owned receiver and return
     j:tick();isCall(f,2,"pour",331,dst);fluidAck(f,2)
     isCall(f,3,"ground",332,f.main);assert(f.calls[3].anchor==spot);moveAck(f,false)
     j:tick();assert(j.state=="finished" and #f.calls==3 and src.fluid.amount==0 and dst.fluid.amount==2 and dst.container==f.shelf)
+end)
+
+test("float32 drift between the two vessels is not a changed vessel",function()
+    local f=fixture()
+    local src,dst=item(f.main,801,"Bucket",30,10),item(f.main,802,"Jug",25,12.4)
+    local second=item(f.main,803,"Bottle",25,24)
+    local j=f:start(src,{dst,second})
+    j:tick();isCall(f,1,"pour",801,dst)
+    -- The real FluidContainer differed by up to .00099 L over one pour.
+    src.fluid.amount,dst.fluid.amount=.50042,21.9
+    j.pour.pending.reply={true,"paired",9.49958};j:tick();j:tick()
+    isCall(f,2,"pour",801,second)
+    src.fluid.amount,second.fluid.amount=0,24.5
+    j.pour.pending.reply={true,"paired",.5};j:tick();j:tick()
+    assert(j.state=="finished" and j.count==2)
+end)
+
+test("a carried receiver can be filled from a carried donor, several at a time without mixing",function()
+    local f=fixture()
+    local bucket=item(f.main,811,"Bucket",10,5,water)
+    local a,b=item(f.main,812,"Bottle",1,0),item(f.main,813,"Bottle",1,.5,water)
+    local soda=item(f.main,814,"Soda",1,.5,milk)
+    local plan=assert(Inventory.fillFrom(Inventory.snapshot(f.player,f.world,f.main,nil),{a,b,soda},f.options))
+    assert(#plan.targets==3 and #plan.donors==1 and plan.donors[1].source.item==bucket)
+    local fill=Inventory.batch(plan.donors[1].targets,f.options)
+    assert(#fill==2 and fill[1].item==b and fill[2].item==a,"the milk is never part of a batch")
+    local j=assert(Pour.new(f.player,f.world,plan.donors[1].source,fill,f.options,function() return f.options,f.pane end))
+    f.job=j
+    j:tick();isCall(f,1,"pour",811,b);fluidAck(f,.5)
+    j:tick();isCall(f,2,"pour",811,a);fluidAck(f,1);j:tick()
+    assert(j.state=="finished" and j.count==2 and bucket.fluid.amount==3.5 and soda.fluid.amount==.5)
+end)
+
+test("a Lua error inside a step is reported, not swallowed",function()
+    withTrace(function(_,only)
+        local f=fixture()
+        item(f.main,822,"Bottle",1,0)
+        local j=f:start(item(f.main,821,"Bucket",2,1))
+        local fault
+        local saved=Log.fault
+        Log.fault=function(id,site,err) fault={id=id,site=site,err=tostring(err)} end
+        j.accessible=function() error("binding gone") end
+        j:tick()
+        Log.fault=saved
+        assert(fault and fault.site=="Pour.step" and fault.err~="nil" and fault.id==j.interaction)
+        assert(not j:isBusy() and only("END"))
+    end)
 end)
 
 print("PASS "..tests.." Pour controller scenarios")

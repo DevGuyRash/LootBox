@@ -2,7 +2,7 @@
 -- transfer, water action and server validation; schedule just one vessel per
 -- verified receipt so later fills see current water and carrying capacity.
 local W=require "LootBox/WorldFluids"
-local Log=require "LootBox/Diagnostics"
+local Log=require "LootBox/Log"
 local Job={}
 Job.__index=Job
 local MIRROR_MS=5000
@@ -14,18 +14,27 @@ local function safe(p,preflight)
             or not preflight and not p:isRunning() and not p:isSprinting()) and not p:isAiming() and not p:isAttacking() and not p:isShoving()
 end
 
-function Job.new(p,world,a,take,entries,enabled,preflight)
+function Job.new(p,world,a,take,entries,enabled,preflight,interaction)
+    local id=interaction or a and a.interaction or Log.intent("pour",take and "Fill from a fixture" or "Pour into a fixture",p)
     local rejection
     if not a or type(entries)~="table" or #entries<1 or #entries>512 or not take and #entries~=1
         then rejection="invalid-selection"
     elseif not safe(p,preflight) then rejection="actor-unavailable"
     elseif not idle(p,queue(p)) then rejection="queue-busy" end
     if rejection then
-        Log.emit(take and "world-fill" or "world-pour","rejected","not-started","prepare",rejection)
+        Log.warn(id,"REFUSED","op",take and "fixture-fill" or "fixture-pour","check",rejection,
+            "vessels",type(entries)=="table" and #entries or nil,"fixture",a and W.describe(a) or nil,
+            "queue",Log.queue(p),"player",Log.player(p))
         return nil,"Finish the current action and select an available vessel."
     end
+    Log.info(id,"START","op",take and "fixture-fill" or "fixture-pour","fixture",W.describe(a),"vessels",#entries,"player",Log.player(p))
+    for index,e in ipairs(entries) do
+        if index>40 then Log.trace(id,"TARGET","more",#entries-40);break end
+        Log.trace(id,"TARGET","n",index,"vessel",Log.item(e.item,p),"scope",e.scope,"place",e.place,
+            "litres",string.format("%.5f/%.5f",e.amount,e.capacity),"container",Log.container(e.container,p))
+    end
     return setmetatable({player=p,world=world,anchor=a,take=take,entries=entries,enabled=enabled,preflight=preflight,
-        count=0,liters=0,state="running",name=take and "Fill From" or "Pour Into"},Job)
+        interaction=id,startedAt=getTimestampMs(),count=0,liters=0,state="running",name=take and "Fill From" or "Pour Into"},Job)
 end
 function Job:isBusy() return self.state=="running" or self.state=="cancelling" end
 function Job:status()
@@ -33,18 +42,32 @@ function Job:status()
         moved=self.count,pourLiters=self.liters,skipped=0,reasons={},hasJob=self:isBusy(),canPreview=not self:isBusy(),
         canPause=false,canResume=false}
 end
-local function diagnosticPhase(self)
+local function phaseOf(self)
     local s=self.pending
     return s and (s.performed and "receipt" or type(s.amount)=="number" and s.amount>0 and "action" or "dispatch") or "prepare"
 end
+-- The vessel and the fixture as they are now, against what was asked.
+local function opEnd(self,s,ok,check,live)
+    local amount=live and live.amount
+    local emit=ok and Log.trace or Log.warn
+    emit(self.interaction,"OP-END","op",self.take and "fixture-fill" or "fixture-pour","ok",ok,"check",check,
+        "vessel",Log.item(live and live.item or s.entry.item,self.player),
+        "expectedLitres",s.amount and string.format("%.5f",s.amount) or nil,
+        "vesselBefore",string.format("%.5f",s.vesselBefore),"vesselNow",amount and string.format("%.5f",amount) or nil,
+        "fixtureBefore",string.format("%.5f",s.before),"fixtureNow",string.format("%.5f",self.anchor.object:getFluidAmount()),
+        "tolerance",string.format("%.5f",W.tolerance(s.amount or 0)),"elapsedMs",getTimestampMs()-s.startedAt,
+        "performed",s.performed==true,"stopped",s.stopped==true)
+end
 function Job:finish(state,why,code,phase)
-    self.state,self.reason=state,why
-    Log.emit(self.take and "world-fill" or "world-pour","terminal",state,
-        phase or self.stopPhase or diagnosticPhase(self),code or self.stopCode or "unclassified",
-        " nativeQueued=%s completed=%d total=%d confirmedLitres=%.3f",tostring(self.launched==true),
-        self.count,#self.entries,self.liters)
+    self.state,self.reason,self.check=state,why,code or self.stopCode
+    if self.pending then Log.guard("WorldFluidJob.opEnd",opEnd,self,self.pending,false,self.check,self.lastLive) end
+    local emit=state=="finished" and Log.info or Log.warn
+    emit(self.interaction,"END","op",self.take and "fixture-fill" or "fixture-pour","state",state,
+        "check",self.check,"phase",phase or self.stopPhase or phaseOf(self),"reason",why,
+        "vessels",self.count,"of",#self.entries,"litres",self.liters,"submitted",self.launched==true,
+        "elapsedMs",getTimestampMs()-self.startedAt,"player",Log.player(self.player))
     if self.launched and not self.silent and not self.noHUD and PZActionCompletionHUD then
-        pcall(PZActionCompletionHUD.show,self.player:getPlayerNum(),{brand="LOOTBOX",theme="loot",
+        Log.guard("WorldFluidJob.card",PZActionCompletionHUD.show,self.player:getPlayerNum(),{brand="LOOTBOX",theme="loot",
             title=state=="finished" and "Pour complete" or "Pour stopped",status=state~="finished" and "stopped" or nil,
             detail=string.format("%d vessel(s) | %.3f L confirmed",self.count,self.liters),note=why})
     end
@@ -54,7 +77,7 @@ function Job:cancel(silent,reason,code)
     if not self:isBusy() or self.state=="cancelling" then return true end
     self.silent,self.state=silent,"cancelling"
     self.reason=reason or "World pour cancelled; no more vessels will be started."
-    self.stopCode,self.stopPhase=code or (silent and "session-cleanup" or "player-cancelled"),diagnosticPhase(self)
+    self.stopCode,self.stopPhase=code or (silent and "session-cleanup" or "player-cancelled"),phaseOf(self)
     local s,q=self.pending,queue(self.player)
     if not s then self:finish("cancelled",self.reason);return true end
     -- Never clear a foreign queue. If another action was appended, drop only
@@ -111,8 +134,8 @@ end
 local function guardLoanStart(action,admit,q,s)
     local wait,stop,perform=action.waitToStart,action.stop,action.perform
     function action:waitToStart(...)
-        local ok,ready=pcall(admit,self)
-        if not ok or not ready or q.current~=self or #q.queue~=1 then self:forceStop();return true end
+        local ready=Log.guard("WorldFluidJob.admit",admit,self)
+        if not ready or q.current~=self or #q.queue~=1 then self:forceStop();return true end
         return wait(self,...)
     end
     local function preserving(fn,defer,self,...)
@@ -143,11 +166,11 @@ local function guardLoanStart(action,admit,q,s)
     function action:perform(...) return preserving(perform,true,self,...) end
 end
 
-function Job:launch(e)
+function Job:launch(e,before)
     local p,o=self.player,self.anchor.object
-    local s={entry=e,owned={},before=o:getFluidAmount(),inPlace=self.take and e.container==p:getInventory()}
+    local s={entry=e,owned={},before=o:getFluidAmount(),inPlace=self.take and e.container==p:getInventory(),startedAt=getTimestampMs(),vesselBefore=before}
     local q=queue(p)
-    self.pending=s
+    self.pending,self.lastLive=s,nil
     if self.take then
         if s.inPlace then
             -- Stock onTakeWater appends a redundant main-to-main return for
@@ -173,6 +196,9 @@ function Job:launch(e)
             watch(s,a)
         end
     end
+    Log.trace(self.interaction,"OP","op",self.take and "fixture-fill" or "fixture-pour","n",self.count+1,
+        "vessel",Log.item(e.item,p),"fixture",W.describe(self.anchor),"litres",s.amount,"inPlace",s.inPlace,
+        "freeCarry",p:getFreeInventoryCapacity(),"queue",Log.queue(p))
     if type(s.amount)~="number" or not (s.amount>0) then
         self:cancel(false,"The game did not start a usable fluid action.","native-not-queued");return
     end
@@ -191,41 +217,38 @@ function Job:step()
         self:finish("cancelled",self.reason)
         return
     end
+    local reachable,why=W.live(p,a)
     local blocked=not self.enabled() and "settings-changed" or not safe(p,self.preflight) and "actor-unavailable"
-        or not W.live(p,a) and "fixture-unavailable"
+        or not reachable and tostring(why)
     if blocked then
         self:cancel(false,"The fixture, access, or player state changed.",blocked);return
     end
     if s then
         if s.loanConflict then self:cancel(false,"Another action was queued.","queue-busy");return end
         if s.stopped then self:cancel(false,"The native fluid action stopped.","native-stopped");return end
-        local live
+        local live,problem
         if s.inPlace then
-            live=W.inPlaceReceiver(p,self.world,s.entry)
-            if not live then self:cancel(false,"The selected vessel or its equipment state changed.","vessel-changed");return end
+            live,problem=W.inPlaceReceiver(p,self.world,s.entry)
+            if not live then self:cancel(false,"The selected vessel or its equipment state changed.",problem);return end
         end
         for _,v in ipairs(q.queue) do
             if not s.owned[v] then self:cancel(false,"Another action was queued.","queue-busy");return end
         end
         if not idle(p,q) then return end
         if not s.performed then self:cancel(false,"The native fluid action was interrupted.","native-interrupted");return end
-        if not s.inPlace then live=W.received(p,self.world,s.entry) end
-        local before=s.entry.amount
-        local target=before+(self.take and s.amount or -s.amount)
-        local remaining=s.before+(self.take and -s.amount or s.amount)
-        -- Natural water and reserve/puddle sources may not have a depleting
-        -- component. Their native yield is proven by the actual vessel delta.
-        local metered=not self.take or ((o:getFluidContainer() or o:getUsesExternalWaterSource())
-            and not (a.unlimited and s.before==a.capacity))
-        if not live or not W.near(live.amount,target) or metered and not W.near(o:getFluidAmount(),remaining)
-            or self.receipt and not self.receipt(live,s.amount) then
+        if not s.inPlace then live,problem=W.received(p,self.world,s.entry) end
+        self.lastLive=live
+        if live and not W.changedBy(s.vesselBefore,live.amount,self.take and s.amount or -s.amount) then problem="vessel-litres" end
+        if not problem and self.receipt and not self.receipt(live) then problem="vessel-mixture" end
+        if problem then
             s.waitSince=s.waitSince or getTimestampMs()
             if getTimestampMs()-s.waitSince>=MIRROR_MS then
                 self:finish("cancelled","The exact fluid change or original holder was not confirmed. No retry; check the vessel before continuing.",
-                    "receipt-unconfirmed")
+                    problem)
             end
             return
         end
+        opEnd(self,s,true,nil,live)
         self.count,self.liters,self.pending=self.count+1,self.liters+s.amount,nil
         -- Do not dispatch from the same tick that accepted an engine update.
         if self.count==#self.entries then self:finish("finished","Selected world pour complete.","completed","receipt") end
@@ -237,19 +260,25 @@ function Job:step()
     if self.take and self.count>0 and (not o:hasFluid() or o:getFluidAmount()<=0 or p:hasFullInventory() or p:getFreeInventoryCapacity()<=0) then
         self:finish("finished","No more fluid or carrying space is available.","fluid-or-capacity-exhausted");return
     end
+    -- Rain changes how much a collector holds at any time; only what it holds matters.
     if not W.near(o:getFluidCapacity(),a.capacity) or o:getPrimaryFluid()~=a.primary or o:isTaintedWater()~=a.tainted then
+        Log.warn(self.interaction,"STOPPED","check","fixture-fluid-changed","chosenLiquid",W.liquid(a),"chosenTainted",a.tainted,
+            "chosenCapacity",a.capacity,"fixture",W.describe(a))
         self:cancel(false,"The selected world fluid changed. Reopen the menu.","fixture-fluid-changed");return
     end
     local e=self.entries[self.count+1]
-    if not W.allowedEntry(p,self.world,a,e,self.take) then
-        self:cancel(false,"The selected vessel or transfer direction is no longer available.","selection-unavailable");return
+    local allowed,problem=W.allowedEntry(p,self.world,a,e,self.take)
+    if not allowed then
+        Log.warn(self.interaction,"STOPPED","check",problem,"vessel",Log.item(e.item,p),"fixture",W.describe(a))
+        self:cancel(false,"The selected vessel or transfer direction is no longer available.",problem);return
     end
-    self:launch(e)
+    self:launch(e,allowed.amount)
 end
 function Job:tick()
     if not self:isBusy() then return end
-    local ok=pcall(self.step,self)
+    local ok,err=pcall(self.step,self)
     if not ok then
+        Log.fault(self.interaction,"WorldFluidJob.step",err,"phase",phaseOf(self),"vessel",self.count+1)
         if self.state=="cancelling" then self:finish("cancelled","The game changed before the world pour could be confirmed.","cleanup-binding-error")
         else self:cancel(false,"The game did not expose this world fluid action.","action-binding-error") end
     end
