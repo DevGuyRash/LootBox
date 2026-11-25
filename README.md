@@ -57,15 +57,11 @@ Right-clicking a container's icon, or its title in NeatUI Inventory, gives the o
 
 Right-click a vessel and choose **Pour Into** or **Fill From**, directly after the game's Fluid entry. Only vessels and fixtures that fit are listed, each with its contents and space. **Pour into all** and **Fill all** need at least two targets and never mix liquids; mixing is always a single row that says so. Favorite and Keep vessels can be filled in place. If another mod already provides Pour Into, LootBox keeps its entry inside its own submenu.
 
-### Mounted water dispenser
+A vessel on a shelf or on the ground is fetched, used and put back where it was. If something stops the work, what was fetched goes back when it can, and otherwise the message says what you are still carrying.
 
-Stand beside the stock dispenser. Right-click a carried liquid source and choose **Pour Into > Water Dispenser**, or right-click the stand and choose **Refill mounted dispenser** (single-player) or **Top up mounted dispenser** (multiplayer). On the stand menu, choose a compatible source, or **Fill from all <liquid>** to use every listed source of that liquid in order. LootBox uses the game's Take Bottle, Fluid Transfer and Add Bottle actions. It takes the jug once and refits the exact jug once after confirmed transfers. A stopped or uncertain stock action is not retried.
+### Water dispenser
 
-The one-click routes use the same stock actions in single-player and multiplayer, with no LootBox server code or server-side setup for this feature once the mod is loaded on the client. The stock Take Bottle action puts the jug in main inventory. Compatible carried donors can be used from main inventory or carried bags. Stock fluid compatibility and inventory capacity still apply. A source that would mix is a separate row that says so. If the stock result cannot be confirmed, the job stops instead of guessing.
-
-To work manually, use the stock **Take Bottle** first. Keep the intended bottle in main inventory, then right-click that same empty stand and choose **LootBox > Refill and fit a bottle**. Select the exact bottle and then the donor. LootBox never guesses which newly arrived jug came from an earlier take. After a confirmed pour it requests the stock refit once; verify the mounted result. Stop or interruption may leave the bottle detached. Check the selected stand and main inventory; use stock **Add Bottle** to fit the exact intended jug when it is safe.
-
-To pour directly **out of** a mounted dispenser, use the game's **Transfer Fluids**. This shortcut leaves that native route unchanged rather than needlessly detaching the bottle. The stand's input lock is never overridden by LootBox.
+Right-click a carried vessel and choose **Pour Into > Water Dispenser**, or right-click the stand and choose **Refill dispenser**. Pick one source, or **Fill from all <liquid>**. LootBox walks to the stand, takes the bottle, pours, and fits the same bottle again, with the game's own actions in single-player and multiplayer. Other things may happen in your inventory meanwhile. If nothing can be poured the bottle is put back; if you stop, the message says the bottle is in your inventory. For an empty stand, **Refill and fit a bottle** lets you choose which loose bottle. To pour out of a mounted dispenser, use the game's **Transfer Fluids**.
 
 ## Select an exact stack amount
 
@@ -115,30 +111,11 @@ Portable verification builds the full package before running contracts. The opti
 
 ## Eat or drink Til Full
 
-**Til Full** appears alongside vanilla amounts in eligible Eat and Drink submenus.
-Right-click the actual item in your inventory, a nearby loot container, or the nearby **Floor** pane. The game handles pickup and any normal return; another item of the same type is not a substitute. A container that moves out of reach or becomes locked cannot supply another item.
-It uses only the clicked selection/stack, one native consumption action at a time,
-and stops when the chosen action's need is restored: Eat targets hunger, Drink targets thirst, even when the item restores both. It does not aim for maximum stuffed moodles or find extra items elsewhere.
-**Open and Eat Til Full** and **Open and Drink Til Full** use the game's opening recipe first. When it can identify the exact opened item, LootBox rechecks its contents and your current hunger or thirst before queuing the ordinary native portion. This also works for eligible recipe-only rows in personal inventory and reachable loot. An opened canned milk or fruit beverage uses its native Food action but **Drink** targets thirst.
+**Til Full** appears beside the game's own Eat and Drink amounts, only when it would do something. It uses only the items you clicked, one at a time, and stops when that need is met: Eat follows hunger, Drink follows thirst. **Til Full satisfies hunger and thirst together** in Settings makes it continue until both are.
 
-On multiplayer, supported stock canned food, preserved-food jars, and water ration cans can continue in one click when the change is unambiguous. Keep any required opener in main inventory. At the stock action's completion, LootBox checks that the selected closed item is gone and the expected new result is in main inventory. For a jar it also verifies the returned lid; for a water ration it verifies the fresh can contains 0.300 L of clean water. Unlabeled and dented cans also require the game's opened-item notice in single-local-player multiplayer. Rotten or poisoned contents are not eaten. Plain canned food and jars do not provide an output ID tied to the craft. A sealed drink that unseals **in place** still uses its original ID. If the result was dropped, is unsafe, or cannot be distinguished from another item, LootBox stops without queuing a portion. For an available safe result, right-click the exact opened item and use **Eat** or **Drink > Til Full**.
+**Open and Eat Til Full** and **Open and Drink Til Full** use the game's own opening recipe, then eat or drink exactly what came out, in single-player and multiplayer. The game fetches the can and the opener and puts the opener back. Other things may arrive or move in your inventory meanwhile. If you are over the carrying limit the game drops the opened food at your feet and LootBox tells you so. Knives (which can injure), alcohol, and packs that hold several items are left to the game's own menu.
 
-The normal opener is still required where applicable. Alcohol, poison and unsafe mixtures remain excluded; use a native amount instead. Food requiring an additional item for eating still uses the normal Eat action. Favorited items are allowed for this explicit consumption action. Food and fluid vessels already in the player's main inventory may be worn, held, or attached: normal native consumption runs without LootBox unequipping them. Keep and personal-gear recovery protections still apply, as do native vessel-size and safety restrictions. Unsafe, changed, or unavailable items
-stop the request; normal native admission rules still apply.
-
-In LootBox Settings, **Til Full in the Eat and Drink menus** controls the menu entry.
-**Til Full satisfies hunger and thirst together** is off by default: Eat targets hunger and Drink targets thirst. Turn it on to continue until both are satisfied,
-which may consume beyond one already satisfied need. An item must restore the chosen action's need; otherwise the request stops rather than silently switching goals. The normal context-menu setting also controls this entry.
-
-The menu action starts directly without opening another window. A refusal uses compact native feedback; the job strip shows details and can cancel it. Movement/action interruption or another queued
-player action prevents further stack consumption. Native mask/item restoration is
-preserved, so cancellation can remain pending during cleanup. No-progress or
-unavailable native actions stop safely rather than repeatedly queuing items.
-In single-player, a partial portion completes when the exact amount and its native effect are confirmed. It does not take another bite just for hunger or thirst accrued during that action. In multiplayer, a confirmed partial portion does not start a second action just to chase normal metabolism. If the exact amount was consumed and the observed remaining need rounds to zero percent, LootBox reports the portion consumed rather than claiming an exact server zero. When a whole selected item is confirmed exhausted but the server reports a small residual change, any next portion is capped at the original remaining need. The stock multiplayer drink action can leave slightly less in the bottle than projected. LootBox reports that difference and never queues a second sip for a planned partial.
-“Til Full” requests a stop at the observed target; native partial consumption and
-multiplayer latency mean it cannot promise exact quantities or instantaneous
-stopping. See [verification](docs/verification.md) for the coverage and limits of each workflow.
-
+Walking is fine where the game allows it. Aiming, fighting, running, Escape or Cancel stop it; an action you queue yourself simply goes first. Spoiled, burnt, frozen, poisonous or alcoholic items and Keep items are refused; favorites are fine when you chose them.
 
 ## Automatic food and drink
 
@@ -149,9 +126,9 @@ In **LootBox > Settings > Eating and drinking**, all four switches start **off**
 - **Carried supplies: search bags inside bags:** extend the second switch into nested carried bags. By itself this does nothing. Locked or protected bags are not traversed.
 - **Carried supplies: allow risky can opening:** prefer an ordinary can opener in both single-player and multiplayer. With this switch on, supported stock food cans may instead use the game's sharp-tool recipe at an adjacent craft surface. The game can damage the tool and cut your hand. No bare-handed opening is invented. For automatic opening, the can and tool must be in main inventory; unknown recipes and outputs are skipped.
 
-**Drinking requires Project Zomboid's own Auto-Drink option.** The game already checks many directly equipped pure-water vessels. LootBox leaves ordinary drinking to the game. In single-player, an equipped vessel the game selects but does not use can get one stock retry after at least 20 seconds of observed rising thirst with unchanged water. In multiplayer, the game server owns water intake; LootBox never sends a second drink request. With the carried option, a clean bottle inside a bag can be moved into main inventory using the normal transfer action. On a server, LootBox waits for the transfer to be accepted, for that exact bottle to appear in the right place, and for **both** its volume and your thirst to fall before returning it to its original carried bag. If you intervene, the bag is unavailable, or the server doesn't confirm, it stops; the bottle may remain in main inventory.
+**Drinking requires Project Zomboid's own Auto-Drink option.** The game already drinks from many equipped pure-water vessels and LootBox leaves that to it. In single-player, an equipped vessel the game selects but does not use gets one retry after 20 seconds of rising thirst. Water and drinks in bags are drunk with the game's ordinary Drink action, which takes the vessel out and puts it back.
 
-For multiplayer can opening, LootBox requests the stock safe recipe (or the opted-in sharp-tool recipe) **without an automatic bite**. The game does not tag the opened food as a result of that particular craft on the client. After the server completes the action and removes the exact unopened can, LootBox waits, checks hunger again, and may choose **any** currently safe, ready-to-eat carried food. It will not open another can in that hunger episode. An interruption, failed recipe, or missing acknowledgement never triggers a guessed bite.
+A can is opened with the game's recipe and what comes out is eaten at once, in single-player and multiplayer alike.
 
 Automatic intake waits for meaningful thirst (20%) or hunger (25%), then uses one native portion for that need. The manual **Til Full satisfies hunger and thirst together** preference is not used for background intake. LootBox does not interrupt movement, aiming, combat, existing queued actions, an active or paused LootBox job, or pending gear recovery. It skips unsafe, spoiled, alcoholic, medical and unrecognized supplies; favorites and **Keep** items are never chosen. A canceled or unconfirmed portion is not automatically retried in the same need episode. In multiplayer the client can stop requesting work, but it cannot recall a bite or sip the server has already accepted. Manual Eat, Drink and Til Full remain available.
 
