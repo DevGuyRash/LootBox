@@ -2,6 +2,7 @@
 -- Never calls stock complete on this peer or treats local perform as success.
 local Take = require "LootBox/MountedTakeReceipt"
 local findCarried = require("LootBox/CreatedItemReceipt").findCarried
+local Log = require "LootBox/Log"
 local M = {}
 local enabled = require("LootBox/MountedClientPolicy").enabled
 local ACTION, BOTTLE = "ISAddTakeDispenserBottle", "Base.WaterDispenserBottle"
@@ -157,6 +158,7 @@ function M.start(p,input,jug,ops,nativeEnd)
     local function observe(method,...)
         local ok,result,why=pcall(s.watch[method],s.watch,...)
         if ok then return result,why end
+        Log.fault(ops.interaction,"MountedClientAction."..method,result)
         s.problem=s.problem or "The dispenser receipt could not be verified."
         s.watch:cancel(s.problem)
         return false,s.problem
@@ -164,8 +166,11 @@ function M.start(p,input,jug,ops,nativeEnd)
     local function finish(callback,...)
         if s.ended or not netOwn(s,false) then return false end
         s.ended=true
-        local ok=pcall(nativeEnd,p,s,callback,a,...)
-        if not ok then s.problem=s.problem or "The stock dispenser cleanup failed." end
+        local ok,err=pcall(nativeEnd,p,s,callback,a,...)
+        if not ok then
+            Log.fault(ops.interaction,"MountedClientAction.end",err)
+            s.problem=s.problem or "The stock dispenser cleanup failed."
+        end
         return ok and not s.problem
     end
     -- The same owned Java handle may remain until its Lua callback returns.
@@ -209,7 +214,10 @@ function M.start(p,input,jug,ops,nativeEnd)
     end
     function a:waitToStart()
         local ok,waiting=pcall(wait,self)
-        if not ok then s:cancel("The stock dispenser could not begin waiting.");return true end
+        if not ok then
+            Log.fault(ops.interaction,"MountedClientAction.waitToStart",waiting)
+            s:cancel("The stock dispenser could not begin waiting.");return true
+        end
         local hold,why=observe("waitToStart",self,waiting)
         if type(hold)~="boolean" or why then s:cancel(why);return true end
         return hold
@@ -217,7 +225,8 @@ function M.start(p,input,jug,ops,nativeEnd)
     function a:start()
         s.entered=true
         if not observe("beforeStart",self) then s:cancel("The exact dispenser start was not admitted.");return end
-        local ok=pcall(start,self)
+        local ok,err=pcall(start,self)
+        if not ok then Log.fault(ops.interaction,"MountedClientAction.start",err) end
         if not observe("started",self,ok) then s:cancel("The stock dispenser start failed.") end
     end
     function a:perform(...)

@@ -1,4 +1,5 @@
 local Actor = require "LootBox/PourActor"
+local Log = require "LootBox/Log"
 -- Ordinary, portable item-owned vessels selected from the native Ground pane.
 -- No inventory or fluid writes: the stock pickup transaction and stock Place
 -- Item action are the only operations. The recreated wrapper is not the item ID.
@@ -10,7 +11,11 @@ local MAX_ITEMS,TIMEOUT,SAMPLE=4096,30000,100
 local function finite(n) return type(n)=="number" and n==n and math.abs(n)<math.huge end
 local function near(a,b) return finite(a) and finite(b) and math.abs(a-b)<0.00002 end
 local function angle(a,b) return finite(a) and finite(b) and math.abs((a-b+180)%360-180)<0.001 end
-local function optional(run,...) local ok,value=pcall(run,...);if ok then return value end end
+local function optional(run,...)
+    local ok,value,why=pcall(run,...)
+    if ok then return value,why end
+    Log.fault(nil,"PourGround.check",value)
+end
 local function indexOK(n) return finite(n) and n%1==0 and n>=0 end
 
 local function display(player,floor)
@@ -129,9 +134,13 @@ local function inQueue(q,a)
     return false
 end
 local function granted(s,phase)
-    return not s.problem and s.mp==isClient() and Ground.reachable(s.p,s.a)
-        and not Actor.blocked(s.p)
-        and s.guard(phase,s.it,s.from,s.to)==true and getTimestampMs()<s.untilAt
+    if s.problem or s.mp~=isClient() then return false,s.problem or "session" end
+    if not Ground.reachable(s.p,s.a) then return false,"spot-unreachable" end
+    local blocked=Actor.blocked(s.p)
+    if blocked then return false,"player: "..blocked end
+    local allowed,check=s.guard(phase,s.it,s.from,s.to)
+    if allowed~=true then return false,check or "caller-guard" end
+    return getTimestampMs()<s.untilAt,"deadline"
 end
 local function ownOrIdle(s)
     local q=qFor(s)
@@ -147,17 +156,21 @@ local function matchesAction(s)
         and a.zoffset==s.a.oz and a.rotation==s.a.rz and a.isPlaceItem==true
 end
 local function exactStart(s)
-    if not matchesAction(s) or not granted(s,"admit") or not ownOrIdle(s) or not ordinary(s.p,s.it) then return false end
+    if not matchesAction(s) then return false,"not-our-action" end
+    local allowed,check=granted(s,"admit")
+    if not allowed then return false,check end
+    if not ownOrIdle(s) then return false,"queue-busy" end
+    if not ordinary(s.p,s.it) then return false,"item-not-placeable" end
     local m,g,unambiguous=positions(s)
     local projected,clean=locate(s.a.floor:getItems(),s.a,false)
-    if not unambiguous or not clean then return false end
+    if not unambiguous or not clean then return false,"ambiguous-identity" end
     if s.taking then
         return projected==s.it and g==s.it and not m and Ground.sameAnchor(s.a,Ground.capture(s.p,s.it,s.a.floor,s.a.worldFluid))
-            and s.a.floor:isRemoveItemAllowed(s.it) and s.main:isItemAllowed(s.it) and s.main:hasRoomFor(s.p,s.it)
+            and s.a.floor:isRemoveItemAllowed(s.it) and s.main:isItemAllowed(s.it) and s.main:hasRoomFor(s.p,s.it),"pickup-endpoint"
     end
     return m==s.it and not projected and not g and s.it:getWorldItem()==nil and s.main:isRemoveItemAllowed(s.it)
         and angle(s.it:getWorldXRotation(),s.a.rx) and angle(s.it:getWorldYRotation(),s.a.ry)
-        and angle(s.it:getWorldZRotation(),s.a.rz) and room(s.a.square,s.it,false)
+        and angle(s.it:getWorldZRotation(),s.a.rz) and room(s.a.square,s.it,false),"placement-endpoint"
 end
 
 -- The native stop resets the entire queue. Isolate its reset to our owned
@@ -259,7 +272,7 @@ local function install(s)
     return true
 end
 
-function Ground.new(player) return setmetatable({player=player},Ground) end
+function Ground.new(player,interaction) return setmetatable({player=player,interaction=interaction},Ground) end
 function Ground:isBusy() return self.active~=nil end
 local function begin(self,it,from,to,guard,a)
     local p=self.player
@@ -269,7 +282,9 @@ local function begin(self,it,from,to,guard,a)
     if not take and not (from==main and to==a.floor) then return nil,"Ground move endpoints changed." end
     local s={p=p,it=it,a=a,main=main,from=from,to=to,taking=take,guard=guard,mp=isClient(),untilAt=getTimestampMs()+TIMEOUT}
     local q=qFor(s)
-    if q.current or #q.queue~=0 or p:hasTimedActions() or not exactStart(s) then return nil,"Ground vessel, position or room changed." end
+    if q.current or #q.queue~=0 or p:hasTimedActions() then return nil,"Ground vessel, position or room changed.","queue-busy" end
+    local exact,check=exactStart(s)
+    if not exact then return nil,"Ground vessel, position or room changed.",check end
     if take then
         require "TimedActions/ISInventoryTransferUtil"
         s.act=ISInventoryTransferUtil.newInventoryTransferAction(p,it,from,to)
@@ -279,14 +294,24 @@ local function begin(self,it,from,to,guard,a)
     end
     if not install(s) or not s.act:isValid() then return nil,"The game declined the ground action." end
     self.active=s
+    s.startedAt=getTimestampMs()
+    Log.trace(self.interaction,"OP","op",take and "ground-pickup" or "ground-place","item",Log.item(it,p),
+        "square",Log.point(a.square),"offset",tostring(a.ox)..","..tostring(a.oy),"rotation",a.rz)
     ISTimedActionQueue.add(s.act)
     if not inQueue(q,s.act) and not s.performed then self.active=nil;return nil,"The stock ground action did not start." end
     return true
 end
 function Ground:start(...)
     local previous=self.active
-    local ok,value,why=pcall(begin,self,...)
-    if ok then return value,why end
+    local ok,value,why,check=pcall(begin,self,...)
+    if ok then
+        if not value then
+            Log.warn(self.interaction,"REFUSED","op","ground-move","check",check or "admission","reason",why,
+                "item",Log.item((...),self.player),"player",Log.player(self.player))
+        end
+        return value,why
+    end
+    Log.fault(self.interaction,"PourGround.start",value)
     if self.active and self.active~=previous then self:cancel() end
     return nil,"The stock ground action is unavailable."
 end
@@ -300,8 +325,19 @@ local function poll(self)
     if not s then return false,"No ground action is active." end
     local q=qFor(s)
     local owned=q.current==s.act or inQueue(q,s.act)
-    local function finish(ok,reason,item) self.active=nil;return ok,reason,item end
-    if not ownOrIdle(s) or not granted(s,"wait") then s.problem=s.problem or "Ground action lost its context or timed out." end
+    local function finish(ok,reason,item)
+        self.active=nil
+        local emit=ok and Log.trace or Log.warn
+        emit(self.interaction,"OP-END","op",s.taking and "ground-pickup" or "ground-place","ok",ok,"check",not ok and s.check or nil,"reason",reason,
+            "elapsedMs",getTimestampMs()-s.startedAt,"performed",s.performed==true,"transaction",s.sent,
+            "item",Log.item(item or s.it,s.p),"square",Log.point(s.a.square),"player",not ok and Log.player(s.p) or nil)
+        return ok,reason,item
+    end
+    local allowed,check=granted(s,"wait")
+    if not ownOrIdle(s) or not allowed then
+        s.check=s.check or allowed and "queue-busy" or check
+        s.problem=s.problem or "Ground action lost its context or timed out."
+    end
     if s.problem then
         if owned then cancelOwned(s);return nil end
         return finish(false,s.problem)
@@ -331,6 +367,7 @@ end
 function Ground:poll()
     local ok,value,why,item=pcall(poll,self)
     if ok then return value,why,item end
+    Log.fault(self.interaction,"PourGround.poll",value)
     local s=self.active
     if s then
         self:cancel()

@@ -1,5 +1,6 @@
 -- One ownership + destination boundary for stock actions that create an item.
 -- A fresh matching ID is not itself an identity receipt.
+local Log = require "LootBox/Log"
 local Receipt = {}
 Receipt.__index = Receipt
 local MAX_ITEMS, TIMEOUT = 4096, 7000
@@ -61,6 +62,7 @@ function Receipt.findCarried(inventory,id)
         if inventory:getContainingItem()~=nil then return nil,"The receiving inventory is not an independent root" end
         return readInventory(inventory,MAX_ITEMS,true)
     end)
+    if not ok then Log.fault(nil,"CreatedItemReceipt.findCarried",rows) end
     if not ok or not rows then return nil,ok and reason or "The carried tree could not be inspected" end
     return rows[id],nil,holders[id]
 end
@@ -98,7 +100,10 @@ end
 
 local function inspection(self, unguarded, ...)
     local ok, value, reason, extra = pcall(unguarded, self, ...)
-    if not ok then return nil, "The native creation receipt could not be verified" end
+    if not ok then
+        Log.fault(nil, "CreatedItemReceipt", value)
+        return nil, "The native creation receipt could not be verified"
+    end
     return value, reason, extra
 end
 
@@ -156,6 +161,7 @@ function Receipt.begin(owner, opts)
         end
     end
     local ok, inventory, at = pcall(function() return opts.inventory(), opts.clock() end)
+    if not ok then Log.fault(nil, "CreatedItemReceipt.begin", inventory) end
     if not ok or not inventory or not integer(at) then return nil, "The receiving inventory is unavailable" end
     local self = setmetatable({owner=owner, destination=inventory, inventory=opts.inventory, matches=opts.matches,
         anchor=opts.anchor, deliveredBeforeDone=opts.deliveredBeforeDone, clock=opts.clock,

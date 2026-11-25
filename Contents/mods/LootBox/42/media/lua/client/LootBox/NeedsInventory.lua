@@ -1,5 +1,6 @@
 local TillFull = require "LootBox/TillFull"
 local Opening = require "LootBox/NeedsOpening"
+local Log = require "LootBox/Log"
 local Inventory = {}
 
 local MAX_ITEMS, MAX_CONTAINERS, MAX_DEPTH, MAX_OPENINGS = 1024, 64, 8, 16
@@ -91,8 +92,7 @@ end
 function Inventory.sourceAccessible(player, options, world, source)
     if not world or not source then return false end
     local _, _, depthLimit = optionsFor(options, "food")
-    local ok, allowed = pcall(sourcePath, player, call(player, "getInventory"), source, world, depthLimit)
-    return ok and allowed == true
+    return Log.guard("NeedsInventory.sourcePath", sourcePath, player, call(player, "getInventory"), source, world, depthLimit) == true
 end
 
 local function toolAccessible(player, world, tool)
@@ -121,8 +121,7 @@ local function accessible(player, options, kind, world, item, plan)
 end
 
 function Inventory.accessible(player, options, kind, world, item, plan)
-    local ok, allowed = pcall(accessible, player, options, kind, world, item, plan)
-    return ok and allowed == true
+    return Log.guard("NeedsInventory.accessible", accessible, player, options, kind, world, item, plan) == true
 end
 
 local function hasSafeEffects(item, kind)
@@ -133,8 +132,7 @@ end
 function Inventory.eligible(player, options, kind, world, item, plan)
     if not Inventory.accessible(player, options, kind, world, item, plan) then return false end
     if not plan then return hasSafeEffects(item, kind) end
-    local ok, valid = pcall(Opening.validate, player, options, kind, world, item, plan, openingCallbacks(player, world))
-    return ok and valid == true
+    return Log.guard("NeedsOpening.validate", Opening.validate, player, options, kind, world, item, plan, openingCallbacks(player, world)) == true
 end
 
 local function selectItem(player, options, kind, world, excluded, allowed, readyOnly)
@@ -195,8 +193,7 @@ local function selectItem(player, options, kind, world, excluded, allowed, ready
 end
 
 function Inventory.select(player, options, kind, world, excluded, allowed, readyOnly)
-    local ok, item, plan = pcall(selectItem, player, options, kind, world, excluded, allowed, readyOnly)
-    if ok then return item, plan end
+    return Log.guard("NeedsInventory.select", selectItem, player, options, kind, world, excluded, allowed, readyOnly)
 end
 
 return Inventory

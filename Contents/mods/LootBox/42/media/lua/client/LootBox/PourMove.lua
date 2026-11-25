@@ -1,4 +1,5 @@
 local Actor = require "LootBox/PourActor"
+local Log = require "LootBox/Log"
 require "TimedActions/ISTimedActionQueue"
 require "TimedActions/ISInventoryTransferUtil"
 
@@ -44,16 +45,22 @@ local function status(s)
 end
 
 local function permitted(s, phase)
-    return not s.problem and isClient() == s.multiplayer and safe(s.player)
-        and s.guard(phase, s.item, s.from, s.to) == true
+    if s.problem or isClient() ~= s.multiplayer or not safe(s.player) then
+        return false, "player: " .. tostring(s.problem or Actor.blocked(s.player))
+    end
+    local granted, check = s.guard(phase, s.item, s.from, s.to)
+    return granted == true, check or "caller-guard"
 end
 
 local function admit(s, strict)
-    if not permitted(s, "admit") or s.item:getContainer() ~= s.from or not s.from:contains(s.item)
-        or not s.to:isItemAllowed(s.item) or not s.to:hasRoomFor(s.player,s.item) then return false end
+    local granted, check = permitted(s, "admit")
+    if not granted then return false, check end
+    if s.item:getContainer() ~= s.from or not s.from:contains(s.item) then return false, "item-not-in-source" end
+    if not s.to:isItemAllowed(s.item) then return false, "destination-rejects-item" end
+    if not s.to:hasRoomFor(s.player,s.item) then return false, "no-room" end
     if not strict then return true end
     local source, arrival, exact = endpoints(s)
-    return exact and source == s.item and not arrival
+    return exact and source == s.item and not arrival, "ambiguous-identity"
 end
 
 local function acknowledged(id)
@@ -61,8 +68,9 @@ local function acknowledged(id)
 end
 
 local function checked(fn, ...)
-    local ok, result = pcall(fn,...)
-    return ok and result == true
+    local ok, result, why = pcall(fn,...)
+    if not ok then Log.fault(nil,"PourMove.check",result) end
+    return ok and result == true, why
 end
 
 -- Stock stop/perform may reset the Lua queue. Keep existing foreign actions
@@ -83,7 +91,7 @@ local function preserving(s, fn, action, ...)
     return result
 end
 
-function Move.new(player) return setmetatable({player=player},Move) end
+function Move.new(player,interaction) return setmetatable({player=player,interaction=interaction},Move) end
 function Move:isBusy() return self.active ~= nil end
 
 local function stop(s)
@@ -124,12 +132,16 @@ local function install(s)
         local q, _, foreign = status(s)
         if self ~= action or self.item ~= s.item or self.srcContainer ~= s.from or self.destContainer ~= s.to
             or self.character ~= s.player or foreign or (commit and q.current ~= self) or getTimestampMs() >= s.deadline then return false end
-        if s.sent then return not commit and permitted(s,"wait") end
+        if s.sent then
+            if commit then return false, "already-sent" end
+            return permitted(s,"wait")
+        end
         return admit(s,commit == true)
     end
     local function checkedStock(self, check, ...)
-        if not checked(allow,self) then
-            s.validationReason = "The local inventory-move safety check changed."
+        local allowed, why = checked(allow,self)
+        if not allowed then
+            s.validationReason, s.check = "The local inventory-move safety check changed.", why
             return false
         end
         local accepted = check(self,...)
@@ -143,7 +155,9 @@ local function install(s)
         return checkedStock(self,valid,...)
     end
     function action:start(...)
-        if not checked(allow,self,true) or not valid(self) then
+        local allowed, why = checked(allow,self,true)
+        if not allowed or not valid(self) then
+            s.check = not allowed and why or "stock-isValid"
             s.problem = "Native movement lost its source, capacity or queue"
             self:forceStop()
             return
@@ -193,22 +207,33 @@ end
 local function start(self,item,from,to,guard)
     if self.active then return nil,"Native movement already active" end
     local player = self.player
-    if not safe(player) or type(guard) ~= "function" or not item or not from or not to or from == to
-        or not from:getType() or not to:getType() or from:getType() == "floor" or to:getType() == "floor"
-        or item:getContainer() ~= from or (item.getWorldItem and item:getWorldItem())
-        or (player.isEquipped and player:isEquipped(item))
-        or (player.isAttachedItem and player:isAttachedItem(item))
-        or (item.isWorn and item:isWorn()) then return nil,"Unsupported or unsafe native movement" end
+    if not safe(player) then return nil,"Unsupported or unsafe native movement","player: "..tostring(Actor.blocked(player)) end
+    if type(guard) ~= "function" or not item or not from or not to or from == to
+        or not from:getType() or not to:getType() or from:getType() == "floor" or to:getType() == "floor" then
+        return nil,"Unsupported or unsafe native movement","endpoints"
+    end
+    if item:getContainer() ~= from or (item.getWorldItem and item:getWorldItem()) then
+        return nil,"Unsupported or unsafe native movement","item-not-in-source"
+    end
+    if (player.isEquipped and player:isEquipped(item)) or (player.isAttachedItem and player:isAttachedItem(item))
+        or (item.isWorn and item:isWorn()) then return nil,"Unsupported or unsafe native movement","item-equipped" end
     local q = ISTimedActionQueue.getTimedActionQueue(player)
-    if q.current or #q.queue ~= 0 or player:hasTimedActions() then return nil,"Finish the current player action first" end
+    if q.current or #q.queue ~= 0 or player:hasTimedActions() then
+        return nil,"Finish the current player action first","queue-busy"
+    end
     local s = {player=player,item=item,from=from,to=to,guard=guard,id=item:getID(),fullType=item:getFullType(),
         multiplayer=isClient(),deadline=getTimestampMs()+TIMEOUT}
     if type(s.id) ~= "number" or type(s.fullType) ~= "string"
-        or (s.multiplayer and (type(isItemTransactionDone) ~= "function" or type(isItemTransactionRejected) ~= "function"))
-        or not admit(s,true) or not install(s) then
-        return nil,"The exact native movement is unavailable"
+        or (s.multiplayer and (type(isItemTransactionDone) ~= "function" or type(isItemTransactionRejected) ~= "function")) then
+        return nil,"The exact native movement is unavailable","bindings"
     end
+    local admitted, check = admit(s,true)
+    if not admitted then return nil,"The exact native movement is unavailable",check end
+    if not install(s) then return nil,"The exact native movement is unavailable","stock-action-shape" end
     self.active = s
+    s.startedAt = getTimestampMs()
+    Log.trace(self.interaction,"OP","op","move","item",Log.item(item,player),
+        "from",Log.container(from,player),"to",Log.container(to,player))
     ISTimedActionQueue.add(s.action)
     local _, own = status(s)
     if own or s.performed then return true end
@@ -218,8 +243,16 @@ end
 
 function Move:start(item,from,to,guard)
     local current = self.active
-    local ok, result, reason = pcall(start,self,item,from,to,guard)
-    if ok then return result,reason end
+    local ok, result, reason, check = pcall(start,self,item,from,to,guard)
+    if ok then
+        if not result then
+            Log.warn(self.interaction,"REFUSED","op","move","check",check or "not-queued","reason",reason,
+                "item",Log.item(item,self.player),"from",Log.container(from,self.player),"to",Log.container(to,self.player),
+                "player",Log.player(self.player))
+        end
+        return result,reason
+    end
+    Log.fault(self.interaction,"PourMove.start",result)
     if self.active and self.active ~= current then self:cancel() end
     return nil,"Native movement could not start"
 end
@@ -238,11 +271,18 @@ local function poll(self)
     if not s then return false,"No native movement is active" end
     local function finish(ok,reason,item,retained)
         self.active = nil
+        local emit = ok and Log.trace or Log.warn
+        emit(self.interaction,"OP-END","op","move","ok",ok,"check",not ok and s.check or nil,"reason",reason,"elapsedMs",getTimestampMs()-s.startedAt,
+            "performed",s.performed == true,"transaction",s.sent,"acknowledged",s.ack,"serverRejected",s.serverRejected,
+            "item",Log.item(item or s.item,self.player),"stayedInSource",retained ~= nil,
+            "to",Log.container(s.to,self.player),"player",not ok and Log.player(self.player) or nil)
         return ok,reason,item,retained
     end
     local _,own,foreign = status(s)
     local now = getTimestampMs()
-    if foreign or not checked(permitted,s,(s.sent or s.performed) and "wait" or "admit") then
+    local allowed, why = checked(permitted,s,(s.sent or s.performed) and "wait" or "admit")
+    if foreign or not allowed then
+        s.check = s.check or foreign and "foreign-action-queued" or why
         s.problem = s.problem or "Native movement interrupted"
     end
     if now >= s.deadline then s.problem = s.problem or "Native movement was not confirmed in time" end
@@ -263,6 +303,7 @@ end
 function Move:poll()
     local ok, result, reason, item, retained = pcall(poll,self)
     if ok then return result,reason,item,retained end
+    Log.fault(self.interaction,"PourMove.poll",result)
     if self.active then
         self:cancel()
         local _,own = status(self.active)
