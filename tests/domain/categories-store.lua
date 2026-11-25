@@ -220,6 +220,22 @@ case("String and numeric keys retain different meanings", function()
     same(assert(Store.decode(assert(Store.encode(value)))), value)
 end)
 
+case("Documents written before plain text was stored as it is stay readable", function()
+    local old = "LBD1|c26d2aee|m3:s5:636f756e74d3.5;s4:6b656570m1:s2:3132ys6:6c6162656c73m1:s27:776f726c643a313a323a303a333a63726174653a303a6372617465m2:d1;s11:6e61746976653a466f6f64d2;s8:637573746f6d3a31"
+    same(assert(Store.decode(old)), {count = 3.5, keep = {["12"] = true}, labels = {["world:1:2:0:3:crate:0:crate"] = {"native:Food", "custom:1"}}})
+end)
+
+case("Plain text is stored once per character, and any text survives", function()
+    local key = "world:10234:9876:0:#0:furniture_storage_01_12:0:crate"
+    local text = assert(Store.encode({[key] = {"native:Food"}}))
+    assert(text:find(key, 1, true) and #text < #key + 60)
+    for _, value in ipairs({"", "plain", "with|bar;semi:colon", "two\nlines", "tab\t", "\127", "d3;", "m1:"}) do
+        local encoded = assert(Store.encode({value = value}))
+        assert(not encoded:find("\n", 1, true), "A saved document is one line")
+        equal(assert(Store.decode(encoded)).value, value)
+    end
+end)
+
 case("Saved data never executes Lua", function()
     LootBoxStoreExecutionMarker = "not executed"
     local source = "LootBoxStoreExecutionMarker = 'executed'; return {version=1}"
