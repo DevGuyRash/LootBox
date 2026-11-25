@@ -24,6 +24,7 @@ local function test(name, run)
     f = {player = {}, preferences = {jobBar = true}, plan = {moves = {{}}, skipped = {}, label = "Take nails"}}
     f.app = {player = f.player, preview = function(_, request) f.previewed = request; return f.plan, f.problem end,
         start = function(_, plan, options) f.started, f.startOptions = plan, options; if f.refuse then return nil, f.refuse end return true end,
+        again = function(_, request) if f.mine and request.shortcutIntent == f.mine then return true, f.outcome, f.againError end return false end,
         world = {owns = function(_, c) return c == "bag" end},
         rememberSetup = function() f.remembered = true; return true end, previewCondense = function() return f.plan, f.problem end}
     run()
@@ -35,6 +36,20 @@ local function request(kind) return {scope = "room", filter = {all = true, ids =
 test("a click starts the job at once when no review is wanted", function()
     assert(UI.act(0, request()))
     assert(f.started == f.plan and type(f.startOptions.interaction) == "number" and not f.review and not f.page)
+end)
+
+test("pressing a toolbar button again carries on with its job instead of planning another", function()
+    f.mine, f.outcome = "matching:nearby", "resumed"
+    local what = request(); what.shortcutIntent = "matching:nearby"
+    local ok, outcome, kind = UI.act(0, what)
+    assert(ok and outcome == "resumed" and kind == "continued" and not f.previewed and not f.started and not f.bad)
+    f.outcome, f.againError = nil, "Aiming paused the job. Stop that action before choosing Resume job."
+    ok = UI.act(0, what)
+    assert(ok == nil and f.bad == f.againError and not f.previewed and not f.started)
+    what.shortcutIntent = "matching:displayed"
+    assert(UI.act(0, what) and f.started == f.plan)
+    f.started, f.mine, f.outcome = nil, "condense", "running"
+    assert(UI.condense(0) and not f.started)
 end)
 
 test("nothing to do says why, opens nothing and starts nothing", function()

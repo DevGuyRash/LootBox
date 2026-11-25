@@ -216,6 +216,25 @@ test("a container offers only what its contents allow", function()
     assert(has(t, "Take everything (4)") and has(t, "Throw away contents (4)") and has(t, "Move contents > The floor"))
     has(t, "Take everything (4)").onSelect()
     assert(f.acted.scope == "container" and f.acted.sourceContainer == crate and f.acted.destination.kind == "inventory")
+    assert(f.acted.includeBags == false, "A filled bag is taken as it is, like any other item")
+    f.checklist = {ids = {}, types = {"Base.Nails"}}; f.matching = 2
+    menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    has(tree(menu), "Take my loot list (2)").onSelect()
+    assert(f.acted.includeBags == true, "Only a search looks inside bags")
+end)
+
+test("contents are dropped where the player can stand, not inside the fixture", function()
+    local crate = container("crate", {takeable = 4, types = {["Base.Nails"] = 4}})
+    open(crate)
+    local solid, free = {isFree = function() return false end}, {isFree = function() return true end}
+    for tile, expected in pairs({[solid] = f.square, [free] = free}) do
+        local menu = newMenu()
+        Menus.containerMenu(0, menu, crate, tile)
+        local row = has(tree(menu), "Move contents > The floor") or has(tree(menu), "Drop contents here")
+        row.onSelect()
+        assert(f.acted.destination.kind == "floor" and f.acted.destination.ref == expected)
+    end
 end)
 
 test("a locked container, and the player's own inventory, get no destructive or useless rows", function()

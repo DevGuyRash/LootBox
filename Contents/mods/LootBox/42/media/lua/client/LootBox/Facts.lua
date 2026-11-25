@@ -12,7 +12,7 @@
 --                                          kind: main, bag, fixture, vehicle, corpse, floor or bin.
 --                                          items counts everything; takeable, types and categories leave out
 --                                          protected and unwanted items. Bags inside are not opened.
--- world:countMatching(container, filter)       -> number of unprotected items the filter {ids, types, all} selects
+-- world:countMatching(container, filter)       -> number of takeable items the filter {ids, types, all} selects
 -- world:countCarried(fullType, exclude)        -> number of unprotected carried items; nil fullType counts every type
 -- world:countCarriedCategory(id, exclude)      -> the same for a native or custom category
 -- world:countCarriedFilter(filter)             -> the same for a filter
@@ -116,7 +116,8 @@ end
 function Facts:countMatching(container, filter)
     local total = 0
     eachTakeable(self, call(container, "getItems"), function(item)
-        if filter.all or self.graph and self.graph:matchesFilter(filter, self:describe(item)) then total = total + 1 end
+        if call(item, "isUnwanted", self.player) ~= true
+            and (filter.all or self.graph and self.graph:matchesFilter(filter, self:describe(item))) then total = total + 1 end
     end)
     return total
 end

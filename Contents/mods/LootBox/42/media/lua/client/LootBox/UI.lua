@@ -44,6 +44,15 @@ local function deletesCarried(app, request)
         or (request.scope == "container" and request.sourceContainer ~= nil and app.world:owns(request.sourceContainer))
 end
 
+-- A toolbar button pressed again resumes its job, or leaves it running.
+local function continues(playerIndex, app, request, id)
+    local found, outcome, err = app:again(request)
+    if not found then return false end
+    Log.info(id, outcome and "CONTINUES" or "REFUSED", "job", request.shortcutIntent, "outcome", outcome, "reason", err)
+    if not outcome then UI.say(playerIndex, err); return true, nil, err end
+    return true, true, outcome
+end
+
 -- Runs a request. Nothing disturbs the job in progress until there is
 -- something to do and the player has agreed to any review they asked for.
 function UI.act(playerIndex, request, options)
@@ -53,6 +62,8 @@ function UI.act(playerIndex, request, options)
     local id = options.interaction or request.interaction
         or Log.intent("api", options.label or "request", app.player, "request", Log.request(request))
     request.interaction = id
+    local found, ok, outcome = continues(playerIndex, app, request, id)
+    if found then return ok, outcome, "continued" end
     if options.area and not request.area then
         local picker
         picker, err = AreaPicker.start(playerIndex, function(area)
@@ -101,6 +112,8 @@ function UI.condense(playerIndex)
     local app, err = App.get(playerIndex)
     if not app then return nil, err end
     local id = Log.intent("toolbar.condense", "condense", app.player)
+    local found, continued, outcome = continues(playerIndex, app, { shortcutIntent = "condense" }, id)
+    if found then return continued, outcome end
     local plan
     plan, err = app:previewCondense()
     if not plan then
