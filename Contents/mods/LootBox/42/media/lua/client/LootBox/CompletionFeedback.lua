@@ -37,7 +37,7 @@ function Feedback.job(player, plan, view, measured)
         detail[#detail + 1] = condense and "No transfers needed" or "No items moved"
     end
     if (view.skipped or 0) > 0 then detail[#detail + 1] = countLabel(view.skipped, "item", "skipped") end
-    local suffix, note, status = " complete", nil, nil
+    local suffix, note, status = " complete", view.left, nil
     if view.state == "finished_with_skips" then
         local row = view.reasons and view.reasons[1]
         suffix, note, status = " finished with notes", row and row.reason or view.reason, "stopped"

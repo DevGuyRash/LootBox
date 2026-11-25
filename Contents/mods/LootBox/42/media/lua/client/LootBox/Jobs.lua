@@ -2079,8 +2079,16 @@ function Jobs:complete(state, reason, trigger)
     end
     self.view.carried = self:carriedCount()
     if not reason and (state == "finished" or state == "finished_with_skips") then
-        reason = state == "finished" and "Finished the selected job."
-            or "Finished with notes."
+        reason = state == "finished" and "Finished the selected job." or "Finished with notes."
+        -- Known from the start, so not a failure, but the player asked for them.
+        local left, why = 0, nil
+        for _, row in ipairs(plan and plan.skipped or {}) do
+            if row.status == "Left in place" then left, why = left + 1, why or row.reason end
+        end
+        if left > 0 then
+            self.view.left = left .. (left == 1 and " item stays: " or " items stay: ") .. tostring(why)
+            reason = reason .. " " .. self.view.left
+        end
     end
     self.view.state, self.view.reason = state, reason or self.view.reason
     if self.view.carried > 0 then self.view.reason = (self.view.reason and self.view.reason .. "; " or "") .. self.view.carried .. " hauled items remain in carried storage" end

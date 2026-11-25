@@ -599,6 +599,16 @@ test("an item the server would refuse is never tried", function()
     assert(status.state == "finished_with_skips" and status.skipped == 1 and #f.source.items == 1 and #f.destination.items == 1, status.reason)
 end)
 
+test("what had no room from the start is named at the end without counting as a failure", function()
+    local f = fixture(9)
+    for _ = 1, 3 do item(f.source) end
+    f.destination.capacity = 2
+    start(f)
+    local status = finish(f)
+    assert(status.state == "finished" and status.skipped == 0 and #f.destination.items == 2, status.reason)
+    assert(status.reason:find("1 item stays: No matching destination with room", 1, true), status.reason)
+end)
+
 test("haul seven unit items in three capacity-limited trips", function()
     local f = fixture(3)
     for _ = 1, 7 do item(f.source) end
