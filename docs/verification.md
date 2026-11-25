@@ -377,7 +377,7 @@ Played on a disposable dedicated 42.22.2 server as an ordinary non-admin player.
 | Open and eat: chili, beans, unlabelled can, stack of chili | Finished, right item, through a relay adding 90-150 ms each way and 1% loss |
 | Dispenser: one source; two sources with a twin bottle already carried | 6 + 3.8 + 3 = 12.8 L on the server; the twin untouched |
 | Dispenser after its source emptied, interrupted pour | Bottle back on its stand |
-| Overloaded opening | Result found at the feet and said so |
+| Overloaded opening | Result found at the feet; the message that says so came afterwards and is covered by tests |
 | Two bottles to the last drop | Two portions, confirmed by the need |
 | Shelf bottles poured into and returned; main, worn bag and shelf bottles filled from a sink | All confirmed on the server |
 | 60 nails and 6 planks from a shelf | 66 of 66; the nails in three actions |
@@ -386,6 +386,6 @@ Played on a disposable dedicated 42.22.2 server as an ordinary non-admin player.
 | Condense | Bag filled to exactly 15 of 15; a second click moved nothing |
 | Clean a room into an outdoor can | 23 of 23, one trip, can emptied |
 
-Single player: open and eat, canned milk, sardines, ration, refill; a paused game no longer uses up a step's time.
+Single player: open and eat, canned milk, sardines, refill (a ration was opened and the game auto-drank it; reporting that as done came afterwards). A paused game no longer uses up a step's time. After the review fixes to queue handling, opening, refilling and draining bottles were replayed on the server.
 
 Not exercised live: controller, split screen, masks, automatic intake, vehicles, gear staging, huge buildings, other modded menus. A refitted dispenser may show a stale amount on a lagging client until the area reloads; the server's amount is right, and the stock actions do the same.
