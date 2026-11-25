@@ -358,11 +358,11 @@ local function order(p, target)
         if to == 1 or p.nodes[to].held and from ~= 1 then added = weight * 10000 end
         return added == 0 or carried + added <= p.limit
     end
-    local function step(flow, to, count, parked)
-        local lot = p.lots[flow.index]
-        shift(p, s, flow.index, flow.from, to, count)
-        carried = carried + lot.weight * (p.nodes[to].factor - p.nodes[flow.from].factor) * count
-        steps[#steps + 1] = {index = flow.index, from = flow.from, to = to, count = count, parked = parked, cost = s.cost, spread = s.spread}
+    local function step(flow, to, parked)
+        shift(p, s, flow.index, flow.from, to, 1)
+        carried = carried + p.lots[flow.index].weight * (p.nodes[to].factor - p.nodes[flow.from].factor)
+        flow.count = flow.count - 1
+        steps[#steps + 1] = {index = flow.index, from = flow.from, to = to, parked = parked, cost = s.cost, spread = s.spread}
     end
     -- The lightest thing whose leaving lets another one in, else the heaviest.
     local function park()
@@ -388,22 +388,17 @@ local function order(p, target)
             if at and (not best or value < score) then best, buffer, score = flow, at, value end
         end
         if not best then return false end
-        step(best, buffer, 1, true)
-        best.count = best.count - 1
+        step(best, buffer, true)
         flows[#flows + 1] = {index = best.index, from = buffer, to = best.to, count = 1, parked = true}
         return true
     end
     while true do
         local moved, left = false, false
         for _, flow in ipairs(flows) do
-            local count = 0
-            while count < flow.count and allowed(flow.index, flow.from, flow.to) do
-                step(flow, flow.to, 1)
-                count = count + 1
-            end
-            flow.count = flow.count - count
-            moved, left = moved or count > 0, left or flow.count > 0
-            if count > 0 and left then break end
+            local count = flow.count
+            while flow.count > 0 and allowed(flow.index, flow.from, flow.to) do step(flow, flow.to) end
+            moved, left = moved or flow.count < count, left or flow.count > 0
+            if flow.count < count and left then break end
         end
         if not left then return steps, {} end
         if not moved and not park() then
@@ -416,7 +411,7 @@ end
 
 -- The moves to make, or nil when the present arrangement is as good as any found.
 function Pack.plan(p)
-    p.work, p.order = WORK, {}
+    p.order = {}
     for index in ipairs(p.nodes) do p.order[index] = index end
     Sort(p.order, function(node) return p.nodes[node].factor, node == 1 and 1 or 0, node end)
     local now = begin(p)

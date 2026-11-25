@@ -1080,7 +1080,7 @@ function Jobs:carryStep()
         return
     end
     self.view.reason = "Preparing carrying bags before collecting the next load."
-    Log.trace(self.interaction, "BAG", "item", Log.item(op.item, self.player), "mode", op.mode, "variant", op.variant, "why", op.why, "items", #work)
+    if Log.detailed then Log.trace(self.interaction, "BAG", "item", Log.item(op.item, self.player), "mode", op.mode, "variant", op.variant, "why", op.why, "items", #work) end
     local oldInventory = op.item:getInventory()
     self:action(op, function(ok, reason, code)
         local replacement = self.carry:complete(op, ok, code, revision)
