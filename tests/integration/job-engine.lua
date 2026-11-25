@@ -8,8 +8,11 @@ function Native.new(player) return setmetatable({player = player}, {__index = Na
 function Native:isBusy() return self.op ~= nil end
 function Native:isPlayerBusy() return false end
 function Native:takeoverReason() end
-function Native:extend() end
+function Native:obstacle() end
 function Native:reachable(container) return active.near(active.world:square(container)) end
+function Native:beside(square) return active.near(square) end
+Native.BATCH = 20
+function Native.light(item) return item.weight <= 0.1 end
 function Native:cancel() self.op = nil; return true end
 function Native:transferResult(op, id)
     if op.source and op.source:containsID(id) then return nil end
@@ -232,13 +235,15 @@ local function fixture()
             if f.onArrive then f.onArrive(key) end
             return true
         elseif op.kind == "transfer" then
-            if op.source == f.floor then
-                remove(op.item.placed.where.ground, op.item.placed)
-                op.item.placed = nil
-                refreshFloor()
-            else assert(remove(op.source.items, op.item), "The item left its source") end
-            assert(op.destination:hasRoomFor(f.player, op.item), "A transfer exceeded the destination")
-            op.destination.items[#op.destination.items + 1], op.item.container = op.item, op.destination
+            for _, item in ipairs(op.items or {op.item}) do
+                if op.source == f.floor then
+                    remove(item.placed.where.ground, item.placed)
+                    item.placed = nil
+                    refreshFloor()
+                else assert(remove(op.source.items, item), "The item left its source") end
+                assert(op.destination:hasRoomFor(f.player, item), "A transfer exceeded the destination")
+                op.destination.items[#op.destination.items + 1], item.container = item, op.destination
+            end
             op.resultItem = op.item
             if f.onTransfer then f.onTransfer(op) end
             return true
@@ -322,6 +327,26 @@ case("a filled bag lying on the floor is picked up whole, and hauled to its dest
     assert(crate:contains(bag) and #bag.inside.items == 1 and #tile.ground == 0)
 end)
 
+case("what is carried is read once for a whole load, not once per item", function(f)
+    local source = f.crate(f.square(5, 0), "source")
+    f.item(f.inventory, "Base.Bag", {bag = true})
+    for index = 1, 30 do f.item(source, "Base.Thing" .. index, {weight = 0.5}) end
+    local passes, original = 0, f.world.destinationPass
+    function f.world:destinationPass(...) passes = passes + 1; return original(self, ...) end
+    local status = f.run(f.request({kind = "inventory"}, {scope = "container", sourceContainer = source}))
+    assert(status.state == "finished" and status.done == 30)
+    assert(passes == 2, "Once for the plan and once for the job, not " .. passes)
+end)
+
+case("contents of a crate are dropped beside it when its own tile cannot be stood on", function(f)
+    local tile = f.square(5, 0)
+    function tile:isFree() return false end
+    local source = f.crate(tile, "source")
+    f.item(source); f.item(source)
+    local status = f.run(f.request({kind = "floor", ref = f.at}, {scope = "container", sourceContainer = source}))
+    assert(status.state == "finished" and status.done == 2 and #source.items == 0 and #f.inventory.items == 0)
+end)
+
 case("a hauled bag and the bags inside it take no further cargo", function(f)
     local source, target = f.crate(f.square(5, 0), "source"), f.crate(f.square(20, 0), "target")
     local outer = f.item(source, "Base.Duffel", {bag = true})
@@ -352,7 +377,7 @@ case("Clean leaves a bag whose Keep item stays inside it", function(f)
     f.state.keep[tostring(kept.id)] = true
     local status = f.run(f.request({kind = "trash"}, {includeBags = true}))
     assert(f.deleted[junk] and not f.deleted[bag] and not f.deleted[kept])
-    assert(crate:contains(bag) and kept.container == bag.inside and status.state == "finished_with_skips")
+    assert(crate:contains(bag) and kept.container == bag.inside and status.state == "finished")
 end)
 
 case("a filled bag in a bin does not block cleanup unless it holds a Keep or Favorite item", function(f)
@@ -581,12 +606,11 @@ case("menu questions about labels, bins and the vehicle come from saved state", 
     assert(f.world:rememberedVehicleLoaded())
 end)
 
-case("emptied and unusable labels leave no trace", function(f)
+case("emptied labels leave no trace", function(f)
     local world = World.new(f.player, {containerLabels = {["bag:1"] = {}, ["bag:2"] = {"native:Food", "custom:gone"}, ["bag:3"] = {"custom:gone"}},
         itemLabels = {["4"] = {"custom:gone"}, ["5"] = {}}})
     assert(world.state.containerLabels["bag:1"] == nil and world.state.itemLabels["5"] == nil)
-    assert(world:pruneLabels(function(id) return id ~= "custom:gone" end) == 3)
-    assert(#world.state.containerLabels["bag:2"] == 1 and world.state.containerLabels["bag:3"] == nil and world.state.itemLabels["4"] == nil)
+    assert(#world.state.containerLabels["bag:2"] == 2 and #world.state.itemLabels["4"] == 1)
 end)
 
 case("what a bin holds is not saved", function(f)

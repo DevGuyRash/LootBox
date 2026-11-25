@@ -17,7 +17,7 @@ local function show(player, title, detail, elapsed, status, note)
     if not ok then Log.fault(nil, "CompletionFeedback", failure) end
 end
 
-function Feedback.job(player, plan, view, measured, stamp)
+function Feedback.job(player, plan, view, measured)
     local destination = plan and plan.request and plan.request.destination.kind
     local condense = plan and plan.action == "condense"
     local kind = condense and "Condense" or destination == "trash" and "Cleanup"
@@ -44,7 +44,7 @@ function Feedback.job(player, plan, view, measured, stamp)
     elseif view.state == "failed" or view.state == "cancelled" then
         suffix, note, status = view.state == "failed" and " stopped" or " cancelled", view.reason, "stopped"
     end
-    show(player, kind .. suffix, detail, (measured.pausedAt or stamp) - measured.startedAt, status, note)
+    show(player, kind .. suffix, detail, measured.elapsed, status, note)
 end
 
 function Feedback.consume(player, state, reason, outcome, count, elapsed)
