@@ -325,9 +325,9 @@ end
 
 -- pcall that cannot hide a defect.
 function Log.guard(site, fn, ...)
-    local results = { pcall(fn, ...) }
-    if results[1] then return unpack(results, 2, table.maxn and table.maxn(results) or #results) end
-    Log.fault(nil, site, results[2])
+    local ok, a, b, c = pcall(fn, ...)
+    if ok then return a, b, c end
+    Log.fault(nil, site, a)
 end
 
 function Log.tick()
