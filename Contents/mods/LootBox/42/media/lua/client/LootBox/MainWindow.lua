@@ -55,7 +55,7 @@ function Main:go(id, context)
         body.background, body.border = false, false
         self:addChild(body)
         page = definition.build(self, body)
-        page.definition = definition
+        page.screen = definition
         self.pages[id] = page
     end
     for key, tab in pairs(self.tabs) do tab.current = key == id end
@@ -74,7 +74,7 @@ function Main:layout()
     local page = self.pages[self.current]
     if not page then return end
     K.place(page.body, rail + K.PAD, self:top() + 4, self.width - rail - 2 * K.PAD, self:bottom() - self:top() - 4)
-    page.definition.layout(page)
+    page.screen.layout(page)
 end
 
 function Main:prerender()
@@ -86,7 +86,7 @@ end
 function Main:update()
     K.Window.update(self)
     local page = self.pages[self.current]
-    if page and page.definition.tick then page.definition.tick(page) end
+    if page and page.screen.tick then page.screen.tick(page) end
 end
 
 -- A small "choose several" window over the current page.

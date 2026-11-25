@@ -138,6 +138,7 @@ local function saveDefinitions(nextDefinitions)
     if not ok then return nil, err end
     definitions, graph, merged, loadError = copy(nextDefinitions), nextGraph, nil, nil
     for _, instance in pairs(sessions) do instance.world.graph = graph end
+    Log.info(nil, "categories", "count", #definitions)
     return true
 end
 
@@ -536,16 +537,7 @@ function Instance:planner()
     return self.spare
 end
 
-local function blockedByRecovery(self)
-    local recovery = self.recovery:status()
-    local blocking = recovery.blocking
-    if blocking == nil then blocking = recovery.pending end
-    if blocking then return recovery.reason or "Recover your temporarily stored gear first" end
-end
-
 function Instance:preview(request)
-    local blocked = blockedByRecovery(self)
-    if blocked then return nil, blocked end
     local runner = self:planner()
     runner.graph = graph
     local plan, err = runner:preview(request)
@@ -555,10 +547,9 @@ function Instance:preview(request)
 end
 
 function Instance:previewCondense()
-    local blocked = blockedByRecovery(self)
-    if blocked then return nil, blocked end
     local options = App.getPreferences()
     local runner = self:planner()
+    if runner ~= self.jobs and self.jobs:status().canPause then return nil, "Pause or finish the current job before condensing" end
     runner.graph = graph
     local plan, err = runner:previewCondense({ rebalance = options.condenseRebalance,
         useUnequipped = options.condenseUseUnequipped, nested = options.condenseNested })
@@ -580,8 +571,6 @@ end
 function Instance:start(plan, options)
     local ok, err = clearConsumption(self)
     if not ok then return nil, err end
-    err = blockedByRecovery(self)
-    if err then return nil, err end
     local chosen = {}
     for key, value in pairs(options or {}) do chosen[key] = value end
     if chosen.reviewBins == nil then chosen.reviewBins = App.reviewPreference(nil, true) end
@@ -597,7 +586,7 @@ function Instance:start(plan, options)
     self.takeover = { runner = runner, plan = plan, options = chosen }
     Log.info(chosen.interaction, "TAKEOVER", "replaces", self.jobs.label, "state", self.jobs:status().state)
     if self.jobs:status().canPause then
-        ok, err = self.jobs:pause()
+        ok, err = self.jobs:pause("new job")
         if not ok then self.takeover = nil; return nil, err end
     end
     return self:advance()
@@ -650,7 +639,7 @@ function Instance:borrow(begin)
     if not ok then return nil, err end
     if self.borrowed then return nil, "Another action is about to start" end
     if not self.jobs:status().canPause then return begin() end
-    ok, err = self.jobs:pause()
+    ok, err = self.jobs:pause("eating, drinking or pouring")
     if not ok then return nil, err end
     self.borrowed = { begin = begin }
     return self:lend()
@@ -748,10 +737,10 @@ function Instance:cancel(silent)
     if self.consumption and self.consumption:isBusy() then return self.consumption:cancel(silent) end
     return self.jobs:cancel(silent)
 end
-function Instance:pause()
+function Instance:pause(trigger)
     self.takeover = nil
     if self.consumption and self.consumption:isBusy() then return nil, (self.consumption.name or "Til Full") .. " cannot be paused; cancel it instead" end
-    return self.jobs:pause()
+    return self.jobs:pause(trigger or "player")
 end
 function Instance:resume()
     self.problem = nil
@@ -806,7 +795,7 @@ function App.onKeyStartPressed(key)
     local instance = sessions[0]
     if not instance or App.escapeCloses(0) then return end
     if instance.consumption and instance.consumption:isBusy() then instance:cancel()
-    else instance:pause() end
+    else instance:pause("escape") end
 end
 
 -- OnPlayerUpdate also fires when the manager has never been opened. Defaults
