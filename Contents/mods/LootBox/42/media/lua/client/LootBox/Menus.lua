@@ -39,6 +39,8 @@ local icons = {
 }
 Menus.icons = icons
 
+local function iconOf(name) return getTexture((assert(icons[name], "missing LootBox icon " .. tostring(name)))) end
+
 local function call(object, method, ...)
     if not object then return nil end
     local ok, value = pcall(function(...)
@@ -79,7 +81,7 @@ function Node:row(icon, title, action, tip, texture)
     local menu = self:menu()
     local option = menu:addOption(title, nil, action)
     if not option then return nil end
-    option.iconTexture = texture or getTexture(assert(icons[icon], "missing LootBox icon " .. tostring(icon)))
+    option.iconTexture = texture or iconOf(icon)
     tooltip(option, title, tip)
     return option
 end
@@ -94,7 +96,7 @@ function Node:sub(icon, title, item)
     return node(function()
         local menu = self:menu()
         local option = menu:addOption(title, nil, nil)
-        if item then option.itemForTexture = item else option.iconTexture = getTexture(assert(icons[icon], "missing LootBox icon " .. tostring(icon))) end
+        if item then option.itemForTexture = item else option.iconTexture = iconOf(icon) end
         local child = ISContextMenu:getNew(menu)
         menu:addSubMenu(option, child)
         return child
@@ -381,7 +383,7 @@ local function containerRows(host, s, container, origin)
             rows[#rows + 1] = { icon = "belongs", title = "What belongs here (" .. fits .. ")", single = "Put in what belongs here (" .. fits .. ")",
                 run = go("put in labelled", request("inventory", "container", { ids = labels, types = {}, all = false }, { ref = container })) }
         end
-        if not facts.owned and s.world:countCarried(nil, container) > 0 then
+        if not facts.owned and (facts.capacity or 0) >= 20 and s.world:countCarried(nil, container) > 0 then
             rows[#rows + 1] = { icon = "all", title = "Everything I carry", single = "Put in everything I carry",
                 run = go("put in everything", request("inventory", "container", everything(), { ref = container })),
                 tip = "Worn, held, favorite and Keep items stay with you." }

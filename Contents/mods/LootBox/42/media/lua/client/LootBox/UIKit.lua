@@ -67,7 +67,7 @@ function K.wrap(text, width, font)
 end
 
 function K.escape(text)
-    return tostring(text or ""):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub("\r", ""):gsub("\n", " <LINE> ")
+    return (tostring(text or ""):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub("\r", ""):gsub("\n", " <LINE> "))
 end
 
 function K.place(widget, x, y, width, height)

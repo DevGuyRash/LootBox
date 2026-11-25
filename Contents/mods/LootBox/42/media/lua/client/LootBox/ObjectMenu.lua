@@ -78,6 +78,7 @@ local function prune(scope, menu, first, baseline, prefix, depth)
         if child then
             prune(scope, child, 1, baseline, path .. "\1", depth + 1)
             keep = #child.options > 0 or (about == "mine" and option.onSelect ~= nil)
+        elseif depth == 1 and baseline[path] then keep = false -- "Walk to" and the like, even when they name this object
         elseif about == "mine" then keep = true
         elseif about == "other" or baseline[path] then keep = false
         else keep = option.onSelect ~= nil or not baseline[path] end
