@@ -63,8 +63,7 @@ function Vessels.pour(flow, source, target, opts)
         flow.liters = flow.liters + litres
         return opts.done(litres)
     end
-    -- What arrived counts however the action ended: a pour that empties its
-    -- source makes the game stop it just before the server reports it done.
+    -- What arrived counts, however the action ended.
     local function ended(why)
         return function()
             local litres = gained()
@@ -76,7 +75,11 @@ function Vessels.pour(flow, source, target, opts)
     flow:act({ op = "pour", allow = opts.allow, limitMs = 300000, begin = function()
         require "Fluids/ISFluidTransferAction"
         local from, to = ISFluidContainer:new(a), ISFluidContainer:new(b)
-        ISTimedActionQueue.add(ISFluidTransferAction:new(flow.player, from, from:getFluidObject(), to, to:getFluidObject(), amount))
+        local action = ISFluidTransferAction:new(flow.player, from, from:getFluidObject(), to, to:getFluidObject(), amount)
+        -- Emptying its source makes the game stop a pour just before it is done.
+        local valid = action.isValid
+        action.isValid = function(pouring) return pouring:isStarted() or valid(pouring) end
+        ISTimedActionQueue.add(action)
     end }, function() flow:await(full, settled, ended()) end, function(why) flow:await(full, settled, ended(why), 1500) end)
 end
 

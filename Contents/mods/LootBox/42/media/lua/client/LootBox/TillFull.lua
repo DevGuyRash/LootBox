@@ -179,6 +179,9 @@ function TillFull:locate(record)
         if not holder then return nil, "It is on the ground beside you; pick it up first" end
         local ok, reason = self.world:consumptionSource(item, holder)
         if not ok then return nil, reason or GONE end
+        if not self.player:getInventory():hasRoomFor(self.player, item) then
+            return nil, place == "ground" and "You carry too much: it is at your feet" or "You carry too much to take it"
+        end
     end
     record.item = item
     return item, holder, place

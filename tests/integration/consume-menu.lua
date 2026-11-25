@@ -422,7 +422,7 @@ local function meal(f)
     apple.getThirstChange = function(self) return -self.quench end
     apple.getScriptItem = function() return { isCantEat = function() return false end } end
     apple.getRequireInHandOrInventory = function() end
-    local held = { getItems = function() return { size = function() return 0 end } end }
+    local held = { getItems = function() return { size = function() return 0 end } end, hasRoomFor = function() return true end }
     f.player.getInventory = function() return held end
     f.player.getCurrentSquare = function() end
     apple.source.getItemWithID = function(_, id) return id == 7 and apple or nil end

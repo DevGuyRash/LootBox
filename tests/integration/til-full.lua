@@ -113,6 +113,14 @@ for _, mp in ipairs({ false, true }) do
         assert(job.state == 'finished' and near(player.hunger, 0), job.reason)
     end)
 
+    case('says where the result is when it cannot be picked up', function()
+        player.hunger, Game.overloaded = 0.16, true
+        local shell = give(closed())
+        player.main.hasRoomFor = function(_, _, item) return item.fullType ~= 'Base.CanOpen' end
+        local job = Game.run(start({ shell }, 'food', can))
+        assert(job.state == 'cancelled' and job.reason:find('at your feet') and Game.consumed == 0, job.reason)
+    end)
+
     case('fetches a can from a bag before opening it', function()
         player.hunger = 0.16
         local bag = Game.item('Base.Bag')
