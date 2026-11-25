@@ -109,6 +109,10 @@ function Recovery.new(player, world, path)
         local ok, invalid = validate(document)
         if not ok then document, err = nil, invalid end
     end
+    -- Gear that was never moved is still with the player, so nothing is owed back.
+    local planned = document and document.pending
+    for _, entry in ipairs(planned and document.entries or {}) do planned = planned and not entry.touched end
+    if planned then document = nil end
     local self = setmetatable({player = player, world = world, path = path .. "/recovery", error = err, unreadable = err,
         receipt = document and document.pending and document or nil}, Recovery)
     self.reserved = reservedIdentities(self.receipt)
@@ -482,7 +486,7 @@ function Recovery:settle(op, ok, reason)
     if observed then ok, reason = true, nil
     elseif ok then ok, reason = false, "The native personal gear operation ended without its expected result" end
     candidate.intent = nil
-    if not ok then candidate.phase, candidate.reason = "blocked", reason or "Personal gear operation stopped; choose Recover personal gear to continue" end
+    if not ok then candidate.phase, candidate.reason = "blocked", reason or "Moving your gear stopped" end
     local saved, err = self:save(candidate)
     if not saved then return nil, err end
     return ok, reason

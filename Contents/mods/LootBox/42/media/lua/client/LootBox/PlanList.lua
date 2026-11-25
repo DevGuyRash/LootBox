@@ -1,13 +1,12 @@
 -- Turns a job plan into short, grouped rows: what moves where, what stays and
 -- why, and what is still unknown.
-local K = require "LootBox/UIKit"
 local Describe = require "LootBox/Describe"
 
 local PlanList = {}
 
 -- Engine notices that are true of every job and say nothing about this one.
-local boilerplate = { "Live capacity", "Native multiplayer does not", "Bin choice compares", "Floor items will be inspected",
-    "This shows the first arrangement", "Uninspected bins", "Cleanup permanently", "Continuing approves", "Useful bags will be prepared" }
+local boilerplate = { "Live capacity", "Native multiplayer does not", "Floor items will be inspected",
+    "This shows the first arrangement", "Useful bags will be prepared" }
 
 local function ordinary(text)
     for _, prefix in ipairs(boilerplate) do if text:sub(1, #prefix) == prefix then return true end end

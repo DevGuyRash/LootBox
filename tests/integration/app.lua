@@ -1,4 +1,5 @@
 package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.path
+package.loaded['TimedActions/ISTimedActionQueue'] = true
 
 -- World/action boundaries are doubles. The actual App, category graph, catalog,
 -- and data-only Store run together; native file I/O has a separate smoke check.
@@ -18,7 +19,8 @@ local worldName, username = "server:alpha/season-one", "Alice:one"
 local player = { getUsername = function() return username end, getPlayerNum = function() return 0 end }
 function getSpecificPlayer() return player end
 function getWorld() return { getWorld = function() return worldName end } end
-function getTimestampMs() return 0 end
+local clock = 0
+function getTimestampMs() return clock end
 function getAllItems()
     return { size = function() return 1 end, get = function()
         return { getObsolete = function() return false end, isHidden = function() return false end,
@@ -30,8 +32,8 @@ function getText(key) return key end
 Events = nil
 package.loaded["LootBox/World"] = { new = function(_, state)
     return { key = function(_, container) return container.id end, itemId = function(_, item) return item.id end,
-        discover = function() end, observeNearby = function() return false end,
-        protected = function(_, item) return state.keep[item.id] == true end, hasKnownBins = function() return false end,
+        _observe = function() end, observeNearby = function() return calls.seen == true end,
+        protected = function(_, item) return state.keep[item.id] == true end,
         rememberVehicle = function(_, vehicle)
             if not vehicle then return nil, "Vehicle unavailable" end
             state.vehicle = { id = 1, x = 1, y = 2, z = 0, script = "Base.Car" }
@@ -41,9 +43,10 @@ end }
 package.loaded["LootBox/Jobs"] = { new = function()
     calls.created = calls.created + 1
     return { status = function() return { state = jobState, hasJob = jobState ~= "idle" and jobState ~= "cancelled", canPause = jobState == "running",
-            canResume = jobState == "paused", canPreview = true } end, cancel = function() return true end,
+            canResume = jobState == "paused", canStart = true } end, cancel = function() return true end,
         tick = function() end,
         preview = function(_, request) calls.previews = calls.previews + 1; calls.request = request; return {request = request} end,
+        refusal = function() return calls.refusal end,
         start = function(_, plan, options) calls.starts = calls.starts + 1; calls.plan, calls.options = plan, options; return true end,
         pause = function() calls.pauses = calls.pauses + 1; jobState = "paused"; return true end,
         recoverPersonalGear = function() calls.recoveries = calls.recoveries + 1; return true end,
@@ -254,31 +257,77 @@ test("one damaged saved value costs only itself", function()
     local app = assert(App.get(0))
     local path = app.path
     local data = assert(Store.load(path))
-    data.trash = {good = {x = 1, y = 2, z = 0}, bad = {x = "east"}}
     data.containerLabels = {["crate:ok"] = {"native:Food", "custom:99999"}, ["crate:bad"] = "Food"}
     data.vehicle = {id = "broken"}
     assert(Store.save(path, data))
     assert(Store.save("LootBox/preferences", {contextMenus = false, retiredOption = true, jobBar = "sometimes"}))
     App.reset()
     app = assert(App.get(0))
-    assert(app.state.trash.good and not app.state.trash.bad and app.state.vehicle == nil)
+    assert(app.state.vehicle == nil)
     same(app:labels({id = "crate:ok"}), {"native:Food"}); same(app:labels({id = "crate:bad"}), {})
     local preferences = App.getPreferences()
     assert(preferences.contextMenus == false and preferences.jobBar == true and preferences.retiredOption == nil)
     assert(App.setPreferences({contextMenus = true}), "Preferences stay editable")
 end)
 
+test("an unreadable categories file costs no custom label, on disk or in memory", function()
+    App.reset()
+    local app = assert(App.get(0))
+    local custom = assert(App.saveCategory({name = "Tools I like", types = {"Example.Widget"}, includes = {}}))
+    assert(app:setLabels({id = "crate:mine"}, {custom, "native:Food"}) and app:setItemLabels(item, {custom}))
+    assert(app:setChecklist({ids = {custom}, types = {}}))
+    local kept = {}
+    for _, slot in ipairs({".a.txt", ".b.txt"}) do kept[slot], files["LootBox/categories" .. slot] = files["LootBox/categories" .. slot], "garbage" end
+    App.reset()
+    app = assert(App.get(0))
+    same(app:labels({id = "crate:mine"}), {custom, "native:Food"}); same(app:itemLabels(item), {custom}); same(app:getChecklist().ids, {custom})
+    assert(app:setLabels({id = "crate:mine"}, {custom}))
+    local fresh = assert(App.saveCategory({name = "New one", types = {}, includes = {}}))
+    assert(fresh ~= custom, "A new category must not take over an old label")
+    assert(app:setLabels({id = "crate:other"}, {"native:Food"}))
+    for slot, text in pairs(kept) do files["LootBox/categories" .. slot] = text end
+    App.reset()
+    app = assert(App.get(0))
+    same(app:labels({id = "crate:mine"}), {custom})
+    assert(App.category(custom).name == "Tools I like")
+end)
+
+test("what is seen along the way is saved at most every half minute, and when the game saves or ends", function()
+    App.reset()
+    local app = assert(App.get(0))
+    local writes, persist = 0, app.persist
+    app.state.trash = {}
+    function app:persist() writes = writes + 1; return persist(self) end
+    local function seeBin(name) app.state.trash[name] = 20; calls.seen = true; clock = clock + 1000; App.tick(); calls.seen = false end
+    clock = 1000000
+    for index = 1, 29 do seeBin("bin:" .. index) end
+    assert(writes == 0)
+    for _ = 1, 3 do seeBin("bin:30") end
+    assert(writes == 1)
+    seeBin("bin:31"); assert(app:start({}) and writes == 1, "Starting a job is not a reason to write")
+    App.save(); App.save(); assert(writes == 2)
+    seeBin("bin:32"); App.reset()
+    assert(writes == 3 and App.get(0).state.trash["bin:32"])
+    clock = 0
+end)
+
 -- Job ownership: the engine is a double with real pause/resume states.
 local Runner = {}
 Runner.__index = Runner
 local function runner(state) return setmetatable({state = state or "idle", log = {}}, Runner) end
-function Runner:status() return {state = self.state, hasJob = self.state ~= "idle", canPause = self.state == "running", canResume = self.state == "paused",
-    canPreview = self.state == "idle", done = 3, total = 9} end
+function Runner:status() return {state = self.state, intent = self.intent, sourceContainer = self.sourceContainer, carried = self.carried, hasJob = self.state ~= "idle", canPause = self.state == "running", canResume = self.state == "paused",
+    canStart = self.state == "idle", done = 3, total = 9} end
 function Runner:pause(trigger) self.log[#self.log + 1] = "pause"; self.trigger = trigger; self.state = self.settles == false and "pausing" or "paused"; return true end
 function Runner:resume() self.log[#self.log + 1] = "resume"; self.state = "running"; return true end
 function Runner:cancel() self.log[#self.log + 1] = "cancel"; self.state = "idle"; return true end
 function Runner:preview(request) self.log[#self.log + 1] = "preview"; return {request = request, moves = {{}}} end
-function Runner:start() self.log[#self.log + 1] = "start"; self.state = "running"; return true end
+function Runner:refusal() return self.refuses end
+function Runner:start(plan)
+    self.log[#self.log + 1] = "start"
+    if self.fails then return nil, self.fails end
+    self.state, self.intent, self.sourceContainer = "running", plan.request.shortcutIntent, plan.request.sourceContainer
+    return true
+end
 function Runner:tick() end
 local function working(state)
     App.reset()
@@ -305,6 +354,63 @@ test("a new job sets the running one aside, and it can be resumed afterwards", f
     assert(app:status().previous.label == "Clean kitchen")
     app.jobs.state = "idle"
     assert(app:resumePrevious() and app.jobs == old and old.state == "running" and app.parked == nil)
+end)
+
+test("pressing the same toolbar button again resumes its paused job and leaves a running one alone", function()
+    local app = working("running")
+    local job = app.jobs
+    job.intent = "matching:nearby"
+    local again = {shortcutIntent = "matching:nearby"}
+    local found, outcome = app:again(again)
+    assert(found and outcome == "running" and #job.log == 0)
+    job.state = "paused"
+    found, outcome = app:again(again)
+    assert(found and outcome == "resumed" and job.state == "running" and app.jobs == job and app.parked == nil)
+    assert(not app:again({shortcutIntent = "matching:displayed"}), "Another button is another action")
+    assert(not app:again({}), "Menus always start fresh")
+    job.intent, job.sourceContainer = "smart:all", "crate A"
+    assert(app:again({shortcutIntent = "smart:all", sourceContainer = "crate A"}))
+    assert(not app:again({shortcutIntent = "smart:all", sourceContainer = "crate B"}), "Another displayed container is another action")
+    job.state = "idle"
+    assert(not app:again({shortcutIntent = "smart:all", sourceContainer = "crate A"}), "A finished job is not resumed")
+end)
+
+test("pressing the button of a job that was set aside brings it back, whatever is running", function()
+    local app = working("running")
+    local first = app.jobs
+    first.intent = "condense"
+    assert(app:start(assert(app:preview(want))))
+    local second = app.jobs
+    assert(app.parked == first and second.state == "running")
+    local found, outcome = app:again({shortcutIntent = "condense"})
+    assert(found and outcome == "resumed" and app.jobs == first and first.state == "running")
+    assert(second.state == "paused" and app.parked == second)
+end)
+
+test("a newer click of one button replaces its older job, unless that one is carrying something", function()
+    for carried, parked in pairs({[0] = false, [3] = true}) do
+        local app = working("paused")
+        local old = app.jobs
+        old.intent, old.sourceContainer, old.carried = "smart:all", "crate A", carried
+        local fresh = {scope = "container", shortcutIntent = "smart:all", sourceContainer = "crate B", destination = {kind = "inventory"}, filter = {all = true}}
+        assert(app:start(assert(app:preview(fresh))))
+        assert(app.jobs ~= old and app.jobs.state == "running" and (app.parked == old) == parked)
+        assert(old.state == (parked and "paused" or "idle"))
+    end
+end)
+
+test("a job that cannot start does not disturb the one in progress", function()
+    local app = working("running")
+    local old = app.jobs
+    local plan = assert(app:preview(want))
+    app.spare.refuses = "Get out of the vehicle before starting this job"
+    local ok, err = app:start(plan)
+    assert(ok == nil and err == app.spare.refuses and old.state == "running" and #old.log == 0 and app.jobs == old)
+    app.spare.refuses, app.spare.fails = nil, "Preview this job again before starting"
+    ok, err = app:start(plan)
+    assert(ok == nil and err:find("Preview", 1, true) and app.jobs == old and old.state == "running" and app.parked == nil)
+    old.state = "paused"
+    assert(not app:start(plan) and old.state == "paused", "A job the player paused stays paused")
 end)
 
 test("takeover waits for the old job's native action to settle", function()

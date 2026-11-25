@@ -28,6 +28,7 @@ local function encodeValue(value, output, visiting, depth, budget)
     local kind = type(value)
     if kind == "string" then
         if #value * UNIT_WIDTH > MAX_BYTES - budget.bytes then error("Saved data exceeds the local storage limit") end
+        if not value:find("[^ -~]") then append("r" .. #value .. ":" .. value); return end
         local parts, format = {}, UNIT_WIDTH == 4 and "%04x" or "%02x"
         for index = 1, #value do
             local unit = value:byte(index)
@@ -114,6 +115,12 @@ function Store.decode(value)
                 parts[#parts + 1] = string.char(tonumber(text:sub(index, index + width - 1), 16))
             end
             return table.concat(parts)
+        elseif tag == "r" then
+            local length = natural(":")
+            local text = body:sub(position, position + length - 1)
+            if #text ~= length then error("Invalid saved string") end
+            position = position + length
+            return text
         elseif tag == "y" then return true
         elseif tag == "n" then return false
         elseif tag == "d" then

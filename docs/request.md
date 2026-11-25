@@ -196,3 +196,11 @@ Claude was asked in November 2026:
 "also, I keep noticing the logging is extremely terrible (for further improving the mod itself), doesn't tell us enough about state of interactions, intent, what happened, state of containers and objects, state of player, etc. Only abstract things that don't truly help."
 
 "another thing that's broken too is adding contextual commands that exist when you right click in a container bck to right clicking a container icon in the loot pane or it's pill/tab. It just adds global only when all it should do is just make available the original contextual options"
+
+## Finding what an action made, and a full logic sweep
+
+Asked of Claude later in November 2026:
+
+"so something really hard to get right too specifically for this was the client-side logic of locating when you hit, like, for example, open and eat till full, or open and drink till full, or when you try to refill a jug that's already connected to a water dispenser. When the single action, because I guess that it spawns a new item technically, and I needed single source of truth reusable logic that can locate that item in client side. I wanted to reuse that same logic for multiple things, such as all of those."
+
+"Also, if you can make the clean option, which, searches for trash cans or remembers them and all that, if you can do the same passes over those, as well as the overall sorting and the compact and whatnot, and all, basically the entire thing. This is a code sweep as well as an abstract logic sweep, questioning why things were even done like that if there's a better way to do it."

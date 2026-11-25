@@ -3,7 +3,6 @@ require "ISUI/ISTextBox"
 
 local K = require "LootBox/UIKit"
 local Selection = {}
-local panes = setmetatable({}, { __mode = "k" })
 local dialogs = {}
 local scopeDepth, scopeBase = 0, nil
 local installed = false
@@ -56,7 +55,7 @@ local function revealSelection(pane, state)
 end
 
 local function invoke(pane, previous, method, ...)
-    local state = panes[pane]
+    local state = pane.lootBoxSelection
     local args = pack(...)
     if method == "restoreSelection" and state.partial then
         args[1] = normalizeSelection(pane, args[1])
@@ -84,8 +83,8 @@ end
 
 function Selection.attach(pane)
     if not pane then return end
-    local state = panes[pane]
-    if not state then state = { wrappers = {} }; panes[pane] = state end
+    local state = pane.lootBoxSelection
+    if not state then state = { wrappers = {} }; pane.lootBoxSelection = state end
     for _, name in ipairs({ "selectIndex", "onMouseDown", "restoreSelection", "renderdetails" }) do
         local previous = pane[name]
         if previous and previous ~= state.wrappers[name] then
@@ -174,7 +173,7 @@ function Selection.apply(target, text)
     local group, problem = currentGroup(target)
     if not group then return nil, problem end
     Selection.attach(target.pane)
-    panes[target.pane].partial = true
+    target.pane.lootBoxSelection.partial = true
     target.pane:refreshContainer()
     group, problem = currentGroup(target)
     if not group then return nil, problem end
@@ -182,7 +181,7 @@ function Selection.apply(target, text)
     target.maxCount = #members
     if count > #members then return nil, "Only " .. tostring(#members) .. " items remain. Choose a smaller amount." end
     local pane, selected = target.pane, {}
-    local state = panes[pane]
+    local state = pane.lootBoxSelection
     local views = gridView(pane)
     if count < #members then
         state.cap = math.max(state.cap or scopeBase or ISInventoryPane.MAX_ITEMS_IN_STACK_TO_RENDER, count + 1)

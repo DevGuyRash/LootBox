@@ -52,12 +52,12 @@ Help.topics = {
         request = request("room", "vehicle") },
     { id = "clean", title = "Clean up", summary = "Throw things away in real trash cans.",
         steps = {
-            "Walk past a trash can once so LootBox knows it.",
+            "Walk past a trash can once so LootBox knows it. It uses the cans within 150 tiles.",
             "Right-click the floor and choose LootBox, Around here, This room, Throw everything away. Or right-click one container and choose Throw away contents.",
-            "Your character fills the can, empties it, and carries on until the room is clear. A bigger or closer can is chosen as needed.",
-            "Emptying a can deletes everything in it. Turn on Ask at each trash can in Settings if you want to check first.",
+            "Your character fills the can, empties it, and carries on until the room is clear. The nearest can is used, or a bigger one close by when the load is big.",
+            "Emptying a can deletes everything in it. Turn on Ask at each trash can in Settings to be asked whenever a can holds something you have not agreed to lose.",
         },
-        notes = { "A can holding a Keep or favorite item is never emptied.", "Something too heavy to carry can wait while your own gear is set aside. Fetch my gear brings it back." },
+        notes = { "A can holding a Keep or favorite item is never emptied.", "If no can works, the job pauses with your load. Resume tries again.", "Something too heavy to carry can wait while your own gear is set aside. Fetch my gear brings it back." },
         request = request("room", "trash", true) },
     { id = "condense", title = "Condense bags", summary = "Lower your encumbrance without dropping anything.",
         steps = {

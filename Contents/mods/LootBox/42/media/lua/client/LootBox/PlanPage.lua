@@ -448,7 +448,7 @@ function Page.toMenu(page)
         end
     end
     checked(menu, K.option(menu, "The floor here", to({ kind = "floor" })), destination.kind == "floor")
-    if app.world:hasKnownBins() then
+    if app.world:deletionAllowed() and #app.world:knownBins() > 0 then
         checked(menu, K.option(menu, "A trash can (deletes)", to({ kind = "trash" })), destination.kind == "trash")
     end
 end

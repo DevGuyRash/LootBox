@@ -1,4 +1,4 @@
-local Feature=require "LootBox/MountedDispenser"
+local Feature=require "LootBox/Dispenser"
 local Inventory=require "LootBox/PourInventory"
 local Rows=require "LootBox/FluidRows"
 local Log=require "LootBox/Log"
@@ -13,7 +13,7 @@ end
 
 local function captureChoices(index,app)
     local p=getSpecificPlayer(index)
-    if not p or not getCell or not p.getCurrentSquare or isClient() and not Feature.mountedMPEnabled() then return {} end
+    if not p or not getCell or not p.getCurrentSquare then return {} end
     local here,cell=p:getCurrentSquare(),getCell()
     if not here or not cell then return {} end
     local result={}
@@ -34,21 +34,21 @@ local function captureChoices(index,app)
     end end
     return result
 end
-function Menu.nearby(index,app) return Log.guard("MountedDispenserMenu.nearby",captureChoices,index,app) or {} end
+function Menu.nearby(index,app) return Log.guard("DispenserMenu.nearby",captureChoices,index,app) or {} end
 function Menu.targets(choices,source,world)
     local result={}
     if source and source.scope~="loot" and source.pourSignature and not Inventory.reserved(world,source.item) then
         for _,choice in ipairs(choices) do
-            if Log.guard("MountedDispenser.canFill",Feature.canFill,source,choice.bottle) then result[#result+1]=choice end
+            if Log.guard("Dispenser.canFill",Feature.canFill,source,choice.bottle) then result[#result+1]=choice end
         end
     end
     return result
 end
 
-local function start(ctx,anchor,donor,bottle,origin)
+local function start(ctx,anchor,donors,bottle)
     return function(id)
         anchor.interaction=id
-        return ctx.app:refillDispenser(anchor,donor,bottle,origin)
+        return ctx.app:refillDispenser(anchor,donors,bottle)
     end
 end
 
@@ -64,7 +64,7 @@ function Menu.rows(ctx,choices,source)
         if how=="mixes" then title=title.." (mixes with "..(liquid or "other liquid")..")" end
         rows[#rows+1]={title=title,relation=how,texture=TANK,
             tip="Takes the bottle off the stand, pours this vessel into it and fits it again.",
-            start=start(ctx,choice.anchor,source,bottle,"inventoryShortcuts")}
+            start=start(ctx,choice.anchor,source,bottle)}
     end
     return rows
 end
@@ -81,7 +81,7 @@ local function donorRows(ctx,anchor,bottle,donors,truncated)
         if how=="mixes" then title=title.." (mixes with "..(contents(bottle.state) or "other liquid")..")" end
         rows[#rows+1]={title=title,kind=Inventory.vesselName(e)..(liquid and " ("..liquid..")" or ""),place=e.place,item=e.item,
             tip="From "..e.label..". Takes the bottle, pours and fits the same bottle again.",
-            start=start(ctx,anchor,e,bottle,"worldShortcuts")}
+            start=start(ctx,anchor,e,bottle)}
         if how~="mixes" and not truncated then
             local group
             for _,known in ipairs(liquids) do if Inventory.sameLiquid(known.mix,e.pourSignature) then group=known;break end end
@@ -95,7 +95,7 @@ local function donorRows(ctx,anchor,bottle,donors,truncated)
         if #group.sources>1 and anchor.kind=="mounted" then
             table.insert(rows,1,{title="Fill from all "..group.name.." ("..#group.sources..")",texture=TANK,
                 tip="Takes the bottle once and pours these in order until it is full, then fits it again.",
-                start=start(ctx,anchor,group.sources,bottle,"worldShortcuts")})
+                start=start(ctx,anchor,group.sources,bottle)})
         end
     end
     return rows
@@ -104,7 +104,7 @@ end
 local function add(given)
     local player=getSpecificPlayer(given.playerIndex)
     local anchor=player and Feature.capture(player,given.objects or {})
-    if not anchor or anchor.kind=="mounted" and isClient() and not Feature.mountedMPEnabled() then return false end
+    if not anchor then return false end
     local app=given.app
     local ctx={playerIndex=given.playerIndex,app=app,tooltip=given.tooltip,interaction=given.interaction,origin="menu.world",click={}}
     local snapshot=Inventory.snapshot(player,app.world,nil,nil)
@@ -142,5 +142,5 @@ local function add(given)
         "sources",total,"added",added)
     return added
 end
-function Menu.add(ctx) return Log.guard("MountedDispenserMenu.add",add,ctx)==true end
+function Menu.add(ctx) return Log.guard("DispenserMenu.add",add,ctx)==true end
 return Menu

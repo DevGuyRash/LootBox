@@ -31,7 +31,7 @@ lua5.1 tests/integration/pour-move.lua "$STOCK_MEDIA_LUA_DIR"
 
 Stock Build 42 dropped vessels transfer their fluid component to the world object and pour in place. The separate item-owned Ground fallback uses the stock inventory transfer and the stock Place Item timed action. Run `lua5.1 tests/integration/pour-ground.lua` for native-authority doubles and optionally supply the pinned stock `ISDropWorldItemAction.lua` path. These cases cover an exact original square and placement pose, native pickup ACK, delayed projection, owned-queue cancellation, and blocked or ambiguous returns. Multiplayer placement observes the world and inventory mirrors; stock provides no per-placement acknowledgement to this local wrapper. A real ordinary client/server repeat is still required.
 
-The fluid lane exercises the same constructor, SP completion and MP delayed-field observation as the [stock B42.22 action](https://github.com/Project-Zomboid-Community-Modding/ProjectZomboid-Vanilla-Lua/blob/3b21e63fe4905a0a300a4021d05d01a9bb534729/shared/Fluids/ISFluidTransferAction.lua). It is not a dedicated-server or UI playthrough. Use the [Pour Into acceptance plan](pour-acceptance.md) on licensed stock client/server and clean default LuaBuddy installations before claiming those player paths work.
+The fluid lane exercises the same constructor, SP completion and MP delayed-field observation as the [stock B42.22 action](https://github.com/Project-Zomboid-Community-Modding/ProjectZomboid-Vanilla-Lua/blob/3b21e63fe4905a0a300a4021d05d01a9bb534729/shared/Fluids/ISFluidTransferAction.lua).
 
 ## Native interpreter and file APIs
 
@@ -329,11 +329,6 @@ For a release, replay these against the exact packaged files in a disposable sav
 4. With the can and regular opener in main, validate one stock opening action and only its own edible output. No knife opening with the risk switch off. When enabled, remove the opener, provide an eligible sharp tool and adjacent legal surface; confirm the game owns injury/tool wear and no walk is queued. Never use a production save to test this.
 5. In multiplayer confirm server-observed food/non-water beverage changes and no duplicate drink. For nested pure water require the same bottle ID, correct type, verified prior parent, real stock transactions in both directions, and both a matching volume drop and thirst improvement before returning. For cans verify ordinary safe and opted-in risky recipes on the server, exact can removed, no automatically chained bite, and a separate ready-food choice only after native completion plus input removal. Test interruption and delayed or missing acknowledgement. Do not claim server results from client logs alone.
 
-### Multiplayer carried-supply boundary
-
-The portable lane models the public Build 42.22.2 server/client contracts separately, including native transfer Done versus Rejected, late remove/add packets that can reconstruct the item with the same ID, item/stat delivery in either order, lost acknowledgements, option changes, foreign actions, and unsafe or ambiguous inputs. It does not simulate a second water sip or create server inventory. Stock handcraft binds the one selected can and tool in manual mode with an eat percentage of zero. The stock acknowledgement does not include an output ID: the automation requires native completion and absence of the exact original ID from carried inventory, then ends the craft without counting food. A later hunger assessment may choose ready-to-eat food under the normal policy. These fixtures are not a two-process multiplayer gameplay pass.
-
-
 ## 0.9.16 active-container mouse input and scoped world picking
 
 The native Mod Options tickbox is the only stored value for click focus. On stock single-container lists a displayed row already belongs to the active source. NeatUI keeps its own grid, selection, drag handling, section detection and Combined mode. The new hooks run on mouse gestures only; the normal stock selector remains responsible for access, exploration, the sidebar and selection notifications. Recycled buttons are rebound by physical container identity after native refresh. The synthetic fixture-menu scope supplies no world-scaled cursor pick, without changing the raw popup position or real world-menu dispatch.
@@ -370,3 +365,27 @@ Played in isolated 42.22.2 clients with mouse input:
 | Windows | Every page in game and in the main menu; 1280x720, 1600x900 and 1920x1080 with small, 3x and 4x fonts; Escape closes. |
 
 Not exercised: controller, split screen, real modded menus other than NeatUI, vehicle relocking and gear recovery in live multiplayer.
+
+## Result finding, engine, packing and cleaning sweep (November 25, 2026)
+
+`python3 tools/verify.py --game ...` passes every suite in Lua 5.1 and in the installed 42.22.2 Kahlua. `tests/support/game.lua` models the stock queue, the engine's action loop (including starting an action inside the call that queues it, and clearing the stack after a walk, run or aim), and a server that sends changes in order and then reports an action done. `til-full`, `dispenser` and `pouring` drive whole flows over it in both modes; `job-engine` drives whole jobs; Condense is compared with brute force.
+
+Played on a disposable dedicated 42.22.2 server as an ordinary non-admin player. The first version (main at `db46ee6`) was played first: opening a can or refilling a dispenser was cancelled by one unrelated nail arriving meanwhile, and a ration that was drunk was reported as failed.
+
+| Path, with a nail arriving mid-action where it matters | Observed |
+| --- | --- |
+| Open and eat: chili, beans, unlabelled can, stack of chili | Finished, right item, through a relay adding 90-150 ms each way and 1% loss |
+| Dispenser: one source; two sources with a twin bottle already carried | 6 + 3.8 + 3 = 12.8 L on the server; the twin untouched |
+| Dispenser after its source emptied, interrupted pour | Bottle back on its stand |
+| Overloaded opening | Result found at the feet; the message that says so came afterwards and is covered by tests |
+| Two bottles to the last drop | Two portions, confirmed by the need |
+| Shelf bottles poured into and returned; main, worn bag and shelf bottles filled from a sink | All confirmed on the server |
+| 60 nails and 6 planks from a shelf | 66 of 66; the nails in three actions |
+| Table to dresser, both in reach | Straight across |
+| Put away into labelled counter and wardrobe | One stop each |
+| Condense | Bag filled to exactly 15 of 15; a second click moved nothing |
+| Clean a room into an outdoor can | 23 of 23, one trip, can emptied |
+
+Single player: open and eat, canned milk, sardines, refill (a ration was opened and the game auto-drank it; reporting that as done came afterwards). A paused game no longer uses up a step's time. After the review fixes to queue handling, opening, refilling and draining bottles were replayed on the server.
+
+Not exercised live: controller, split screen, masks, automatic intake, vehicles, gear staging, huge buildings, other modded menus. A refitted dispenser may show a stale amount on a lagging client until the area reloads; the server's amount is right, and the stock actions do the same.

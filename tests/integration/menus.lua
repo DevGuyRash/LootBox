@@ -48,7 +48,7 @@ package.loaded["LootBox/ContainerFocus"] = {select = function() return false end
 package.loaded["LootBox/PaneClicks"] = {attach = function() end}
 package.loaded["LootBox/ConsumeMenu"] = {add = function() end}
 package.loaded["LootBox/PourMenu"] = {add = function() end}
-package.loaded["LootBox/MountedDispenserMenu"] = {add = function() end}
+package.loaded["LootBox/DispenserMenu"] = {add = function() end}
 local Menus = require "LootBox/Menus"
 Menus.install({act = function(_, request, options) f.acted, f.options = request, options end, say = function(_, text) f.said = text end,
     open = function(_, page, context) f.opened, f.openContext = page, context end, showJob = function() f.shown = true end})
@@ -83,7 +83,7 @@ local function setup()
     local world = {graph = {list = function() return {} end, matches = function() return false end}}
     function world:owns(c) return c.facts.owned end
     function world:containerFacts(c) return c.facts end
-    function world:hasKnownBins() return f.bins == true end
+    function world:binDistance() return f.bins and 12 or nil end
     function world:hasStorageLabels() return f.storage == true end
     function world:storageAccepts() return f.storage == true end
     function world:rememberedVehicleLoaded() return f.car == true end
@@ -185,7 +185,18 @@ test("loot items offer taking only when there is more than what was clicked", fu
     local menu = newMenu()
     Menus.inventoryMenu(0, menu, {item("Nails", crate)})
     local t = tree(menu)
-    assert(has(t, "All Nails (5) > Take") and has(t, "All Nails (5) > Take from all open containers (7)"))
+    assert(has(t, "All Nails (5) > Take") and has(t, "All Nails (5) > Take from all open containers (7)") and not has(t, "Throw"))
+    f.bins = true
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", crate)})
+    t = tree(menu)
+    has(t, "All Nails (5) > Throw away").onSelect()
+    assert(f.acted.scope == "container" and f.acted.sourceContainer == crate and f.acted.destination.kind == "trash" and f.acted.filter.types[1] == "Base.Nails")
+    crate.facts.kind = "bin"
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", crate)})
+    assert(not has(tree(menu), "Throw"), "It is already in a trash can")
+    crate.facts.kind, f.bins = "fixture", nil
     crate.facts.types["Base.Nails"], shelf.facts.types["Base.Nails"] = 1, nil
     menu = newMenu()
     Menus.inventoryMenu(0, menu, {item("Nails", crate)})
@@ -216,6 +227,25 @@ test("a container offers only what its contents allow", function()
     assert(has(t, "Take everything (4)") and has(t, "Throw away contents (4)") and has(t, "Move contents > The floor"))
     has(t, "Take everything (4)").onSelect()
     assert(f.acted.scope == "container" and f.acted.sourceContainer == crate and f.acted.destination.kind == "inventory")
+    assert(f.acted.includeBags == false, "A filled bag is taken as it is, like any other item")
+    f.checklist = {ids = {}, types = {"Base.Nails"}}; f.matching = 2
+    menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    has(tree(menu), "Take my loot list (2)").onSelect()
+    assert(f.acted.includeBags == true, "Only a search looks inside bags")
+end)
+
+test("contents are dropped where the player can stand, not inside the fixture", function()
+    local crate = container("crate", {takeable = 4, types = {["Base.Nails"] = 4}})
+    open(crate)
+    local solid, free = {isFree = function() return false end}, {isFree = function() return true end}
+    for tile, expected in pairs({[solid] = f.square, [free] = free}) do
+        local menu = newMenu()
+        Menus.containerMenu(0, menu, crate, tile)
+        local row = has(tree(menu), "Move contents > The floor") or has(tree(menu), "Drop contents here")
+        row.onSelect()
+        assert(f.acted.destination.kind == "floor" and f.acted.destination.ref == expected)
+    end
 end)
 
 test("a locked container, and the player's own inventory, get no destructive or useless rows", function()

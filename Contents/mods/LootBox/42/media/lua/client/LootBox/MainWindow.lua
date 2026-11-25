@@ -1,6 +1,5 @@
 -- One window, one rail, one thing per page.
 local K = require "LootBox/UIKit"
-local App = require "LootBox/App"
 local Picker = require "LootBox/Picker"
 local Lists = require "LootBox/ListPages"
 local Info = require "LootBox/InfoPages"

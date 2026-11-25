@@ -7,6 +7,7 @@ require "ISUI/ISToolTip"
 local App = require "LootBox/App"
 local Catalog = require "LootBox/Catalog"
 local Describe = require "LootBox/Describe"
+local Facts = require "LootBox/Facts"
 local Log = require "LootBox/Log"
 local Selection = require "LootBox/Selection"
 local ObjectMenu = require "LootBox/ObjectMenu"
@@ -15,8 +16,6 @@ local PaneClicks = require "LootBox/PaneClicks"
 
 local Menus = {}
 local UI
-local wrapped = setmetatable({}, { __mode = "k" })
-local invoking = setmetatable({}, { __mode = "k" })
 local ownNoItems = false
 
 local icons = {
@@ -182,17 +181,20 @@ local function session(playerIndex)
     return { playerIndex = playerIndex, player = player, app = app, world = app.world, preferences = App.getPreferences() }
 end
 
+-- Throwing things away needs a can close enough to walk to.
+local function throwTip(away) return "Carried to a trash can and deleted for good. Nearest known can: " .. Facts.awayText(away) .. "." end
+
 local function listFilter(app)
     local list = app:getChecklist()
     return #list.ids + #list.types > 0 and list or nil
 end
 
 local function everything() return { ids = {}, types = {}, all = true } end
-local function oneType(fullType) return { ids = {}, types = { fullType }, all = false } end
 local function oneCategory(id) return { ids = { id }, types = {}, all = false } end
 
+-- Taking everything takes a bag with what is in it.
 local function request(scope, kind, filter, extra)
-    local result = { scope = scope, includeInventory = false, includeBags = true, filter = filter, sourceLabels = {}, destination = { kind = kind, labels = {} } }
+    local result = { scope = scope, includeInventory = false, includeBags = not (kind == "inventory" and filter.all), filter = filter, sourceLabels = {}, destination = { kind = kind, labels = {} } }
     for key, value in pairs(extra or {}) do
         if key == "ref" or key == "mode" then result.destination[key] = value else result[key] = value end
     end
@@ -221,7 +223,11 @@ local function ask(s, origin, label, clicked, action)
     end
 end
 
-local function floorHere(s) return s.square or s.player:getCurrentSquare() end
+-- Nobody can stand where a fixture is, so its contents are dropped at the player's feet.
+local function floorHere(s)
+    if s.square and call(s.square, "isFree", false) == true then return s.square end
+    return s.player:getCurrentSquare()
+end
 
 -- The job in progress ------------------------------------------------------
 
@@ -403,9 +409,9 @@ local function containerRows(host, s, container, origin)
         group(host, "putMenu", "Put in", rows)
     end
 
-    if has and facts.kind ~= "main" and facts.kind ~= "bin" and s.world:hasKnownBins() then
-        host:row("trash", "Throw away contents" .. count, go("throw away contents", request("container", "trash", everything(), from)),
-            "Carried to a trash can and deleted for good.")
+    local away = has and facts.kind ~= "main" and facts.kind ~= "bin" and s.world:binDistance()
+    if away then
+        host:row("trash", "Throw away contents" .. count, go("throw away contents", request("container", "trash", everything(), from)), throwTip(away))
     end
     labelRows(host, s, container, facts)
     presetRows(host, s, function(setup) return setup.scope == "container" or setup.destination.kind == "container" end,
@@ -426,9 +432,9 @@ end
 -- What can be done with "all of these": one rule set for a type, a selection of
 -- types, a game category and a custom category.
 local function allRows(s, what, label, carried, total, picked, source, target, descriptor)
-    local rows, clicked = {}, what.clicked
-    local function add(icon, title, single, made)
-        rows[#rows + 1] = { icon = icon, title = title, single = single, run = act(s, "menu.item", single, made, clicked) }
+    local rows, clicked, away = {}, what.clicked, s.world:binDistance()
+    local function add(icon, title, single, made, tip)
+        rows[#rows + 1] = { icon = icon, title = title, single = single, run = act(s, "menu.item", single, made, clicked), tip = tip }
     end
     local beyond = total > picked
     if carried then
@@ -443,7 +449,7 @@ local function allRows(s, what, label, carried, total, picked, source, target, d
             add("vehicle", "To my vehicle", "Haul all " .. label .. " to my vehicle", request("inventory", "vehicle", what.filter))
         end
         if beyond then add("drop", "Drop", "Drop all " .. label, request("inventory", "floor", what.filter, { ref = floorHere(s) })) end
-        if s.world:hasKnownBins() then add("trash", "Throw away", "Throw away all " .. label, request("inventory", "trash", what.filter)) end
+        if away then add("trash", "Throw away", "Throw away all " .. label, request("inventory", "trash", what.filter), throwTip(away)) end
     else
         if beyond then add("take", "Take", "Take all " .. label, request("container", "inventory", what.filter, { sourceContainer = source })) end
         if what.everywhere and what.everywhere > total then
@@ -454,6 +460,9 @@ local function allRows(s, what, label, carried, total, picked, source, target, d
         if mine > 0 and storage(source) then
             add("put", "Put mine in here (" .. mine .. ")", "Put my " .. label .. " in here (" .. mine .. ")",
                 request("inventory", "container", what.filter, { ref = source }))
+        end
+        if away and what.kind ~= "bin" then
+            add("trash", "Throw away", "Throw away all " .. label, request("container", "trash", what.filter, { sourceContainer = source }), throwTip(away))
         end
     end
     return rows
@@ -499,7 +508,7 @@ local function itemRows(host, s, items, item)
     local total, mine, everywhere = ofTypes(order)
     local label = #order == 1 and tostring(item:getName()) or (#order .. " selected types")
     group(host, "all", "All " .. label .. " (" .. total .. ")",
-        allRows(s, { filter = { ids = {}, types = order, all = false }, clicked = clicked, mine = mine, everywhere = everywhere },
+        allRows(s, { filter = { ids = {}, types = order, all = false }, clicked = clicked, mine = mine, everywhere = everywhere, kind = facts and facts.kind },
             label .. " (" .. total .. ")", carried, total, picked, source, target, descriptor), item)
 
     if #order == 1 and s.preferences.categoryShortcuts then
@@ -515,7 +524,7 @@ local function itemRows(host, s, items, item)
                 local name = App.categoryName(entry.id)
                 local open = carried and 0 or sumOpen(s, function(f) return f.categories and f.categories[entry.id] or 0 end)
                 group(host, "category", "All " .. name .. " (" .. amount .. ")",
-                    allRows(s, { filter = oneCategory(entry.id), clicked = clicked, mine = held, everywhere = open },
+                    allRows(s, { filter = oneCategory(entry.id), clicked = clicked, mine = held, everywhere = open, kind = facts and facts.kind },
                         name .. " (" .. amount .. ")", carried, amount, total, source, target, descriptor))
             end
         end
@@ -579,18 +588,18 @@ end
 local function aroundRows(host, s)
     local square = s.player:getCurrentSquare()
     if not square then return end
-    local list, bins, clicked = listFilter(s.app), s.world:hasKnownBins(), Log.point(square)
+    local list, away, clicked = listFilter(s.app), s.world:binDistance(), Log.point(square)
     local child = host:sub("around", "Around here")
     local function place(target, icon, title, scope, options)
         local rows = {}
-        local function add(rowIcon, text, kind, filter)
+        local function add(rowIcon, text, kind, filter, tip)
             rows[#rows + 1] = { icon = rowIcon, title = text, single = title .. ": " .. text:sub(1, 1):lower() .. text:sub(2),
-                run = act(s, "menu.around", text .. " - " .. title, request(scope, kind, filter), clicked, options) }
+                run = act(s, "menu.around", text .. " - " .. title, request(scope, kind, filter), clicked, options), tip = tip }
         end
         if list then add("takeSome", "Take my loot list", "inventory", list) end
         add("take", "Take everything", "inventory", everything())
         if s.world:hasStorageLabels() then add("sort", "Put away loose items", "labels", everything()) end
-        if bins then add("trash", "Throw everything away", "trash", everything()) end
+        if away then add("trash", "Throw everything away", "trash", everything(), throwTip(away)) end
         group(target, icon, title, rows)
     end
     local loot = getPlayerLoot and getPlayerLoot(s.playerIndex)
@@ -738,9 +747,9 @@ function Menus.refreshContainers(page, phase)
     PaneClicks.attach(page.inventoryPane)
     for _, button in ipairs(page.backpacks or {}) do
         local previous = button.onRightMouseDown
-        if previous and previous ~= wrapped[button] then
+        if previous and previous ~= button.lootBoxRightClick then
             local function onRightMouseDown(clicked, x, y, ...)
-                if invoking[clicked] then return previous(clicked, x, y, ...) end
+                if clicked.lootBoxInvoking then return previous(clicked, x, y, ...) end
                 local owner, container = clicked.parent and clicked.parent.parent, clicked.inventory
                 local callback = previous
                 if Focus.select(owner, container, clicked) then
@@ -752,9 +761,9 @@ function Menus.refreshContainers(page, phase)
                         x, y = live:getMouseX(), live:getMouseY()
                     end
                 end
-                invoking[clicked] = true
+                clicked.lootBoxInvoking = true
                 local result = pack(pcall(callback, clicked, x, y, ...))
-                invoking[clicked] = nil
+                clicked.lootBoxInvoking = nil
                 if not result[1] then error(result[2], 0) end
                 -- A bag's icon opens the bag's item menu, which already has everything.
                 if owner and container and clicked.inventory == container and clicked.parent and clicked.parent.parent == owner
@@ -764,7 +773,7 @@ function Menus.refreshContainers(page, phase)
                 return unpack(result, 2, result.n)
             end
             button.onRightMouseDown = onRightMouseDown
-            wrapped[button] = onRightMouseDown
+            button.lootBoxRightClick = onRightMouseDown
         end
     end
 end
@@ -792,7 +801,7 @@ Menus.worldMenu = guarded("menu.world", function(playerIndex, parent, objects, t
     end
     local host = root(parent)
     if preferences.worldShortcuts then
-        Log.guard("MountedDispenserMenu", require("LootBox/MountedDispenserMenu").add, fluids(s, parent, host, { objects = objects }))
+        Log.guard("MountedDispenserMenu", require("LootBox/DispenserMenu").add, fluids(s, parent, host, { objects = objects }))
         jobRows(host, s)
         if #containers == 1 then containerRows(host, s, containers[1].container, "menu.world-container")
         else

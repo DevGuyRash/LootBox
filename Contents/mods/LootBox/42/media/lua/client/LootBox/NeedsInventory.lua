@@ -1,43 +1,16 @@
 local TillFull = require "LootBox/TillFull"
-local Opening = require "LootBox/NeedsOpening"
+local Opening = require "LootBox/Opening"
+local Items = require "LootBox/Items"
 local Log = require "LootBox/Log"
+local call = require "LootBox/Safe"
 local Inventory = {}
 
 local MAX_ITEMS, MAX_CONTAINERS, MAX_DEPTH, MAX_OPENINGS = 1024, 64, 8, 16
-
-local function call(object, name, arg)
-    if not object then return nil end
-    local ok, value = pcall(function()
-        local fn = object[name]
-        if fn then
-            if arg == nil then return fn(object) end
-            return fn(object, arg)
-        end
-    end)
-    if ok then return value end
-end
 
 local function count(items)
     local n = call(items, "size")
     if type(n) == "number" and n >= 0 then return math.min(n, MAX_ITEMS) end
     return 0
-end
-
-local function member(items, item)
-    local found = call(items, "contains", item)
-    if type(found) == "boolean" then return found end
-    for index = 0, count(items) - 1 do
-        if call(items, "get", index) == item then return true end
-    end
-    return false
-end
-
-local function actualEquipment(player, item)
-    return item == call(player, "getPrimaryHandItem") or item == call(player, "getSecondaryHandItem")
-        or call(player, "isAttachedItem", item) == true
-        or call(call(player, "getAttachedItems"), "contains", item) == true
-        or call(player, "isEquippedClothing", item) == true
-        or call(call(player, "getWornItems"), "contains", item) == true
 end
 
 local function usableContainer(container, player)
@@ -84,7 +57,7 @@ local function sourcePath(player, main, current, world, depthLimit)
         local bag = call(current, "getContainingItem")
         if not bag or call(bag, "getInventory") ~= current or not canTraverse(world, bag) then return false end
         current = call(bag, "getContainer")
-        if not member(call(current, "getItems"), bag) then return false end
+        if not Items.holds(current, bag) then return false end
     end
     return false
 end
@@ -98,18 +71,14 @@ end
 local function toolAccessible(player, world, tool)
     local main = call(player, "getInventory")
     return tool ~= nil and usableContainer(main, player) and call(tool, "getContainer") == main
-        and member(call(main, "getItems"), tool) and call(tool, "isFavorite") == false and world:protected(tool) == false
-end
-
-local function openingCallbacks(player, world)
-    return {toolAccessible = function(tool) return toolAccessible(player, world, tool) end}
+        and Items.holds(main, tool) and call(tool, "isFavorite") == false and world:protected(tool) == false
 end
 
 local function accessible(player, options, kind, world, item, plan)
     local carried, equipped, depthLimit = optionsFor(options, kind)
     local main, current = call(player, "getInventory"), call(item, "getContainer")
     if not world or not main or not current then return false end
-    local isGear = actualEquipment(player, item)
+    local isGear = Items.equipped(player, item)
     local gear = current == main and isGear and equipped
     if isGear and not gear or not gear and not carried or not itemAllowed(world, item, kind, gear) then return false end
     if plan ~= nil then
@@ -117,7 +86,7 @@ local function accessible(player, options, kind, world, item, plan)
             or (plan.risky and options.autoConsumeRiskyOpen ~= true)
             or not toolAccessible(player, world, plan.tool) then return false end
     elseif call(item, "isSealed") ~= false then return false end
-    return member(call(current, "getItems"), item) and sourcePath(player, main, current, world, depthLimit)
+    return Items.holds(current, item) and sourcePath(player, main, current, world, depthLimit)
 end
 
 function Inventory.accessible(player, options, kind, world, item, plan)
@@ -131,11 +100,10 @@ end
 
 function Inventory.eligible(player, options, kind, world, item, plan)
     if not Inventory.accessible(player, options, kind, world, item, plan) then return false end
-    if not plan then return hasSafeEffects(item, kind) end
-    return Log.guard("NeedsOpening.validate", Opening.validate, player, options, kind, world, item, plan, openingCallbacks(player, world)) == true
+    return plan ~= nil or hasSafeEffects(item, kind)
 end
 
-local function selectItem(player, options, kind, world, excluded, allowed, readyOnly)
+local function selectItem(player, options, kind, world)
     local carried, equipped, depthLimit = optionsFor(options, kind)
     if not world or not carried and not equipped then return nil end
     local main = call(player, "getInventory")
@@ -155,14 +123,14 @@ local function selectItem(player, options, kind, world, excluded, allowed, ready
             local item = call(items, "get", i)
             if item and not seenItems[item] and call(item, "getContainer") == source then
                 seenItems[item] = true
-                local isGear = actualEquipment(player, item)
+                local isGear = Items.equipped(player, item)
                 local gear = source == main and isGear and equipped
-                if not (excluded and excluded[item]) and (gear or carried and not isGear)
+                if (gear or carried and not isGear)
                     and (gear or not fallback) and itemAllowed(world, item, kind, gear) then
-                    if call(item, "isSealed") == false and hasSafeEffects(item, kind) and (not allowed or allowed(item,source)) then
+                    if call(item, "isSealed") == false and hasSafeEffects(item, kind) then
                         if gear or source ~= main or not equipped then return item end
                         fallback = item
-                    elseif not readyOnly and source == main and #openings < MAX_OPENINGS then
+                    elseif kind == "food" and source == main and #openings < MAX_OPENINGS then
                         local recipe = call(item, "getOpeningRecipe")
                         if type(recipe) == "string" and recipe ~= "" then openings[#openings + 1] = item end
                     end
@@ -180,20 +148,17 @@ local function selectItem(player, options, kind, world, excluded, allowed, ready
         if fallback then return fallback end
         if visited >= MAX_ITEMS then break end
     end
-    local callbacks = openingCallbacks(player, world)
-    local riskyItem, riskyPlan
-    for _, item in ipairs(openings) do
-        local ok, plan = pcall(Opening.plan, player, options, kind, world, item, callbacks)
-        if ok and plan and Inventory.accessible(player, options, kind, world, item, plan) then
-            if not plan.risky then return item, plan end
-            if not riskyPlan then riskyItem, riskyPlan = item, plan end
+    local function allowed(tool) return toolAccessible(player, world, tool) end
+    for _, risky in ipairs(options.autoConsumeRiskyOpen == true and { false, true } or { false }) do
+        for _, item in ipairs(openings) do
+            local plan = Opening.automatic(player, item, risky, allowed)
+            if plan and Inventory.accessible(player, options, kind, world, item, plan) then return item, plan end
         end
     end
-    return riskyItem, riskyPlan
 end
 
-function Inventory.select(player, options, kind, world, excluded, allowed, readyOnly)
-    return Log.guard("NeedsInventory.select", selectItem, player, options, kind, world, excluded, allowed, readyOnly)
+function Inventory.select(player, options, kind, world)
+    return Log.guard("NeedsInventory.select", selectItem, player, options, kind, world)
 end
 
 return Inventory

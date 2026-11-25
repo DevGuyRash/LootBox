@@ -82,8 +82,14 @@ end
 function Native:isBusy() return self.active ~= nil end
 function Native:isPlayerBusy() return active.playerBusy == true end
 function Native:takeoverReason() return active.takeover, active.takeoverKind end
-function Native:extend(milliseconds) active.extended = (active.extended or 0) + milliseconds end
-function Native:reachable(container) return active.reachable and active.reachable[container] == true end
+function Native:beside() return false end
+function Native:obstacle() return active.obstacle, active.obstacle and "corpse" end
+Native.BATCH = 20
+function Native.light(value) return value.weight <= 0.1 end
+function Native:reachable(container)
+    return active.reachable and active.reachable[container] == true
+        or container.trash == true and not active.unloaded[container.position] and active.position == container.position
+end
 function Native:transferResult(op, id, fullType)
     if op.sourcePoint then
         for _, value in ipairs(active.ground) do
@@ -164,9 +170,9 @@ function Native:poll()
         active.yieldOnce, self.active = nil, nil
         return false, "An ordinary action is using the queue", "yielded"
     end
-    if active.throwPoll and op.kind == "vehicle" and not active.thrown then
+    if active.throwPoll == op.kind and not active.thrown then
         active.thrown = true
-        error("Simulated observation failure during vehicle entry")
+        error("Simulated observation failure during a native step")
     end
     if state.pending > 0 then state.pending = state.pending - 1; return nil end
     if state.effectDone then self.active = nil; return true end
@@ -184,6 +190,10 @@ function Native:poll()
         end
         active.approaches[target] = (active.approaches[target] or 0) + 1
         if active.blockedPositions[target] then self.active = nil; return false, "No path to the destination", "unreachable" end
+        if op.container and active.lockedVehicle and op.container == active.lockedVehicle.storage then
+            self.active = nil
+            return false, "The vehicle is locked", "locked"
+        end
         if op.container and active.unloaded[target] then self.active = nil; return false, "Container chunk is unloaded" end
         local from = active.world:point()
         local withinReach = op.square and not op.exact and active.nearby[active.position] and active.nearby[active.position][target]
@@ -200,27 +210,34 @@ function Native:poll()
             op.travel = {from = from, to = to, distance = distance, elapsedMs = elapsed}
         end
     elseif op.kind == "transfer" then
-        assert(op.source:contains(op.item), "Native transfer source lost the item")
-        assert(op.destination:hasRoomFor(self.player, op.item), "Native transfer exceeded capacity")
-        assert(remove(op.source.items, op.item))
-        if op.source.kind == "floor" then remove(active.ground, op.item); op.item.world = nil end
-        local current = op.item
-        if active.rehydrate then
-            current = item(op.destination, op.item.fullType, op.item.weight)
-            current.id, current.protected = op.item.id, op.item.protected
-            op.item.container = nil
-        else
-            op.destination.items[#op.destination.items + 1] = current
-            current.container = op.destination
+        assert(op.source ~= op.destination, "A transfer must go somewhere else")
+        for index, moving in ipairs(op.items or {op.item}) do
+            if active.refuseItem and active.refuseItem(moving, op) then
+                self.active = nil
+                return false, "The game stopped the action before it was done", "refused"
+            end
+            assert(op.source:contains(moving), "Native transfer source lost the item")
+            assert(op.destination:hasRoomFor(self.player, moving), "Native transfer exceeded capacity")
+            assert(remove(op.source.items, moving))
+            if op.source.kind == "floor" then remove(active.ground, moving); moving.world = nil end
+            local current = moving
+            if active.rehydrate then
+                current = item(op.destination, moving.fullType, moving.weight)
+                current.id, current.protected = moving.id, moving.protected
+                moving.container = nil
+            else
+                op.destination.items[#op.destination.items + 1] = current
+                current.container = op.destination
+            end
+            if index == 1 then op.resultItem = current end
+            if op.destination.kind == "floor" then
+                local square = active.floorDropPoint or active.squares[active.position]
+                current.world = { getSquare = function() return square end }
+                active.ground[#active.ground + 1] = current
+                active.floorDrops[current.id] = {origin = coordinateKey(op.destinationPoint), square = square}
+            end
+            active.transfers[#active.transfers + 1] = { item = current, source = op.source, destination = op.destination, op = op }
         end
-        op.resultItem = current
-        if op.destination.kind == "floor" then
-            local square = active.floorDropPoint or active.squares[active.position]
-            current.world = { getSquare = function() return square end }
-            active.ground[#active.ground + 1] = current
-            active.floorDrops[current.id] = {origin = coordinateKey(op.destinationPoint), square = square}
-        end
-        active.transfers[#active.transfers + 1] = { item = current, source = op.source, destination = op.destination }
         if active.onTransfer then active.onTransfer(op) end
         if active.holdTransferResult then state.effectDone = true; return nil end
     elseif op.kind == "trash" then
@@ -232,7 +249,9 @@ function Native:poll()
         active.deletions[#active.deletions + 1] = { bin = op.container, count = #op.container.items }
         op.container.items = {}
         if active.holdTrashResult then state.effectDone = true; return nil end
-    elseif op.kind ~= "vehicle" then error("Unknown native operation") end
+    elseif op.kind == "vehicle" then
+        if active.lockedVehicle and not op.relock then active.lockedVehicle = nil end
+    else error("Unknown native operation") end
     self.active = nil
     return true
 end
@@ -258,7 +277,7 @@ end} end
 
 local function fixture(capacity)
     local f = { now = 0, position = "source", visits = {}, transfers = {}, deletions = {}, scheduled = {}, ground = {}, squares = {}, nearby = {},
-        grid = {}, unloaded = {}, blockedPositions = {}, approaches = {}, operations = {}, sourceLocations = {}, binLocations = {}, unloadedBins = {}, inspectedBins = {}, floorDrops = {} }
+        grid = {}, unloaded = {}, blockedPositions = {}, approaches = {}, operations = {}, sourceLocations = {}, binLocations = {}, floorDrops = {} }
     local nextPosition = 0
     function f:ensureSquare(name, point)
         if self.squares[name] then
@@ -307,6 +326,7 @@ local function fixture(capacity)
         return {x = current.x, y = current.y, z = current.z}
     end
     function world:key(value) return value.name end
+    function world:serverAccepts(value) return not (f.serverRefuses and f.serverRefuses[value]) end
     function world:square(value) return f:ensureSquare(value.position) end
     function world:sourceAnchor(value)
         f.sourceLocations[value.name] = f.sourceLocations[value.name] or value
@@ -354,6 +374,12 @@ local function fixture(capacity)
     function f.inventory:getEffectiveCapacity() return f.hardLimit end
     function f.player:getMaxWeight() error("Comfort must not govern hauling admission") end
     function world:itemId(value) return value.id end
+    function world:carried(id, fullType)
+        for _, container in ipairs(f.carried) do
+            local value = container:getItemWithID(id)
+            if value and value.fullType == fullType then return value, container end
+        end
+    end
     function world:describe(value) return { fullType = value.fullType, categoryId = "native:Material", labels = {} } end
     function world:protected(value) return value.protected == true end
     function world:name(value) return value.name end
@@ -365,39 +391,27 @@ local function fixture(capacity)
     function world:safeStagingContainers() return f.safeCandidates or {} end
     function world:isTrash(value) return value.trash == true end
     function world:vehicle() return {} end
-    function world:trashCandidates()
-        local bins = {}
-        for _, bin in ipairs(f.bins) do if not f.unloaded[bin.position] then bins[#bins + 1] = bin end end
-        return bins, {}
-    end
-    function world:trashTarget(bin)
-        local point = self:square(bin)
-        f.binLocations[bin.name] = f.binLocations[bin.name] or bin
-        return {key = bin.name, container = bin, point = {x = point.x, y = point.y, z = point.z},
-            capacity = bin.capacity, used = bin:getCapacityWeight(), needsInspection = bin.uninspected and not f.inspectedBins[bin.name] or nil}
-    end
-    function world:unloadedTrashTargets()
-        local targets = {}
-        for _, bin in ipairs(f.unloadedBins) do
-            local target = self:trashTarget(bin)
-            target.container, target.needsInspection = nil, true
-            targets[#targets + 1] = target
+    function world:deletionAllowed() return not f.client or f.allowTrash ~= false end
+    function world:binKey(value) return value.trash and value.name or nil end
+    function world:bins()
+        local result, here = {}, self:point()
+        for _, bin in ipairs(f.bins) do
+            f.binLocations[bin.name] = f.binLocations[bin.name] or bin
+            local at = self:square(bin)
+            if f.binLocations[bin.name].trash then
+                result[#result + 1] = {key = bin.name, point = {x = at.x, y = at.y, z = at.z}, capacity = bin.capacity,
+                    away = math.sqrt((at.x - here.x) ^ 2 + (at.y - here.y) ^ 2)}
+            end
         end
-        return targets
+        if #result > 0 then return result end
+        return nil, "No trash can is known yet"
     end
-    function world:resolveTrashTarget(target)
+    function world:resolveBin(target)
         local current = f.binLocations[target.key]
-        if current and f.unloaded[current.position] then return nil, "unloaded" end
-        if not current or not current.trash then return nil, "missing" end
-        target.container, target.capacity, target.used = current, current.capacity, current:getCapacityWeight()
+        if f.unloaded[current.position] then return nil, "unloaded" end
+        if not current.trash then return nil, "The trash can is gone" end
+        target.capacity = current.capacity
         return current
-    end
-    function world:binReachable(target)
-        local current = f.binLocations[target.key]
-        return current and not f.unloaded[current.position] and f.position == current.position
-    end
-    function world:markTrashInspected(target)
-        if self:binReachable(target) then f.inspectedBins[target.key] = true; return true end
     end
     function world:records(source)
         local result = {}
@@ -461,6 +475,7 @@ local function fixture(capacity)
         source.explored = true
     end
     function f.loot:refreshBackpacks()
+        f.refreshes = (f.refreshes or 0) + 1
         f.floor.items = {}
         for _, value in ipairs(f.ground) do
             local here = value.world and value.world:getSquare()
@@ -475,14 +490,12 @@ local function fixture(capacity)
     return f
 end
 
-local function building(f, sections, yields)
+local function building(f, sections)
     local index, pending, processed, searched, unsearched, failures = 0, nil, 0, 0, 0, {}
-    local remainingYields = yields or 0
     for _, section in ipairs(sections) do f:addSquare(section.target) end
     local survey = {building = {}, complete = false}
     function survey:next()
         assert(not pending, "A section cannot be skipped while its result is pending")
-        if remainingYields > 0 then remainingYields = remainingYields - 1; return false end
         index = index + 1
         pending = sections[index]
         if not pending then self.complete = true end
@@ -549,6 +562,11 @@ local function start(f, input)
     return plan
 end
 
+-- Starts without asking at trash cans, which is how the mod is set by default.
+local function quick(f, input)
+    assert(f.jobs:start(assert(f.jobs:preview(input)), {reviewBins = false}))
+end
+
 local function test(name, body)
     print("RUN " .. name)
     body()
@@ -571,6 +589,25 @@ local function stopJob(f)
     assert(stopped.state == "paused" and stopped.canResume, "A settled pause must retain a resumable checkpoint")
     return stopped
 end
+
+test("an item the server would refuse is never tried", function()
+    local f = fixture(9)
+    local ok, refused = item(f.source), item(f.source)
+    f.serverRefuses = { [refused] = true }
+    start(f)
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.skipped == 1 and #f.source.items == 1 and #f.destination.items == 1, status.reason)
+end)
+
+test("what had no room from the start is named at the end without counting as a failure", function()
+    local f = fixture(9)
+    for _ = 1, 3 do item(f.source) end
+    f.destination.capacity = 2
+    start(f)
+    local status = finish(f)
+    assert(status.state == "finished" and status.skipped == 0 and #f.destination.items == 2, status.reason)
+    assert(status.reason:find("1 item stays: No matching destination with room", 1, true), status.reason)
+end)
 
 test("haul seven unit items in three capacity-limited trips", function()
     local f = fixture(3)
@@ -673,7 +710,7 @@ test("cleanup fills bins before deleting batches", function()
     local bin = container("trash", 2); bin.trash = true; f.bins = { bin }
     item(bin, "Base.ExistingTrash")
     for _ = 1, 5 do item(f.source) end
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.done == 5 and status.skipped == 0 and #f.source.items == 0 and #bin.items == 0)
     assert(#f.deletions == 3)
@@ -687,7 +724,7 @@ test("cleanup approves recreated destination identities and empties whole batche
     start(f, request("trash"))
     local status = finish(f)
     assert(status.done == 5 and status.skipped == 0 and #f.source.items == 0 and #bin.items == 0)
-    assert(#f.deletions == 3 and f.deletions[1].count == 2 and f.deletions[2].count == 2 and f.deletions[3].count == 1)
+    assert(#f.deletions == 3 and f.deletions[1].count == 2 and f.deletions[2].count == 1 and f.deletions[3].count == 2)
 end)
 
 test("choose a fitting larger bin without emptying an unused undersized bin", function()
@@ -708,9 +745,9 @@ test("newly protected bin contents stop whole-bin deletion", function()
     local existing = item(bin, "Base.ExistingTrash")
     item(f.source); item(f.source)
     f.onTransfer = function(op) if op.destination == bin then existing.protected = true end end
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
-    assert(status.skipped > 0 and #f.deletions == 0 and bin:contains(existing))
+    assert(status.state == "paused" and status.carried == 1 and #f.deletions == 0 and bin:contains(existing))
 end)
 
 test("reviewed requests resist later UI mutation", function()
@@ -728,22 +765,33 @@ test("reviewed requests resist later UI mutation", function()
     assert(not f.jobs:start(plan), "A consumed preview must not replay")
 end)
 
-test("observe nonempty MP replies without a Lua update event", function()
+test("a multiplayer container that fills after opening ends like any other", function()
     local f = fixture(3); f.client = true; f.source.explored = false
     f.onApproach = function(op) if op.container == f.source then f.loot:checkExplored(f.source) end end
     f.source.reply = function() item(f.source); item(f.source) end
     start(f, request("inventory"))
     local status = finish(f)
     assert(status.done == 2 and #f.inventory.items == 2 and f.source.requested == 1)
-    assert(status.unconfirmedSources == 1 and status.state == "finished_with_skips")
+    assert(status.state == "finished" and status.skipped == 0 and #status.reasons == 0)
 end)
 
-test("empty MP replies remain explicitly unconfirmed", function()
+test("a multiplayer container that looks empty is noted without spoiling the result", function()
     local f = fixture(3); f.client = true; f.source.explored = false
     start(f, request("inventory"))
     local status = finish(f)
-    assert(status.done == 0 and status.skipped == 1 and status.unconfirmedSources == 1)
-    assert(status.state == "finished_with_skips" and status.reason:find("unconfirmed", 1, true))
+    assert(status.state == "finished" and status.done == 0 and status.skipped == 0)
+    assert(#status.reasons == 1 and status.reasons[1].reason:find("Looked empty", 1, true))
+end)
+
+test("a multiplayer container that fills late is read once more before the job ends", function()
+    local f = fixture(9); f.client = true; f.source.explored = false
+    local other = container("other crate", 100); f.sources[2] = other
+    item(other, "Base.Nails")
+    start(f)
+    for _ = 1, 200 do tick(f); if #f.transfers > 0 then break end end
+    local late = item(f.source, "Base.Late")
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 2 and #status.reasons == 0 and f.destination:contains(late))
 end)
 
 test("floor inspection excludes adjacent unselected squares", function()
@@ -832,9 +880,9 @@ test("cancel waits for native restoration before ending", function()
 end)
 
 test("one thrown error skips its item after native restoration and the job goes on", function()
-    local f = fixture(3); f.sources = { f.inventory }; f.throwPoll = true
+    local f = fixture(3); f.sources = { f.inventory }; f.throwPoll = "transfer"
     local first, second = item(f.inventory), item(f.inventory)
-    start(f, request("vehicle", {}))
+    start(f)
     local status = finish(f)
     assert(f.thrown and f.restored and not f.adapter:isBusy())
     assert(status.state == "finished_with_skips" and status.skipped == 1 and status.done == 1)
@@ -888,19 +936,6 @@ test("an unloaded building section is walked to and inspected after streaming", 
     assert(f.approaches[section.target.name] == 1 and not f.unloaded[section.target.name])
 end)
 
-test("metadata yielding leaves building jobs cancellable before movement", function()
-    local f = fixture(2)
-    local input = building(f, {{roomId = "one", roomName = "Room", z = 0,
-        target = square("section", 1, 0), sources = {f.source}}}, 100)
-    item(f.source)
-    start(f, input)
-    for _ = 1, 20 do tick(f) end
-    assert(f.jobs:status().state == "running" and #f.operations == 0)
-    assert(f.jobs:cancel())
-    local status = finish(f)
-    assert(status.state == "cancelled" and status.done == 0 and #f.source.items == 1)
-end)
-
 test("cancelling a building approach waits for native cleanup without searching the room", function()
     local f = fixture(2)
     local section = {roomId = "remote", roomName = "Unloaded room", z = 1,
@@ -942,7 +977,7 @@ test("upstairs building cleanup returns between an outside bin and the selected 
     end
     assert(status.state == "finished" and status.done == 4 and status.skipped == 0)
     assert(upperVisits == 4 and outsideVisits == 4, "Capacity one requires four actual upstairs/outside deliveries")
-    assert(#f.ground == 0 and #bin.items == 0 and #f.deletions == 2)
+    assert(#f.ground == 0 and #bin.items == 0 and #f.deletions == 4)
     assert(status.survey.roomsDone == 2 and status.survey.sectionsSearched == 2)
 end)
 
@@ -1113,12 +1148,12 @@ test("a selected full bin is emptied before the next item is deposited", functio
     f.onTransfer = function(op)
         if op.destination == bin then assert(not bin:contains(existing), "Chosen full bin must be emptied before deposit") end
     end
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.done == 1 and #f.deletions == 2 and f.deletions[1].count == 1 and f.deletions[2].count == 1)
 end)
 
-test("failed bin routes are not repeated from the same hauling origin", function()
+test("a can that could not be reached is not tried again in the same run", function()
     local f = fixture(1)
     local blocked, reachable = container("blocked bin", 10), container("reachable bin", 10)
     blocked.trash, reachable.trash, f.bins = true, true, {blocked, reachable}
@@ -1128,38 +1163,8 @@ test("failed bin routes are not repeated from the same hauling origin", function
     start(f, request("trash"))
     local status = finish(f)
     assert(status.done == 3 and status.skipped == 0 and f.approaches[blocked.position] == 1)
-    assert(#f.deletions == 1 and f.deletions[1].bin == reachable and f.deletions[1].count == 3)
-end)
-
-test("remembered unloaded bins are inspected before any source pickup", function()
-    local f = fixture(2)
-    local bin = container("remembered bin", 4); bin.trash = true
-    f:addSquare(square(bin.position, 20, 0)); f.unloaded[bin.position] = true; f.unloadedBins = {bin}
-    local unseen = item(bin, "Base.Unseen")
-    local selected = item(f.source)
-    start(f, request("trash"))
-    local status = awaitState(f, "needs_review")
-    assert(status.done == 0 and status.carried == 0 and f.approaches[bin.position])
-    assert(f.source:contains(selected) and bin:contains(unseen) and #f.transfers == 0 and #f.deletions == 0)
-    local review = assert(f.jobs:reviewBin())
-    assert(review.canApprove and #review.moves == 1 and review.moves[1].itemName == "Base.Unseen")
-    assert(f.jobs:rejectBin(review))
-    assert(finish(f).state == "finished_with_skips" and f.source:contains(selected) and bin:contains(unseen))
-end)
-
-test("an empty remembered bin accepts cleanup only after a fresh explicit review", function()
-    local f = fixture(2)
-    local bin = container("remembered empty bin", 4); bin.trash = true
-    f:addSquare(square(bin.position, 20, 0)); f.unloaded[bin.position] = true; f.unloadedBins = {bin}
-    item(f.source); item(f.source)
-    start(f, request("trash"))
-    local paused = awaitState(f, "needs_review")
-    assert(paused.done == 0 and #f.transfers == 0 and #f.deletions == 0)
-    local review = assert(f.jobs:reviewBin())
-    assert(review.canApprove and #review.moves == 0 and #review.skipped == 0)
-    assert(f.jobs:approveBin(review))
-    local status = finish(f)
-    assert(status.done == 2 and status.skipped == 0 and #f.deletions == 1 and f.deletions[1].bin == bin)
+    assert(#f.deletions == 3)
+    for _, deletion in ipairs(f.deletions) do assert(deletion.bin == reachable and deletion.count == 1) end
 end)
 
 test("a recreated bin is resolved before depositing or deleting", function()
@@ -1181,7 +1186,7 @@ test("a recreated bin is resolved before depositing or deleting", function()
     assert(#f.deletions == 1 and f.deletions[1].bin == fresh and #original.items == 0)
 end)
 
-test("new unapproved bin contents are never deleted during cleanup", function()
+test("new bin contents are never deleted without asking when asking is on", function()
     local f = fixture(2)
     local bin = container("changing bin", 2); bin.trash, f.bins = true, {bin}
     for _ = 1, 2 do item(f.source) end
@@ -1190,9 +1195,14 @@ test("new unapproved bin contents are never deleted during cleanup", function()
         if op.destination == bin and not outsider then outsider = item(bin, "Base.Unapproved") end
     end
     start(f, request("trash"))
-    local status = finish(f)
-    assert(status.done == 1 and status.skipped > 0 and outsider and bin:contains(outsider))
-    assert(#f.deletions == 0, "Whole-bin deletion cannot include a newly unapproved item")
+    awaitState(f, "needs_review")
+    assert(f.jobs:rejectBin(assert(f.jobs:reviewBin())))
+    local status = awaitState(f, "paused")
+    assert(status.done == 1 and status.carried == 1 and bin:contains(outsider) and #f.deletions == 0)
+    assert(f.jobs:resume())
+    awaitState(f, "needs_review")
+    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
+    assert(finish(f).done == 2 and not outsider:getContainer())
 end)
 
 test("completed native walks improve later bin choices beyond straight-line proximity", function()
@@ -1236,10 +1246,10 @@ test("a newly discovered nonempty bin pauses without expanding the cleanup appro
     assert(#review.moves == 1 and review.moves[1].itemName == "Base.UnseenExisting")
     assert(f.jobs:rejectBin(review))
     local ended = finish(f)
-    assert(ended.state == "finished_with_skips" and ended.carried == 1 and #f.deletions == 0)
+    assert(ended.state == "paused" and ended.canResume and ended.carried == 1 and #f.deletions == 0)
 end)
 
-test("a newly discovered empty bin can replace an inaccessible bin after explicit approval", function()
+test("a newly discovered empty bin replaces an inaccessible bin without a question", function()
     local f = fixture(2)
     local blocked, fresh = container("original inaccessible bin", 2), container("new empty bin", 10)
     blocked.trash, fresh.trash, f.bins = true, true, {blocked}
@@ -1252,39 +1262,16 @@ test("a newly discovered empty bin can replace an inaccessible bin after explici
         end
     end
     start(f, request("trash"))
-    local paused = awaitState(f, "needs_review")
-    assert(paused.done == 0 and paused.carried == 1 and f.inventory:contains(selected))
-    assert(#f.transfers == 1 and #f.deletions == 0)
-    local review = assert(f.jobs:reviewBin())
-    assert(review.canApprove and #review.moves == 0)
-    assert(f.jobs:approveBin(review))
     local status = finish(f)
     assert(status.done == 1 and status.skipped == 0 and status.carried == 0)
     assert(#f.deletions == 1 and f.deletions[1].bin == fresh and f.deletions[1].count == 1)
-    assert(#f.transfers == 2, "Approving a destination must continue the carried item instead of picking it up again")
-end)
-
-test("a loaded uninspected bin pauses before collecting any source items", function()
-    local f = fixture(2)
-    local bin = container("uninspected loaded bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
-    f:addSquare(square(bin.position, 10, 0))
-    local selected = item(f.source)
-    start(f, request("trash"))
-    local paused = awaitState(f, "needs_review")
-    assert(paused.done == 0 and paused.carried == 0 and f.source:contains(selected))
-    assert(f.approaches[bin.position] and f.inspectedBins[bin.name])
-    local review = assert(f.jobs:reviewBin())
-    for _ = 1, 120 do tick(f) end
-    assert(f.jobs:status().state == "needs_review" and #f.transfers == 0 and #f.deletions == 0)
-    assert(f.jobs:approveBin(review))
-    assert(finish(f).done == 1 and #f.deletions == 1)
+    assert(#f.transfers == 2, "The carried item continues to the other can")
 end)
 
 test("approving a bin preserves the building survey and original item selection", function()
     local f = fixture(1)
-    local bin = container("outside uninspected bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local bin = container("outside bin", 4)
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     f:addSquare(square(bin.position, 10, 0))
     local upper, lower = container("upper source", 100), container("lower source", 100)
     f:addSquare(square(upper.position, 20, 0, 1)); f:addSquare(square(lower.position, 20, 0, 0))
@@ -1297,7 +1284,7 @@ test("approving a bin preserves the building survey and original item selection"
     input.filter, input.destination = {all = false, ids = {}, types = {"Base.Selected"}}, {kind = "trash"}
     local plan = start(f, input)
     local paused = awaitState(f, "needs_review")
-    assert(paused.survey.roomsDone == 0 and paused.survey.roomsTotal == 2 and #f.transfers == 0)
+    assert(paused.survey.roomsTotal == 2 and paused.carried == 1 and #f.deletions == 0)
     input.filter.types[1], plan.request.filter.types[1] = "Base.Other", "Base.Other"
     assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
     local status = finish(f)
@@ -1310,7 +1297,7 @@ end)
 test("public bin review mutation cannot approve contents added after the snapshot", function()
     local f = fixture(2)
     local bin = container("reviewed destination", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     local selected = item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
@@ -1318,36 +1305,19 @@ test("public bin review mutation cannot approve contents added after the snapsho
     local added = item(bin, "Base.NewUnapproved")
     review.moves[1], review.canApprove = {itemName = added.fullType, from = "Bin", to = "Delete"}, true
     assert(not f.jobs:approveBin(review))
-    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected) and bin:contains(added))
-    assert(#f.transfers == 0 and #f.deletions == 0)
+    assert(f.jobs:status().state == "needs_review" and f.inventory:contains(selected) and bin:contains(added))
+    assert(#f.deletions == 0)
     local fresh = assert(f.jobs:reviewBin())
-    assert(#fresh.moves == 1 and fresh.moves[1].itemName == added.fullType)
+    assert(#fresh.moves == 2 and fresh.moves[2].itemName == added.fullType)
     assert(not f.jobs:approveBin(review) and not f.jobs:rejectBin(review), "Refreshing review invalidates its older token")
     assert(f.jobs:cancel() and finish(f).state == "cancelled")
-    assert(bin:contains(added) and f.source:contains(selected))
-end)
-
-test("protected existing contents remain blocked even if the public review is altered", function()
-    local f = fixture(2)
-    local bin = container("protected uninspected bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
-    local kept = item(bin, "Base.Kept"); kept.protected = true
-    local selected = item(f.source)
-    start(f, request("trash"))
-    awaitState(f, "needs_review")
-    local review = assert(f.jobs:reviewBin())
-    assert(not review.canApprove and #review.skipped == 1 and #review.moves == 0)
-    review.canApprove, review.skipped = true, {}
-    assert(not f.jobs:approveBin(review))
-    assert(f.jobs:status().state == "needs_review" and #f.transfers == 0 and #f.deletions == 0)
-    assert(f.jobs:rejectBin(review))
-    assert(finish(f).state == "finished_with_skips" and bin:contains(kept) and f.source:contains(selected))
+    assert(bin:contains(added) and f.inventory:contains(selected))
 end)
 
 test("contents that become protected after review require another decision", function()
     local f = fixture(2)
     local bin = container("changing protected review", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}
     local existing = item(bin, "Base.Existing")
     item(f.source)
     start(f, request("trash"))
@@ -1357,30 +1327,32 @@ test("contents that become protected after review require another decision", fun
     existing.protected = true
     assert(not f.jobs:approveBin(review))
     local fresh = assert(f.jobs:reviewBin())
-    assert(not fresh.canApprove and #fresh.skipped == 1)
+    assert(not fresh.canApprove and #fresh.skipped == 1 and fresh.skipped[1].status == "Protected")
+    fresh.canApprove, fresh.skipped = true, {}
+    assert(not f.jobs:approveBin(fresh), "Changing the shown review approves nothing")
     assert(f.jobs:cancel() and finish(f).state == "cancelled")
-    assert(bin:contains(existing) and #f.transfers == 0 and #f.deletions == 0)
+    assert(bin:contains(existing) and #f.deletions == 0)
 end)
 
 test("rejecting a reviewed bin inspects another without discarding source selection", function()
     local f = fixture(2)
-    local first, second = container("first uninspected bin", 4), container("second uninspected bin", 4)
-    first.trash, second.trash, first.uninspected, second.uninspected = true, true, true, true
+    local first, second = container("first bin", 4), container("second bin", 4)
+    first.trash, second.trash = true, true
     f.bins = {first, second}
     f:addSquare(square(first.position, 10, 0)); f:addSquare(square(second.position, 20, 0))
     local retained = item(first, "Base.ExistingFirst")
-    item(f.source, "Base.Selected")
+    item(second, "Base.ExistingSecond"); item(f.source, "Base.Selected")
     start(f, request("trash"))
     awaitState(f, "needs_review")
     local declined = assert(f.jobs:reviewBin())
-    assert(declined.bin.name == first.name and #f.transfers == 0)
+    assert(declined.bin.name == first.name and #f.transfers == 1)
     assert(f.jobs:rejectBin(declined))
     awaitState(f, "needs_review")
     local accepted = assert(f.jobs:reviewBin())
-    assert(accepted.bin.name == second.name and accepted.canApprove and #f.transfers == 0)
+    assert(accepted.bin.name == second.name and accepted.canApprove and #f.transfers == 1)
     assert(f.jobs:approveBin(accepted))
     local status = finish(f)
-    assert(status.done == 1 and status.skipped == 1 and first:contains(retained))
+    assert(status.done == 1 and status.skipped == 0 and first:contains(retained))
     assert(#f.deletions == 1 and f.deletions[1].bin == second)
     assert(f.approaches[first.position] == 1, "The rejected bin must not be selected again by the current job")
 end)
@@ -1388,14 +1360,14 @@ end)
 test("moving away from the bin blocks approval without losing the paused job", function()
     local f = fixture(2)
     local bin = container("reachable review bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     local selected = item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
     local review = assert(f.jobs:reviewBin())
     f.position = "source"
     assert(not f.jobs:approveBin(review))
-    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected) and #f.deletions == 0)
+    assert(f.jobs:status().state == "needs_review" and f.inventory:contains(selected) and #f.deletions == 0)
     f.position = bin.position
     assert(f.jobs:approveBin(review))
     assert(finish(f).done == 1)
@@ -1404,7 +1376,7 @@ end)
 test("cancelling a paused review invalidates its approval and rejection tokens", function()
     local f = fixture(2)
     local bin = container("cancelled review bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     local selected = item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
@@ -1413,32 +1385,7 @@ test("cancelling a paused review invalidates its approval and rejection tokens",
     assert(not f.jobs:approveBin(review) and not f.jobs:rejectBin(review))
     assert(finish(f).state == "cancelled")
     assert(not f.jobs:reviewBin() and not f.jobs:approveBin(review) and not f.jobs:rejectBin(review))
-    assert(f.source:contains(selected) and #f.transfers == 0 and #f.deletions == 0)
-end)
-
-test("waiting for an empty multiplayer inspection never substitutes for explicit approval", function()
-    local f = fixture(2); f.client = true
-    local bin = container("unconfirmed multiplayer bin", 4)
-    bin.trash, bin.uninspected, bin.explored, f.bins = true, true, false, {bin}
-    local selected = item(f.source)
-    start(f, request("trash"))
-    for _ = 1, 30 do tick(f); if bin.requested then break end end
-    assert(bin.requested == 1 and f.jobs:status().state == "running")
-    for _ = 1, 8 do tick(f) end
-    assert(f.jobs:status().state == "running" and #f.transfers == 0)
-    awaitState(f, "needs_review")
-    local waited = f.now - bin.lastRequestAt
-    assert(waited >= 1000 and waited < 3000, "A reply gets about a second, not three")
-    local review = assert(f.jobs:reviewBin())
-    local uncertainty = false
-    for _, warning in ipairs(review.warnings) do
-        if warning:find("Empty replies", 1, true) and warning:find("not acknowledged", 1, true) then uncertainty = true end
-    end
-    assert(uncertainty and #review.moves == 0 and review.canApprove)
-    for _ = 1, 60 do tick(f) end
-    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected))
-    assert(#f.transfers == 0 and #f.deletions == 0)
-    assert(f.jobs:cancel() and finish(f).state == "cancelled")
+    assert(f.inventory:contains(selected) and #f.deletions == 0)
 end)
 
 test("a custom eleven-weight hard limit forces four trips", function()
@@ -1496,7 +1443,7 @@ test("preview reserves one character mass allowance across different carried bag
     local plan = start(f, request("inventory"))
     assert(#plan.moves == 1 and #plan.skipped == 1, "Separate bag capacities must not create separate character limits")
     local status = finish(f)
-    assert(status.done == 1 and status.skipped == 1 and #f.source.items == 1)
+    assert(status.state == "finished" and status.done == 1 and status.skipped == 0 and #f.source.items == 1)
     local mass = f.world:carrying()
     assert(mass == 2 and #first.items + #second.items == 1)
 end)
@@ -1542,10 +1489,9 @@ test("an item beyond native hard carrying capacity stays at its source with a re
     local retained = item(f.inventory, "Base.PersonalGear", 3)
     local heavy = item(f.source, "Base.Oversized", 9)
     local plan = start(f, request("inventory"))
-    assert(#plan.moves == 0 and #plan.skipped == 1 and type(plan.skipped[1].reason) == "string"
-        and #plan.skipped[1].reason > 0)
+    assert(#plan.moves == 0 and #plan.skipped == 1 and #plan.skipped[1].reason > 0)
     local status = finish(f)
-    assert(status.state == "finished_with_skips" and status.done == 0 and status.skipped == 1)
+    assert(status.state == "finished" and status.done == 0 and status.skipped == 0)
     assert(f.source:contains(heavy) and f.inventory:contains(retained) and #f.transfers == 0)
 end)
 
@@ -1560,7 +1506,7 @@ test("over-comfort pickups reach the exact native hard boundary without exceedin
             "The comfort threshold must not consume the remaining native hard allowance")
         local status = finish(f)
         local mass = f.world:carrying()
-        assert(status.done == 1 and status.skipped == 1 and mass == hardLimit)
+        assert(status.done == 1 and status.skipped == 0 and mass == hardLimit)
         assert(f.inventory:contains(retained) and f.inventory:contains(fitting) and f.source:contains(excess))
     end
 end)
@@ -1595,7 +1541,7 @@ test("mixed bag and main destinations share one hard budget and preserve both re
         "Fourteen gear plus ten reduced bag mass plus twenty-six main mass exhausts fifty")
     local status = finish(f)
     local mass = f.world:carrying()
-    assert(status.done == 2 and status.skipped == 1 and mass == 50)
+    assert(status.done == 2 and status.skipped == 0 and mass == 50)
     assert(backpack:contains(packed) and f.inventory:contains(carried) and f.source:contains(excess))
 end)
 
@@ -1648,20 +1594,20 @@ test("unlimited carry removes finite main reservations while native item predica
     assert(#plan.moves == 2 and #plan.skipped == 2,
         "Unlimited carrying may reserve eighty in a nominal fifty inventory, but cannot bypass native restrictions")
     local status = finish(f)
-    assert(status.done == 2 and status.skipped == 2 and f.inventory:contains(first) and f.inventory:contains(second))
+    assert(status.done == 2 and status.skipped == 0 and f.inventory:contains(first) and f.inventory:contains(second))
     assert(f.source:contains(forbidden) and f.source:contains(refused) and #f.inventory.items == 2)
 end)
 
 test("nil cannot approve or reject a bin before a review token is issued", function()
     local f = fixture(2)
     local bin = container("unissued bin review", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     local selected = item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
     assert(not f.jobs:approveBin(nil) and not f.jobs:rejectBin(nil))
-    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected))
-    assert(#f.transfers == 0 and #f.deletions == 0)
+    assert(f.jobs:status().state == "needs_review" and f.inventory:contains(selected))
+    assert(#f.deletions == 0)
     local review = assert(f.jobs:reviewBin())
     assert(not f.jobs:approveBin(nil) and not f.jobs:rejectBin(nil))
     assert(f.jobs:approveBin(review) and finish(f).done == 1)
@@ -1696,7 +1642,7 @@ test("resumed unknown-source exploration requests and reads the current containe
     f.sourceLocations.source, f.source = current, current
     assert(f.jobs:resume())
     local result = finish(f)
-    assert(result.done == 1 and result.skipped == 0 and result.unconfirmedSources == 1)
+    assert(result.state == "finished" and result.done == 1 and result.skipped == 0)
     assert(not original.requested and current.requested == 1 and f.destination:contains(selected))
 end)
 
@@ -1840,59 +1786,6 @@ test("resuming a floor delivery keeps its original destination point", function(
     assert(f.position == "destination")
 end)
 
-test("resume retires a bin token and requires fresh approval", function()
-    local f = fixture(3)
-    local bin = container("reviewed bin", 4); bin.trash, bin.uninspected, f.bins = true, true, {bin}
-    local selected = item(f.source)
-    start(f, request("trash"))
-    awaitState(f, "needs_review")
-    local old = assert(f.jobs:reviewBin())
-    stopJob(f)
-    assert(not f.jobs:approveBin(old) and not f.jobs:rejectBin(old))
-    assert(f.jobs:resume())
-    awaitState(f, "needs_review")
-    local fresh = assert(f.jobs:reviewBin())
-    assert(fresh ~= old and not f.jobs:approveBin(old))
-    assert(f.jobs:approveBin(fresh))
-    local result = finish(f)
-    assert(result.done == 1 and result.skipped == 0 and not selected:getContainer())
-end)
-
-test("resume after an observed empty still reviews the next deposit", function()
-    local f = fixture(3)
-    local bin = container("full reviewed bin", 1); bin.trash, f.bins = true, {bin}
-    item(bin); local selected = item(f.source)
-    f.holdTrashResult, f.completeDuringCancel = true, true
-    start(f, request("trash"))
-    for _ = 1, 200 do tick(f); if #f.deletions == 1 then break end end
-    assert(#f.deletions == 1 and bin:isEmpty())
-    stopJob(f)
-    f.holdTrashResult = false
-    assert(f.jobs:resume())
-    awaitState(f, "needs_review")
-    assert(#f.deletions == 1 and not bin:contains(selected))
-    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
-    local result = finish(f)
-    assert(result.done == 1 and bin:isEmpty() and #f.deletions == 2)
-end)
-
-test("resumed final cleanup cannot silently reuse its old bin approval", function()
-    local f = fixture(3)
-    local bin = container("final reviewed bin", 4); bin.trash, f.bins = true, {bin}
-    item(f.source)
-    start(f, request("trash"))
-    awaitOperation(f, function(op) return op.kind == "trash" end)
-    assert(#f.deletions == 0)
-    stopJob(f)
-    assert(f.jobs:resume())
-    awaitState(f, "needs_review")
-    assert(#f.deletions == 0)
-    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
-    local result = finish(f)
-    assert(result.done == 1 and #f.deletions == 1 and bin:isEmpty())
-end)
-
-
 test("a resumed native adjacent floor result is counted without a duplicate drop", function()
     local f = fixture(3)
     local selected = item(f.inventory)
@@ -1930,21 +1823,23 @@ test("resuming a building walk retains its pending section and earlier rooms", f
     assert(result.survey.sectionsSearched == 2 and f.destination:contains(selected))
 end)
 
-test("a protected item added while stopped blocks resumed whole-bin approval", function()
+test("a protected item added while stopped keeps the can from being emptied after Resume", function()
     local f = fixture(3)
-    local bin = container("changed reviewed bin", 4); bin.trash, bin.uninspected, f.bins = true, true, {bin}
-    item(f.source)
+    local bin = container("changed reviewed bin", 4); bin.trash, f.bins = true, {bin}
+    item(bin, "Base.Existing"); item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
     local old = assert(f.jobs:reviewBin())
     stopJob(f)
     local kept = item(bin); kept.protected = true
     assert(f.jobs:resume())
+    local status = awaitState(f, "paused")
+    assert(status.canResume and status.carried == 1 and not f.jobs:approveBin(old))
+    assert(bin:contains(kept) and #f.deletions == 0)
+    kept.protected = false
+    assert(f.jobs:resume())
     awaitState(f, "needs_review")
-    local review = assert(f.jobs:reviewBin())
-    assert(not review.canApprove and #review.skipped == 1 and review.skipped[1].status == "Protected")
-    assert(not f.jobs:approveBin(old) and not f.jobs:approveBin(review))
-    assert(bin:contains(kept) and #f.deletions == 0 and #f.transfers == 0)
+    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())) and finish(f).done == 1)
 end)
 
 test("resumed cleanup follows the reacquired bin through approval and capacity updates", function()
@@ -1973,7 +1868,7 @@ test("cleanup clears selected bin contents in place without hauling", function()
     local bin = container("source trash", 4); bin.trash = true
     f.sources, f.bins = {bin}, {bin}
     local selected = item(bin)
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.state == "finished" and status.done == 1 and status.moved == 0 and status.cleared == 1)
     assert(status.skipped == 0 and #f.transfers == 0 and #f.deletions == 1 and not selected:getContainer())
@@ -1986,7 +1881,7 @@ test("source bins settle once regardless of source order", function()
         local existing, hauled = item(bin, "Base.Existing"), item(f.source)
         f.bins = {bin}
         f.sources = first and {bin, f.source} or {f.source, bin}
-        start(f, request("trash"))
+        quick(f, request("trash"))
         local status = finish(f)
         assert(status.done == 2 and status.total == 2 and status.moved == 1 and status.cleared == 1 and status.skipped == 0)
         assert(#f.transfers == 2 and not existing:getContainer() and not hauled:getContainer())
@@ -1999,7 +1894,7 @@ test("failed source-bin deletion retains its selected work and contents", functi
     f.sources, f.bins = {bin}, {bin}
     local selected = item(bin)
     f.rejectTrash = true
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.done == 0 and status.cleared == 0 and status.skipped == 1)
     assert(bin:contains(selected) and #f.transfers == 0 and #f.deletions == 0)
@@ -2011,7 +1906,7 @@ test("a protected copy added after trash work queues prevents dispatch", functio
     f.sources, f.bins = {bin}, {bin}
     local selected = item(bin)
     f.holdTrashBegin = true
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local queued = false
     for _ = 1, 100 do
         tick(f)
@@ -2057,38 +1952,38 @@ test("capacity refusal with no later progress finishes finitely and keeps the it
     assert(f.source:contains(selected) and f.rejectedPickups == 1 and #f.transfers == 0)
 end)
 
-test("skip-review is explicit per job and still freshly inspects bins", function()
+test("not asking is a choice for one job, and an unopened can is still opened first", function()
     local f = fixture(2)
-    local bin = container("uninspected skip bin", 4); bin.trash, bin.uninspected = true, true
-    f.bins = {bin}
-    local selected = item(f.source)
-    local plan = assert(f.jobs:preview(request("trash")))
-    assert(f.jobs:start(plan, {reviewBins = false}))
+    local bin = container("unopened bin", 4); bin.trash, bin.explored, f.bins = true, false, {bin}
+    local selected, revealed = item(f.source), nil
+    bin.reply = function() revealed = item(bin, "Base.Revealed") end
+    quick(f, request("trash"))
     local status = finish(f)
-    assert(status.done == 1 and status.skipped == 0 and f.inspectedBins[bin.name] and not selected:getContainer())
-    local nextItem = item(f.source)
-    bin.uninspected, f.inspectedBins[bin.name] = true, nil
+    assert(status.done == 1 and status.skipped == 0 and bin.explored and not selected:getContainer() and not revealed:getContainer())
+    f.position, bin.explored = "source", false
+    item(f.source)
     start(f, request("trash"))
     local paused = awaitState(f, "needs_review")
-    assert(paused.done == 0 and f.source:contains(nextItem))
+    assert(paused.done == 0 and bin:contains(revealed))
 end)
 
 test("skip-review never approves protected bin contents", function()
     local f = fixture(2)
-    local bin = container("protected skip bin", 4); bin.trash, bin.uninspected = true, true
-    local kept = item(bin); kept.protected = true
+    local bin = container("protected skip bin", 4); bin.trash = true
+    local kept = item(bin)
     local selected = item(f.source)
     f.bins = {bin}
     local plan = assert(f.jobs:preview(request("trash")))
     assert(f.jobs:start(plan, {reviewBins = false}))
+    kept.protected = true
     local status = finish(f)
-    assert(status.done == 0 and status.skipped > 0 and #f.transfers == 0 and #f.deletions == 0)
-    assert(bin:contains(kept) and f.source:contains(selected))
+    assert(status.state == "paused" and status.done == 0 and status.carried == 1 and #f.deletions == 0)
+    assert(bin:contains(kept) and f.inventory:contains(selected))
 end)
 
 test("invalid approval cannot turn off future bin reviews", function()
     local f = fixture(2)
-    local bin = container("policy token bin", 4); bin.trash, bin.uninspected = true, true
+    local bin = container("policy token bin", 4); bin.trash = true; item(bin, "Base.Existing")
     f.bins = {bin}; item(f.source)
     start(f, request("trash"))
     local first = awaitState(f, "needs_review")
@@ -2118,37 +2013,37 @@ test("shortcut readiness follows the running job and permits fresh work after se
     local original = request("container", f.destination)
     original.filter = {all = false, ids = {}, types = {"Test.Old"}}
     original.shortcutIntent = "matching:put"
-    assert(f.jobs:status().state == "idle" and f.jobs:status().canPreview and f.jobs:status().hasJob == false)
+    assert(f.jobs:status().state == "idle" and f.jobs:status().canStart and f.jobs:status().hasJob == false)
     start(f, original)
-    assert(not f.jobs:status().canPreview and f.jobs:status().hasJob == true)
+    assert(not f.jobs:status().canStart and f.jobs:status().hasJob == true)
     assert(f.jobs:status().intent == "matching:put" and f.jobs:status().action == "transfer")
     awaitOperation(f, function(op) return op.kind == "transfer" end)
-    assert(f.adapter:isBusy() and not f.jobs:status().canPreview)
-    assert(f.jobs:pause() and not f.jobs:status().canPreview and f.jobs:status().hasJob == true)
+    assert(f.adapter:isBusy() and not f.jobs:status().canStart)
+    assert(f.jobs:pause() and not f.jobs:status().canStart and f.jobs:status().hasJob == true)
     local paused = awaitState(f, "paused")
-    assert(paused.canResume and paused.canPreview and paused.hasJob == true and #f.transfers == 0)
+    assert(paused.canResume and paused.canStart and paused.hasJob == true and #f.transfers == 0)
     assert(f.jobs:preview(original))
-    assert(f.jobs:resume() and not f.jobs:status().canPreview)
-    assert(f.jobs:cancel() and not f.jobs:status().canPreview)
+    assert(f.jobs:resume() and not f.jobs:status().canStart)
+    assert(f.jobs:cancel() and not f.jobs:status().canStart)
     local cancelled = finish(f)
-    assert(cancelled.state == "cancelled" and not cancelled.canResume and cancelled.canPreview and cancelled.hasJob == false)
+    assert(cancelled.state == "cancelled" and not cancelled.canResume and cancelled.canStart and cancelled.hasJob == false)
     assert(cancelled.intent == nil and cancelled.action == nil)
     local fresh = request("inventory")
     fresh.filter = {all = false, ids = {}, types = {"Test.New"}}
     local plan = assert(f.jobs:preview(fresh))
     assert(f.jobs:status().state == "cancelled" and #f.transfers == 0 and f.source:contains(old))
-    assert(f.jobs:start(plan) and not f.jobs:status().canPreview)
+    assert(f.jobs:start(plan) and not f.jobs:status().canStart)
     local finished = finish(f)
-    assert(finished.state == "finished" and finished.canPreview and finished.done == 1 and finished.hasJob == false)
+    assert(finished.state == "finished" and finished.canStart and finished.done == 1 and finished.hasJob == false)
     assert(#f.transfers == 1 and f.transfers[1].item == selected and f.inventory:contains(selected))
     assert(f.source:contains(old) and f.destination:isEmpty())
     local reviewing = fixture(2)
     local bin = container("shortcut review bin", 4)
-    bin.trash, bin.uninspected = true, true
+    bin.trash = true; item(bin, "Base.Existing")
     reviewing.bins = {bin}; item(reviewing.source)
     start(reviewing, request("trash"))
     local binReview = awaitState(reviewing, "needs_review")
-    assert(not binReview.canPreview and binReview.hasJob == true)
+    assert(not binReview.canStart and binReview.hasJob == true)
 end)
 
 test("combat pause remains stopped after the combat input ends until Resume", function()
@@ -2170,7 +2065,7 @@ test("late observed trash completion during pause settles selected source IDs on
     local bin = container("delayed source trash", 4); bin.trash = true
     f.sources, f.bins = {bin}, {bin}
     local selected = item(bin)
-    start(f, request("trash"))
+    quick(f, request("trash"))
     awaitOperation(f, function(op) return op.kind == "trash" end)
     assert(#f.deletions == 0 and bin:contains(selected))
     f.trashReplyDuringCancel, f.completeDuringCancel = true, true
@@ -2188,25 +2083,10 @@ test("trash deletion cannot settle a same-ID copy registered at another source",
     local selected = item(f.source)
     local foreign = item(bin); foreign.id = selected.id
     f.bins = {bin}
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.done == 1 and status.total == 1 and status.moved == 1 and status.cleared == 0 and status.skipped == 0)
     assert(#f.transfers == 2 and #f.deletions == 2 and not selected:getContainer() and not foreign:getContainer())
-end)
-
-test("bin-source settlement requires the registered full type as well as the ID", function()
-    local f = fixture(1)
-    local bin = container("type-changing source trash", 2); bin.trash = true
-    local selected, existing = item(f.source), item(bin, "Base.Original")
-    f.bins, f.sources = {bin}, {f.source, bin}
-    local changed = false
-    f.onApproach = function(op)
-        if op.container == bin and not changed then existing.fullType, changed = "Base.Replacement", true end
-    end
-    start(f, request("trash"))
-    local status = finish(f)
-    assert(status.done == 1 and status.moved == 1 and status.cleared == 0 and status.skipped == 1)
-    assert(#f.transfers == 2 and not selected:getContainer() and not existing:getContainer())
 end)
 
 local function recoveryFixture(f, personal)
@@ -2214,8 +2094,10 @@ local function recoveryFixture(f, personal)
     local point = f:ensureSquare(safe.position)
     f.safeCandidates = {safe}
     local recovery = {pending = false, personal = personal, safe = safe}
-    function recovery:status() return {pending = self.pending, point = {x = point.x, y = point.y, z = point.z}} end
+    function recovery:status() return {pending = self.pending, blocking = self.pending and not f.inventory:contains(personal),
+        point = self.pending and {x = point.x, y = point.y, z = point.z} or nil} end
     function recovery:endpoint() return safe end
+    function recovery:forget() self.pending, self.forgotten = false, true end
     function recovery:prepare() self.pending = true; return true end
     function recovery:allows(op)
         return self.pending and op.personalRecovery and op.item == personal and
@@ -2334,9 +2216,57 @@ test("a heavy cleanup restores personal gear only after deleting the delivered h
     assert(restoredAfterDelete and f.inventory:contains(personal) and not recovery.pending and #f.transfers == 4 and #f.deletions == 1)
 end)
 
+test("gear that cannot be put down costs only the heavy item and leaves nothing reserved", function()
+    local f = fixture(3)
+    local personal = item(f.inventory, "Base.Personal", 1); personal.protected = true
+    local heavy, other = item(f.source, "Base.Heavy", 3), item(f.source, "Base.Other", 1)
+    local bin = container("trash", 4); bin.trash = true; f.bins = {bin}
+    local recovery, safe = recoveryFixture(f, personal)
+    f.blockedPositions[safe.position] = true
+    quick(f, request("trash"))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 1 and status.skipped == 1, status.reason)
+    assert(f.source:contains(heavy) and not other:getContainer() and f.inventory:contains(personal))
+    assert(recovery.forgotten and not recovery.pending)
+end)
+
+test("gear already put down is fetched back when staging the rest fails", function()
+    local f = fixture(3)
+    local personal = item(f.inventory, "Base.Personal", 1); personal.protected = true
+    local heavy = item(f.source, "Base.Heavy", 3)
+    local bin = container("trash", 4); bin.trash = true; f.bins = {bin}
+    local recovery, safe = recoveryFixture(f, personal)
+    function recovery:next(mode)
+        if mode == "stage" and safe:contains(personal) then return nil, "The cupboard is full" end
+        if mode == "restore" and f.inventory:contains(personal) then self.pending = false; return nil, nil, true end
+        local out = mode == "stage"
+        return {kind = "transfer", item = personal, source = out and f.inventory or safe, destination = out and safe or f.inventory, personalRecovery = true}
+    end
+    quick(f, request("trash"))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and f.inventory:contains(personal) and f.source:contains(heavy))
+    assert(not recovery.pending and not recovery.forgotten)
+end)
+
+test("a heavy load still finishes after the player fetched the gear by hand", function()
+    local f = fixture(3)
+    local personal = item(f.inventory, "Base.Personal", 1); personal.protected = true
+    local heavy = item(f.source, "Base.Heavy", 3)
+    local bin = container("trash", 4); bin.trash = true; f.bins = {bin}
+    local recovery, safe = recoveryFixture(f, personal)
+    quick(f, request("trash"))
+    awaitOperation(f, function(op) return op.kind == "approach" and op.container == bin end)
+    stopJob(f)
+    assert(remove(safe.items, personal)); f.hardLimit = 4
+    f.inventory.items[#f.inventory.items + 1], personal.container, recovery.pending = personal, f.inventory, false
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1 and not heavy:getContainer(), status.reason)
+end)
+
 test("pausing a bin review requires a new generation and token before Resume continues", function()
     local f = fixture(2)
-    local bin = container("paused generation bin", 4); bin.trash, bin.uninspected = true, true
+    local bin = container("paused generation bin", 4); bin.trash = true; item(bin, "Base.Existing")
     f.bins = {bin}; item(f.source)
     start(f, request("trash"))
     local before = awaitState(f, "needs_review")
@@ -2355,8 +2285,8 @@ test("bag preparation keeps capacity-dependent selected items in the preview ins
     item(f.source, "Base.Plank", 2)
     local Carry = require "LootBox/Carry"
     local previous = Carry.next
-    Carry.next = function(_, _, incoming)
-        assert(incoming == 4)
+    Carry.next = function(_, _, work)
+        assert(#work == 2)
         return {kind = "gear"}
     end
     local plan = assert(f.jobs:preview(request("inventory")))
@@ -2447,9 +2377,9 @@ test("a full first matching crate leaves its item carried and moves later distin
     assert(#plan.moves == 1 and #plan.skipped == 1)
     assert(f.jobs:start(plan))
     local status = finish(f)
-    assert(status.state == "finished_with_skips" and status.moved == 1)
+    assert(status.state == "finished" and status.moved == 1)
     assert(f.inventory:contains(blocked) and available:contains(movable))
-    assert(not status.hasJob and status.canPreview)
+    assert(not status.hasJob and status.canStart)
 end)
 
 test("matching crate filling after preview still skips only that type and continues", function()
@@ -2536,7 +2466,7 @@ test("native matching order across bags determines which items fit a limited tar
     f.nativeOrder = {light, middle, heavy}
     start(f, matchingRequest())
     local status = finish(f)
-    assert(status.state == "finished_with_skips" and status.done == 2 and status.skipped == 1 and #f.transfers == 2)
+    assert(status.state == "finished" and status.done == 2 and status.skipped == 0 and #f.transfers == 2)
     assert(f.destination:contains(light) and f.destination:contains(middle) and not f.destination:contains(heavy))
     assert(f.inventory:contains(heavy) and bag:isEmpty())
 end)
@@ -2633,7 +2563,8 @@ end)
 
 local function condenseFixture()
     local f = fixture(50)
-    f.world.player = f.player
+    f.world.player, f.world.state = f.player, {containerLabels = {}}
+    for _, name in ipairs({"bags", "kinds", "meantFor"}) do f.world[name] = require("LootBox/World")[name] end
     function f.world:carryFactor(value) return value.carryFactor or 1 end
     function f.inventory:isRemoveItemAllowed() return true end
     function f.player:isEquipped(value) return value.equipped == true end
@@ -2643,7 +2574,9 @@ local function condenseFixture()
         local value = item(parent, "Test." .. name, 0)
         value.equipped = equipped ~= false
         function value:IsInventoryContainer() return true end
+        function value:getCategory() return "Container" end
         function value:getInventory() return inside end
+        function value:getEquipParent() return self.held and f.player or nil end
         function value:getMaxItemSize() return self.maximumItem or 0 end
         function value:getAttachedSlot() return -1 end
         function inside:isRemoveItemAllowed() return true end
@@ -2713,13 +2646,29 @@ test("Condense avoids equal-weight full-bag exchanges and respects temporary har
     strong = f:addBag("Strong", 10, 0.1)
     weak = f:addBag("Weak", 10, 0.5)
     item(strong, "Test.Nine", 9); item(weak, "Test.Eight", 8); item(weak, "Test.Two", 2)
+    -- Carrying 5.9: the nine needs 14.9 to pass through the inventory.
     f.hardLimit = 14
     f:startCondense({rebalance = true})
     local blocked = finish(f)
-    assert(blocked.state == "finished" and #f.transfers == 0 and blocked.reason:find("temporary", 1, true))
-    f.hardLimit = 22
+    assert(blocked.state == "finished" and #f.transfers == 0 and blocked.reason:find("for a moment", 1, true))
+    f.hardLimit = 15
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished" and math.abs(f.world:carrying() - 5.5) < 0.0001)
+end)
+
+test("Condense needs full carrying room only for a bag held in a hand, as the game does", function()
+    for _, held in ipairs({false, true}) do
+        local f = condenseFixture()
+        local strong, strongItem = f:addBag("Strong", 10, 0.2)
+        local weak = f:addBag("Weak", 100, 0.5)
+        strongItem.held = held
+        item(f.inventory, "Test.Keep", 47).protected = true
+        local selected = item(weak, "Test.Can", 2.8)
+        -- Carrying 48.4 of 50.
+        f:startCondense({rebalance = true})
+        assert(finish(f).state == "finished")
+        assert(strong:contains(selected) == not held and weak:contains(selected) == held)
+    end
 end)
 
 test("Condense uses unequipped loot bags only when enabled and honors native item size", function()
@@ -2803,27 +2752,26 @@ test("Condense pauses on failed inventory capture and resumes from current stora
     f:startCondense()
     local status = awaitState(f, "paused")
     assert(status.canResume and #f.transfers == 1 and bag:contains(selected))
-    assert(status.reason:find("unavailable", 1, true))
+    assert(status.reason:find("cannot be read", 1, true))
     f.inventory.owned, f.onTransfer = true, nil
     assert(f.jobs:resume())
     assert(finish(f).state == "finished" and #f.transfers == 1)
 end)
 
-test("Smart Take unwanted exclusion survives preview and final native dispatch checks", function()
+test("unwanted items are left whenever loot is taken, and never when they are moved elsewhere", function()
     local f = fixture(10)
     local wanted = item(f.source)
     local unwanted = item(f.source)
     unwanted.isUnwanted = function(_, player) return player == f.player end
-    local input = request("inventory")
-    input.excludeUnwanted = true
-    local plan = assert(f.jobs:preview(input))
+    local plan = assert(f.jobs:preview(request("inventory")))
     assert(#plan.moves == 1 and plan.records[1].item == wanted)
     wanted.isUnwanted = function() return true end
     assert(f.jobs:start(plan))
     local status = finish(f)
     assert(status.moved == 0 and f.source:contains(wanted) and f.source:contains(unwanted) and #f.transfers == 0)
-    local ordinary = assert(f.jobs:preview(request("inventory")))
-    assert(#ordinary.moves == 2, "Only Smart Take's explicit unwanted policy changes selection")
+    assert(#assert(f.jobs:preview(request("container", f.destination))).moves == 2, "Only taking loot leaves unwanted items")
+    local strict = request("container", f.destination); strict.excludeUnwanted = true
+    assert(#assert(f.jobs:preview(strict)).moves == 0)
 end)
 
 test("Condense packing groups with protected seeds among equally reducing bags", function()
@@ -2922,10 +2870,10 @@ test("Condense prefers even tiny reduction gains and rejects tiny increases for 
     assert(finish(f).state == "finished" and #f.transfers == 1 and stronger:contains(selected))
 end)
 
-test("Condense rejects a grouping exchange with a tiny positive net mass delta", function()
+test("Condense never adds weight to keep things together", function()
     local f = condenseFixture()
     local stronger = f:addBag("Stronger", 3, 0.5)
-    local weaker = f:addBag("Weaker", 4, 0.50001)
+    local weaker = f:addBag("Weaker", 4, 0.51)
     local firstA = item(stronger, "Test.A", 2)
     local firstB = item(stronger, "Test.B", 1)
     local secondA = item(weaker, "Test.A", 2)
@@ -2933,7 +2881,7 @@ test("Condense rejects a grouping exchange with a tiny positive net mass delta",
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished" and #f.transfers == 0)
     assert(stronger:contains(firstA) and stronger:contains(firstB) and weaker:contains(secondA) and weaker:contains(secondB))
-    assert(math.abs(f.world:carrying() - 3.00003) < 0.0000001)
+    assert(math.abs(f.world:carrying() - 3.03) < 0.0000001)
     weaker.carryFactor = 0.5
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished")
@@ -2942,6 +2890,103 @@ test("Condense rejects a grouping exchange with a tiny positive net mass delta",
     local count = #f.transfers
     f:startCondense({rebalance = true})
     assert(finish(f).state == "finished" and #f.transfers == count)
+end)
+
+local function randomizer(seed)
+    return function(low, high)
+        seed = seed * 16807 % 2147483647
+        return low + math.floor(seed / 2147483647 * (high - low + 1))
+    end
+end
+
+-- The least that could be carried, from trying every placement.
+local function lightest(f, bags, rebalance)
+    local places, loads, fixed = {{factor = 1, room = math.huge}}, {}, 0
+    for _, value in ipairs(f.inventory.items) do if value.weight > 0 then loads[#loads + 1] = value.weight end end
+    for _, bag in ipairs(bags) do
+        local room = bag.capacity
+        for _, value in ipairs(bag.items) do
+            if rebalance then loads[#loads + 1] = value.weight else room, fixed = room - value.weight, fixed + value.weight * bag.carryFactor end
+        end
+        places[#places + 1] = {factor = bag.carryFactor, room = room}
+    end
+    table.sort(loads, function(a, b) return a > b end)
+    local best = math.huge
+    local function place(index, mass)
+        if mass >= best then return end
+        if not loads[index] then best = mass; return end
+        for _, target in ipairs(places) do
+            if loads[index] <= target.room + 0.00001 then
+                target.room = target.room - loads[index]
+                place(index + 1, mass + loads[index] * target.factor)
+                target.room = target.room + loads[index]
+            end
+        end
+    end
+    place(1, fixed)
+    return best
+end
+
+test("Condense reaches the least weight possible, in either mode, on small inventories", function()
+    local weights, factors = {0.1, 0.2, 0.3, 0.5, 0.8, 1, 1.5, 2, 2.5, 3, 4, 5, 6}, {0.15, 0.2, 0.3, 0.35, 0.5}
+    for seed = 1, 40 do
+        for _, rebalance in ipairs({true, false}) do
+            local random, f, bags = randomizer(seed * 7919), condenseFixture(), {}
+            f.hardLimit = 1000
+            for index = 1, 2 + seed % 2 do bags[index] = f:addBag("Bag" .. index, random(4, 10), factors[random(1, #factors)]) end
+            for _ = 1, 7 do
+                local weight, source = weights[random(1, #weights)], f.inventory
+                local bag = bags[random(1, #bags)]
+                if random(1, 2) == 1 and bag:getCapacityWeight() + weight <= bag.capacity then source = bag end
+                item(source, "Test.Kind" .. random(1, 4), weight)
+            end
+            local best, kept = lightest(f, bags, rebalance), {}
+            for _, bag in ipairs(bags) do for _, value in ipairs(bag.items) do kept[value] = bag end end
+            local plan = assert(f.jobs:previewCondense({rebalance = rebalance}))
+            if #plan.moves > 0 then assert(f.jobs:start(plan)); assert(finish(f).state == "finished") end
+            assert(math.abs(f.world:carrying() - best) < 0.0001, "Seed " .. seed .. " carries " .. f.world:carrying() .. ", not " .. best)
+            if not rebalance then for value, bag in pairs(kept) do assert(bag:contains(value)) end end
+            assert(#assert(f.jobs:previewCondense({rebalance = rebalance})).moves == 0, "Seed " .. seed .. " is not settled")
+        end
+    end
+end)
+
+test("Condense starts moving at once and moves almost nothing twice in a large inventory", function()
+    local random, f, bags = randomizer(4), condenseFixture(), {}
+    f.hardLimit = 1000
+    for index, entry in ipairs({{28, 0.15}, {18, 0.35}, {6, 0.5}}) do bags[index] = f:addBag("Bag" .. index, entry[1], entry[2]) end
+    local weights, total = {0.1, 0.1, 0.2, 0.3, 0.5, 0.8, 1, 1.5, 2, 3}, 0
+    for _ = 1, 80 do
+        local weight, source = weights[random(1, #weights)], f.inventory
+        local bag = bags[random(1, #bags)]
+        if random(1, 10) < 8 and bag:getCapacityWeight() + weight <= bag.capacity then source = bag end
+        item(source, "Test.Kind" .. random(1, 20) .. ":" .. weight, weight)
+        total = total + weight
+    end
+    f:startCondense({rebalance = true})
+    for _ = 1, 2 do tick(f) end
+    assert(f.adapter.active, "The first move waits for planning")
+    local status = finish(f)
+    -- Every bag filled to the brim, the best first.
+    local least = 28 * 0.15 + 18 * 0.35 + 6 * 0.5 + (total - 52)
+    assert(status.state == "finished" and total > 52 and math.abs(f.world:carrying() - least) < 0.0001)
+    local moves, again = {}, 0
+    for _, entry in ipairs(f.transfers) do
+        moves[entry.item.id] = (moves[entry.item.id] or 0) + 1
+        if moves[entry.item.id] == 2 then again = again + 1 end
+        assert(moves[entry.item.id] <= 2)
+    end
+    assert(#f.transfers < 80 and again <= 4, #f.transfers .. " moves, " .. again .. " items moved twice")
+end)
+
+test("Condense leaves an arrangement alone when no real weight can be saved", function()
+    local f = condenseFixture()
+    local strong, weak = f:addBag("Strong", 6, 0.15), f:addBag("Weak", 20, 0.35)
+    -- 0.1, 0.2 and 0.3 add up to slightly different sums in different orders.
+    for index = 1, 10 do item(strong, "Test.A", 0.1); item(strong, "Test.B", 0.2); item(strong, "Test.C", 0.3) end
+    for index = 1, 10 do item(weak, "Test.D", 0.1); item(weak, "Test.E", 0.2); item(weak, "Test.F", 0.3) end
+    local plan = assert(f.jobs:previewCondense({rebalance = true}))
+    assert(#plan.moves == 0 and plan.condense.reason == "Your bags are packed.")
 end)
 
 test("new manager preview preserves pause until start and Resume invalidates it", function()
@@ -2972,9 +3017,9 @@ test("Cancel supersedes pending Condense pause and releases the scheduler", func
         assert(f.jobs:pause())
         if settleFirst then awaitState(f, "paused") end
         assert(f.jobs:cancel())
-        if not settleFirst then assert(not f.jobs:status().canPreview) end
+        if not settleFirst then assert(not f.jobs:status().canStart) end
         local cancelled = finish(f)
-        assert(cancelled.state == "cancelled" and not cancelled.canResume and not cancelled.hasJob and cancelled.canPreview)
+        assert(cancelled.state == "cancelled" and not cancelled.canResume and not cancelled.hasJob and cancelled.canStart)
         assert(not f.jobs:resume() and f.jobs.suspended == nil and f.jobs.plan == nil and f.jobs.operation == nil)
         assert(f.inventory:contains(selected) and not bag:contains(selected))
         local fresh = item(f.source, "Test.Fresh", 1)
@@ -3126,16 +3171,7 @@ test("sitting down during a job pauses it once and Resume repeats the same step"
     assert(status.state == "finished" and status.done == 2 and status.skipped == 0)
 end)
 
-test("time without ticks extends deadlines, ordinary frames do not", function()
-    local f = fixture(3)
-    item(f.source)
-    start(f)
-    for _ = 1, 5 do tick(f) end
-    assert(f.extended == nil)
-    f.now = f.now + 90000
-    tick(f)
-    assert(f.extended and f.extended >= 90000 and f.extended <= 90200)
-    assert(finish(f).done == 1)
+test("a paused game uses up no deadline", function()
     local g = fixture(3); g.client = true; g.source.explored = false
     start(g, request("inventory"))
     for _ = 1, 50 do tick(g); if g.source.requested then break end end
@@ -3143,13 +3179,14 @@ test("time without ticks extends deadlines, ordinary frames do not", function()
     g.source.reply = function() item(g.source) end
     g.scheduled[1] = {at = g.now + 400, run = g.source.reply}
     local status = finish(g)
-    assert(status.done == 1, "A paused game must not use up the wait for a server reply")
+    assert(status.done == 1 and status.state == "finished", "A minute without ticks must not end the wait for a server reply")
 end)
 
 test("leaving a bin during its multiplayer inspection goes back to it", function()
     local f = fixture(2); f.client = true
     local bin = container("inspected bin", 4)
-    bin.trash, bin.uninspected, bin.explored, f.bins = true, true, false, {bin}
+    bin.trash, bin.explored, f.bins = true, false, {bin}
+    bin.reply = function() item(bin, "Base.Revealed") end
     item(f.source)
     start(f, request("trash"))
     for _ = 1, 50 do tick(f); if bin.requested then break end end
@@ -3168,10 +3205,31 @@ test("an empty multiplayer container costs about a second", function()
     assert(f.now - asked >= 1000 and f.now - asked <= 2000, "Waited " .. (f.now - asked))
 end)
 
-test("a vehicle the job unlocked is locked again after the last delivery", function()
-    local f = fixture(9); f.sources = {f.source}
+local function lockedCar(f)
     local car = {}
+    f.destination.getVehiclePart = function() return {getVehicle = function() return car end} end
+    f.lockedVehicle = {storage = f.destination}
+    return car
+end
+
+local function vehicleSteps(f)
+    local result = {}
+    for _, op in ipairs(f.operations) do if op.kind == "vehicle" then result[#result + 1] = op end end
+    return result
+end
+
+test("a vehicle that opens from outside is loaded without sitting in it", function()
+    local f = fixture(9)
+    lockedCar(f); f.lockedVehicle = nil
     item(f.source)
+    start(f, request("vehicle", {}))
+    assert(finish(f).state == "finished" and #f.destination.items == 1 and #vehicleSteps(f) == 0)
+end)
+
+test("a locked vehicle is unlocked from its seat once, and locked again after the last delivery", function()
+    local f = fixture(9); f.sources = {f.source}
+    local car = lockedCar(f)
+    item(f.source); item(f.source)
     function f.adapter:begin(op)
         if op.kind == "vehicle" and not op.relock then
             op.unlocked = {{vehicle = car, partId = "TrunkDoor"}, {vehicle = car, partId = "DoorFrontLeft"}, {vehicle = car, partId = "TrunkDoor"}}
@@ -3179,14 +3237,30 @@ test("a vehicle the job unlocked is locked again after the last delivery", funct
         return Native.begin(self, op)
     end
     start(f, request("vehicle", car))
-    assert(finish(f).state == "finished")
-    local last = f.operations[#f.operations]
-    assert(last.kind == "vehicle" and last.vehicle == car and table.concat(last.relock, ",") == "TrunkDoor,DoorFrontLeft")
-    assert(f.transfers[#f.transfers].destination == f.destination)
+    assert(finish(f).state == "finished" and #f.destination.items == 2)
+    local steps = vehicleSteps(f)
+    assert(#steps == 2 and steps[1].vehicle == car and not steps[1].relock)
+    assert(steps[2] == f.operations[#f.operations] and steps[2].vehicle == car
+        and table.concat(steps[2].relock, ",") == "TrunkDoor,DoorFrontLeft")
+end)
+
+test("a vehicle that cannot be unlocked keeps the load carried and says why", function()
+    local f = fixture(9)
+    lockedCar(f)
+    local selected = item(f.source)
+    function f.adapter:begin(op)
+        if op.kind == "vehicle" then return nil, "The driver door is locked and you cannot unlock it" end
+        return Native.begin(self, op)
+    end
+    start(f, request("vehicle", {}))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and f.inventory:contains(selected))
+    assert(status.reasons[1].reason:find("driver door is locked", 1, true) and status.reasons[1].reason:find("carried storage", 1, true))
 end)
 
 test("a vehicle that cannot be locked again is reported", function()
     local f = fixture(9)
+    lockedCar(f)
     item(f.source)
     function f.adapter:begin(op)
         if op.relock then return nil, "The driver seat is occupied" end
@@ -3197,6 +3271,235 @@ test("a vehicle that cannot be locked again is reported", function()
     local status = finish(f)
     assert(status.state == "finished_with_skips" and status.done == 1)
     assert(status.reasons[1].reason:find("left unlocked", 1, true) and status.reasons[1].reason:find("seat is occupied", 1, true))
+end)
+
+-- Batches, direct moves and delivery order ----------------------------------
+
+local function transferOps(f)
+    local result = {}
+    for _, op in ipairs(f.operations) do if op.kind == "transfer" then result[#result + 1] = op end end
+    return result
+end
+
+local function nails(source, count, fullType)
+    local result = {}
+    for index = 1, count do result[index] = item(source, fullType or "Base.Nails", 0.05) end
+    return result
+end
+
+test("a hundred nails are carried and delivered twenty at a time", function()
+    local f = fixture(50)
+    nails(f.source, 100)
+    item(f.source, "Base.Hammer", 1)
+    start(f)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 101 and status.moved == 101 and #f.destination.items == 101)
+    local ops = transferOps(f)
+    assert(#ops == 12, "Five runs and a hammer each way, not " .. #ops)
+    for _, op in ipairs(ops) do
+        assert(#op.items <= 20)
+        for _, value in ipairs(op.items) do assert(value.fullType == op.item.fullType, "Only one type to an action") end
+    end
+end)
+
+test("a run takes only what fits, what is wanted and what is not protected", function()
+    local f = fixture(50)
+    f.hardLimit = 0.5
+    local loose = nails(f.source, 14)
+    loose[3].protected = true
+    local plan = assert(f.jobs:preview(request("container", f.destination)))
+    loose[5].protected = true
+    assert(f.jobs:start(plan))
+    local status = finish(f)
+    assert(status.done == 12 and status.skipped == 1 and f.source:contains(loose[3]) and f.source:contains(loose[5]))
+    local ops = transferOps(f)
+    assert(#ops[1].items == 10 and #ops == 4, "Ten nails fill the half kilo that can be carried")
+end)
+
+test("an item the game leaves out of a run is tried alone and alone reported", function()
+    local f = fixture(50)
+    local loose = nails(f.source, 6)
+    f.refuseItem = function(value, op) return value == loose[4] and op.destination == f.inventory end
+    start(f)
+    local status = finish(f)
+    assert(status.done == 5 and status.skipped == 1 and status.state == "finished_with_skips")
+    assert(f.source:contains(loose[4]) and #f.destination.items == 5)
+    for _, op in ipairs(transferOps(f)) do if op.item == loose[4] then assert(#op.items == 1) end end
+end)
+
+test("pausing in the middle of a run counts what had moved and continues with the rest", function()
+    local f = fixture(50)
+    local loose = nails(f.source, 20)
+    start(f, request("inventory"))
+    awaitOperation(f, function(op) return op.kind == "transfer" end)
+    for index = 1, 7 do
+        remove(f.source.items, loose[index])
+        f.inventory.items[#f.inventory.items + 1], loose[index].container = loose[index], f.inventory
+    end
+    stopJob(f)
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 20 and status.moved == 20 and #f.inventory.items == 20)
+    local ops = transferOps(f)
+    assert(#ops[#ops].items == 13, "What had moved is not asked for again")
+end)
+
+test("a delivery that exactly fills a container is accepted, and one nail more is not", function()
+    local f = fixture(50)
+    f.destination.capacity = 1
+    function f.destination:getCapacityWeight()
+        local total = 0
+        for _, value in ipairs(self.items) do total = total + value.weight end
+        return total
+    end
+    function f.destination:hasRoomFor(_, value) return math.floor((self:getCapacityWeight() + value.weight) * 100 + 0.5) <= 100 end
+    for _ = 1, 10 do item(f.source, "Base.Fuse", 0.1 + 1e-9) end
+    item(f.source, "Base.Nails", 0.05)
+    local plan = start(f)
+    assert(#plan.moves == 10 and #plan.skipped == 1)
+    local status = finish(f)
+    assert(status.state == "finished" and #f.destination.items == 10)
+end)
+
+test("with both containers in reach items go straight across and nothing is worn or carried", function()
+    local f = fixture(1)
+    f.reachable = {[f.source] = true, [f.destination] = true}
+    function f.world:gearRecords() error("No bag is needed for what is not carried") end
+    item(f.source, "Base.Anvil", 40); item(f.source, "Base.Plank", 3)
+    start(f)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 2 and #f.transfers == 2, "The carrying limit does not matter here")
+    for _, entry in ipairs(f.transfers) do assert(entry.source == f.source and entry.destination == f.destination) end
+end)
+
+test("a direct move the game refuses is carried instead", function()
+    local f = fixture(9)
+    f.reachable = {[f.source] = true, [f.destination] = true}
+    local selected = item(f.source)
+    f.refuseItem = function(_, op) return op.source == f.source and op.destination == f.destination end
+    start(f)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1 and status.skipped == 0 and f.destination:contains(selected))
+    assert(#f.transfers == 2 and f.transfers[1].destination == f.inventory)
+end)
+
+local function twoLabelled(f)
+    local near, far = container("near crate", 100), container("far crate", 100)
+    f:addSquare(square("near crate", 12, 0)); f:addSquare(square("far crate", 40, 0))
+    function f.world:destinations(input, value)
+        if input.destination.kind == "inventory" then return {f.inventory} end
+        return {value and value.fullType == "Base.Far" and far or near}
+    end
+    f.sources = {f.source, f.inventory}
+    return near, far, {scope = "room", includeBags = true, filter = {all = true, ids = {}, types = {}}, destination = {kind = "labels", labels = {}}}
+end
+
+test("a mixed load makes one stop at each destination, the nearest first", function()
+    local f = fixture(50)
+    local near, far, input = twoLabelled(f)
+    for index = 1, 8 do item(f.source, index % 2 == 0 and "Base.Near" or "Base.Far") end
+    start(f, input)
+    assert(finish(f).state == "finished" and #near.items == 4 and #far.items == 4)
+    assert(table.concat(f.visits, ",") == "near crate,far crate", table.concat(f.visits, ","))
+end)
+
+test("a hauled item the player moved to another bag is found by its identity and delivered", function()
+    for _, rehydrate in ipairs({false, true}) do
+        local f = fixture(9)
+        f.rehydrate = rehydrate
+        local pocket = f:carryContainer(container("pocket", 9), 1)
+        local selected, other = item(f.source, "Base.Nails"), item(f.source, "Base.Plank")
+        start(f)
+        for _ = 1, 300 do tick(f); if #f.transfers == 2 then break end end
+        local held = f.inventory:getItemWithID(selected.id)
+        remove(f.inventory.items, held)
+        local current = item(pocket, "Base.Nails"); current.id = selected.id
+        held.container = nil
+        local status = finish(f)
+        assert(status.state == "finished" and status.done == 2 and status.carried == 0, tostring(status.reason))
+        assert(f.destination:getItemWithID(selected.id) and f.destination:getItemWithID(other.id))
+    end
+end)
+
+test("a destination that unloads while its load is gathered is walked to before anything is judged", function()
+    local f = fixture(1)
+    f.destination.capacity = 2
+    item(f.source); item(f.source)
+    f.onTransfer = function(op) if op.destination == f.inventory then f.unloaded.destination = true end end
+    local fresh
+    f.onWalk = function(_, target)
+        if target == "destination" and not fresh then
+            fresh = container("destination", 2)
+            f.sourceLocations.destination, f.destination = fresh, fresh
+        end
+    end
+    local input = request("container", f.destination)
+    start(f, input)
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 2 and status.skipped == 0 and fresh and #fresh.items == 2, tostring(status.reason))
+end)
+
+test("three identical refusals in a row pause the job at that item", function()
+    local f = fixture(9)
+    local items = {}
+    for index = 1, 5 do items[index] = item(f.source, "Base.Thing" .. index) end
+    local refusing = true
+    f.refuseItem = function() return refusing end
+    start(f, request("inventory"))
+    local status = finish(f)
+    assert(status.state == "paused" and status.skipped == 2 and status.reason:find("3 times in a row", 1, true))
+    refusing = false
+    assert(f.jobs:resume())
+    status = finish(f)
+    assert(status.done == 3 and f.inventory:contains(items[3]), "The item that brought the pause is not lost")
+end)
+
+test("a success in between starts the count of refusals again", function()
+    local f = fixture(9)
+    local items = {}
+    for index = 1, 6 do items[index] = item(f.source, "Base.Thing" .. index) end
+    f.refuseItem = function(value) return value ~= items[3] end
+    start(f, request("inventory"))
+    local status = finish(f)
+    assert(status.state == "paused" and status.skipped == 4 and status.done == 1)
+end)
+
+test("a corpse in the player's arms pauses the job once and costs no item", function()
+    local f = fixture(9)
+    item(f.source); item(f.source)
+    f.obstacle = "Put down the corpse to continue"
+    local plan = assert(f.jobs:preview(request("inventory")))
+    local started, why = f.jobs:start(plan)
+    assert(not started and why == f.obstacle and f.jobs:status().state ~= "running")
+    f.obstacle = nil
+    assert(f.jobs:start(plan))
+    local begin, dragging = Native.begin, true
+    function f.adapter:begin(op)
+        if dragging then return nil, "Put down the corpse to continue", "corpse" end
+        return begin(self, op)
+    end
+    local status = finish(f)
+    assert(status.state == "paused" and status.skipped == 0 and status.reason:find("corpse", 1, true))
+    dragging = false
+    assert(f.jobs:resume())
+    status = finish(f)
+    assert(status.state == "finished" and status.done == 2)
+end)
+
+test("the loot window is rebuilt only for a floor item it does not list yet", function()
+    local f = fixture(9); f.onlyGround, f.sources = true, {}
+    local tile = f:addSquare(square("pile", 20, 0))
+    f.groundItems = f.ground
+    for index = 1, 4 do
+        local selected = item(f.floor, "Base.Thing" .. index)
+        selected.world = {getSquare = function() return tile end}
+        f.ground[index] = selected
+    end
+    f.floor.items = {}
+    start(f, request("floor", f.squares.destination))
+    local status = finish(f)
+    assert(status.done == 4 and status.state == "finished")
+    assert(f.refreshes == 1, "Rebuilt " .. tostring(f.refreshes) .. " times for four pickups and four drops")
 end)
 
 test("staged personal gear does not keep ordinary jobs from running", function()
@@ -3273,7 +3576,7 @@ test("one interaction number tells what was asked, what happened and why it ende
     assert(failed and failed:find("WARN", 1, true) and failed:find("Simulated native refusal", 1, true) and failed:find("Base.Denied", 1, true))
     assert(first(lines, "PHASE") and first(lines, "TASK") and first(lines, "SKIP"):find("Simulated native refusal", 1, true))
     local ending = first(lines, "END")
-    assert(ending:find("state=finished_with_skips", 1, true) and ending:find("done=1", 1, true) and ending:find("skipped=2", 1, true))
+    assert(ending:find("state=finished_with_skips", 1, true) and ending:find("done=1", 1, true) and ending:find("skipped=1", 1, true))
 end)
 
 test("a pause names its real trigger and Resume keeps the same number", function()
@@ -3324,7 +3627,7 @@ test("a skipped refusal to start is explained under the caller's number", functi
     end)
     local lines = events(text, id)
     assert(first(lines, "START-REFUSED"):find("Preview this job again", 1, true))
-    assert(first(lines, "PLAN-REFUSED"):find("Choose a source scope", 1, true))
+    assert(first(lines, "PLAN-REFUSED"):find("Choose a valid source", 1, true))
 end)
 
 test("detailed logging off writes no descriptions", function()
