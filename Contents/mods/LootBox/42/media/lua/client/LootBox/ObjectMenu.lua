@@ -195,13 +195,15 @@ function ObjectMenu.append(player, root, container, interaction)
         if not vehicle or actor:getVehicle() or not ISVehicleMenu or not ISVehicleMenu.FillMenuOutsideVehicle then return 0 end
         local first = #root.options
         Log.guard("ObjectMenu.vehicle", ISVehicleMenu.FillMenuOutsideVehicle, player, root, vehicle, false)
-        -- The game lists every part of the vehicle; this icon is one of them.
-        local function mine(option)
-            if rawequal(option.target, part) then return true end
-            for index = 1, 10 do if rawequal(option["param" .. index], part) then return true end end
+        -- What concerns the vehicle stays; what concerns another of its parts does not.
+        local function other(option)
+            for index = 0, 10 do
+                local value = index == 0 and option.target or option["param" .. index]
+                if value ~= nil and not rawequal(value, part) and instanceof(value, "VehiclePart") then return true end
+            end
             return false
         end
-        for index = #root.options, first + 1, -1 do if not mine(root.options[index]) then remove(root, index) end end
+        for index = #root.options, first + 1, -1 do if other(root.options[index]) then remove(root, index) end end
         resize(root)
         return #root.options - first
     end

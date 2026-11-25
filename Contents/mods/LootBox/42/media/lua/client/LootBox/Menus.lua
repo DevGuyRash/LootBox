@@ -404,7 +404,7 @@ local function containerRows(host, s, container, origin)
     end
 
     if has and facts.kind ~= "main" and facts.kind ~= "bin" and s.world:hasKnownBins() then
-        host:row("trash", "Throw away contents" .. count, go("throw away contents", request("container", "trash", everything(), from), { review = facts.owned }),
+        host:row("trash", "Throw away contents" .. count, go("throw away contents", request("container", "trash", everything(), from)),
             "Carried to a trash can and deleted for good.")
     end
     labelRows(host, s, container, facts)
@@ -427,8 +427,8 @@ end
 -- types, a game category and a custom category.
 local function allRows(s, what, label, carried, total, picked, source, target, descriptor)
     local rows, clicked = {}, what.clicked
-    local function add(icon, title, single, made, options)
-        rows[#rows + 1] = { icon = icon, title = title, single = single, run = act(s, "menu.item", single, made, clicked, options) }
+    local function add(icon, title, single, made)
+        rows[#rows + 1] = { icon = icon, title = title, single = single, run = act(s, "menu.item", single, made, clicked) }
     end
     local beyond = total > picked
     if carried then
@@ -443,7 +443,7 @@ local function allRows(s, what, label, carried, total, picked, source, target, d
             add("vehicle", "To my vehicle", "Haul all " .. label .. " to my vehicle", request("inventory", "vehicle", what.filter))
         end
         if beyond then add("drop", "Drop", "Drop all " .. label, request("inventory", "floor", what.filter, { ref = floorHere(s) })) end
-        if s.world:hasKnownBins() then add("trash", "Throw away", "Throw away all " .. label, request("inventory", "trash", what.filter), { review = true }) end
+        if s.world:hasKnownBins() then add("trash", "Throw away", "Throw away all " .. label, request("inventory", "trash", what.filter)) end
     else
         if beyond then add("take", "Take", "Take all " .. label, request("container", "inventory", what.filter, { sourceContainer = source })) end
         if what.everywhere and what.everywhere > total then
@@ -460,13 +460,17 @@ local function allRows(s, what, label, carried, total, picked, source, target, d
 end
 
 local function sumOpen(s, count)
-    local total = 0
-    for _, entry in ipairs(openContainers(s.playerIndex)) do
-        if entry.pane == "loot" and not s.world:owns(entry.container) then
-            local facts = s.world:containerFacts(entry.container)
-            if facts and not facts.locked then total = total + count(facts) end
+    if not s.openFacts then
+        s.openFacts = {}
+        for _, entry in ipairs(openContainers(s.playerIndex)) do
+            if entry.pane == "loot" and not s.world:owns(entry.container) then
+                local facts = s.world:containerFacts(entry.container)
+                if facts and not facts.locked then s.openFacts[#s.openFacts + 1] = facts end
+            end
         end
     end
+    local total = 0
+    for _, facts in ipairs(s.openFacts) do total = total + count(facts) end
     return total
 end
 
@@ -546,7 +550,7 @@ local function itemRows(host, s, items, item)
                 return App.saveCategory({ id = definition.id, name = definition.name, types = kinds, includes = definition.includes })
             end))
         end
-        if #custom > 0 and picked == 1 then
+        if picked == 1 then
             local single = child:sub("label", "Only this one")
             local labels = {}
             for _, id in ipairs(s.app:itemLabels(item)) do labels[id] = true end
@@ -559,6 +563,12 @@ local function itemRows(host, s, items, item)
                     return s.app:setItemLabels(item, ids)
                 end))
             end
+            single:row("more", "More...", function()
+                UI.pick(s.playerIndex, "Categories for this " .. tostring(item:getName()), s.app:itemLabels(item), function(ids)
+                    local ok, err = s.app:setItemLabels(item, ids)
+                    if not ok then UI.say(s.playerIndex, err) end
+                end)
+            end)
         end
         child:row("newCategory", "New category...", function() UI.open(s.playerIndex, "categories", { type = fullType }) end)
     end

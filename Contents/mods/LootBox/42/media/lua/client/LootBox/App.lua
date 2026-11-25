@@ -568,9 +568,18 @@ local function clearConsumption(self)
     return true
 end
 
+local function retireConsumption(self)
+    if self.consumption and not self.consumption:isBusy() then self.consumption = nil end
+end
+
 function Instance:start(plan, options)
     local ok, err = clearConsumption(self)
     if not ok then return nil, err end
+    if self.borrowed and self.borrowed.begin then
+        Log.info(options and options.interaction, "PENDING-DROPPED", "reason", "a newer job was started before it began")
+        self.borrowed = nil
+    end
+    retireConsumption(self)
     local chosen = {}
     for key, value in pairs(options or {}) do chosen[key] = value end
     if chosen.reviewBins == nil then chosen.reviewBins = App.reviewPreference(nil, true) end
@@ -605,6 +614,7 @@ function Instance:advance()
         self.parked = previous
     end
     self.jobs, self.spare = pending.runner, nil
+    retireConsumption(self)
     self:persist()
     local started, err = self.jobs:start(pending.plan, pending.options)
     if started then self.jobs.label = pending.plan.label; return true end
@@ -623,6 +633,7 @@ function Instance:resumePrevious()
     if status.canPause or (status.hasJob and not status.canResume) then return nil, "Pause or finish the current job first" end
     self.parked = status.canResume and self.jobs or nil
     self.jobs = previous
+    retireConsumption(self)
     return self.jobs:resume()
 end
 
@@ -659,6 +670,7 @@ function Instance:lend()
     end
     if self.consumption and self.consumption:isBusy() then return true end
     self.borrowed = nil
+    retireConsumption(self)
     Log.info(self.jobs.interaction, "JOB-CONTINUES", "job", self.jobs.label)
     return self.jobs:resume()
 end
@@ -752,10 +764,15 @@ function Instance:resume()
 end
 function Instance:status()
     local controller = self.consumption
-    if controller and quiet(controller) and not controller:isBusy() then controller = nil end
-    local status = controller and controller:status() or self.jobs:status()
+    local job = self.jobs:status()
+    if controller and not controller:isBusy() and (quiet(controller) or job.hasJob) then controller = nil end
+    local status = controller and controller:status() or job
     status.label = controller and (controller.label or controller.name) or self.jobs.label
     status.consuming = controller ~= nil and controller:isBusy()
+    if self.problem and self.problemState ~= job.state then
+        if self.problemState then self.problem = nil end
+        self.problemState = self.problem and job.state or nil
+    end
     if self.problem then status.reason = self.problem end
     if self.parked then status.previous = { label = self.parked.label, done = self.parked:status().done, total = self.parked:status().total } end
     status.warning = self.warning

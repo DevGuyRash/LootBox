@@ -335,6 +335,21 @@ test("drinking pauses the running job and carries on with it afterwards", functi
     App.tick(); assert(app.jobs.state == "paused", "Not while still drinking")
     controller.busy = false
     App.tick(); assert(app.jobs.state == "running")
+    local status = app:status()
+    assert(status.state == "running" and status.canPause and status.label == "Clean kitchen" and not status.consuming, "The job is shown, not the finished drink")
+    module.new = before
+end)
+
+test("a job started before a pending drink begins replaces that drink", function()
+    local app = working("running")
+    local began = 0
+    local module = package.loaded["LootBox/TillFull"]
+    local before = module.new
+    module.new = function() return {alreadySatisfied = function() return false end, isBusy = function() return false end, tick = function() began = began + 1 end, state = "finished"} end
+    app.jobs.settles = false
+    assert(app:tillFull({item}, "fluid") and app.borrowed)
+    assert(app:start(assert(app:preview(want))) and app.borrowed == nil)
+    App.tick(); assert(began == 0)
     module.new = before
 end)
 

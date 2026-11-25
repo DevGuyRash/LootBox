@@ -5,7 +5,7 @@ local App = require "LootBox/App"
 
 local JobBar = ISPanel:derive("LootBoxJobBar")
 JobBar.bars = {}
-local place
+local places = {}
 local WIDTH, LIST = 330, 190
 local DELAY = 1200
 
@@ -13,8 +13,9 @@ local needs = { needs_review = true, paused = true, pausing = true, cancelling =
 
 function JobBar.new(playerIndex)
     local width = math.max(WIDTH, math.floor(WIDTH * K.LINE / 18))
-    local x = place and place.x or (getCore():getScreenWidth() - width - 24)
-    local y = place and place.y or 110
+    local place = places[playerIndex]
+    local x = place and place.x or (getPlayerScreenLeft(playerIndex) + getPlayerScreenWidth(playerIndex) - width - 24)
+    local y = place and place.y or (getPlayerScreenTop(playerIndex) + 110)
     local o = ISPanel.new(JobBar, x, y, width, 10)
     o.playerIndex = playerIndex
     o.background, o.border = false, false
@@ -28,11 +29,12 @@ function JobBar:createChildren()
     self.pauseButton = K.button(self, "Pause", self, JobBar.pauseOrResume, "ghost")
     self.stopButton = K.button(self, "Stop", self, JobBar.stop, "ghost", "Stop this job for good. Nothing already moved is undone.")
     self.hideButton = K.button(self, "Hide", self, JobBar.hide, "ghost", "The job keeps running. The job key brings this back.")
+    self.menuButton = K.button(self, "Menu", self, function(bar) require("LootBox/UI").open(bar.playerIndex) end, "ghost", "Planner, loot list, storage, settings and help.")
     self.actionButton = K.button(self, "Check trash can", self, JobBar.action, "primary")
     self.forgetButton = K.button(self, "Forget it", self, JobBar.forget, "ghost", "Stop tracking gear that can no longer be found.")
     self.notes = K.list(self, self)
     self.notes.emptyText = "No notes yet."
-    for _, button in ipairs({ self.pauseButton, self.stopButton, self.hideButton, self.forgetButton }) do button:setHeight(K.LINE + 6); button:setWidth(K.width(button.title) + 14) end
+    for _, button in ipairs({ self.pauseButton, self.stopButton, self.hideButton, self.forgetButton, self.menuButton }) do button:setHeight(K.LINE + 6); button:setWidth(K.width(button.title) + 14) end
 end
 
 local function app(self) return App.peek(self.playerIndex) end
@@ -85,7 +87,7 @@ function JobBar:drag()
         self.dragged = true
         self:setX(self.x + dx); self:setY(self.y + dy)
         self.downX, self.downY = getMouseX(), getMouseY()
-        place = { x = self.x, y = self.y }
+        places[self.playerIndex] = { x = self.x, y = self.y }
     end
 end
 function JobBar:onMouseMove() self:drag() end
@@ -125,6 +127,9 @@ end
 
 function JobBar:read(status)
     local previous = status.previous
+    local moment = tostring(status.state) .. tostring(status.label) .. tostring(status.done)
+    if self.problem and self.problemAt and self.problemAt ~= moment then self.problem = nil end
+    self.problemAt = moment
     self.recovering = status.recovery and (status.recovery.blocking or (status.recovery.blocking == nil and status.recovery.pending)) or false
     self.mode = (status.hasJob or status.consuming) and "job" or self.recovering and "recovery" or previous and "previous" or "idle"
     local tone, line, fraction = "accent", "", nil
@@ -180,7 +185,7 @@ function JobBar:arrange()
     local pad = K.PAD
     local y = pad + K.LINE + 8 + 6 + K.LINE + 8
     local right = self.width - pad + 6
-    for _, button in ipairs({ self.hideButton, self.stopButton, self.pauseButton, self.forgetButton }) do
+    for _, button in ipairs({ self.hideButton, self.menuButton, self.stopButton, self.pauseButton, self.forgetButton }) do
         if button:isVisible() then right = right - button.width; K.place(button, right, y); right = right - 2 end
     end
     if self.actionButton:isVisible() then K.place(self.actionButton, pad - 4, y - 3, K.width(self.actionButton.title) + 24, K.LINE + 10) end

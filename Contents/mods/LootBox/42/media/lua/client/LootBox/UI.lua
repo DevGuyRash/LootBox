@@ -23,6 +23,8 @@ end
 
 function UI.open(playerIndex, page, context) return Main.show(playerIndex or 0, page, context) end
 
+function UI.pick(_, title, ids, done) return Main.pickCategories(title, ids, done) end
+
 function UI.showJob(playerIndex, problem)
     local bar = JobBar.show(playerIndex or 0, problem)
     bar.pinned = true
@@ -33,6 +35,13 @@ local function begin(playerIndex, app, plan, interaction, options)
     local ok, err = app:start(plan, { interaction = interaction, reviewBins = options and options.reviewBins })
     if not ok then Log.warn(interaction, "NOT-STARTED", "reason", err) end
     return ok, err
+end
+
+-- Deleting what the player carries is always confirmed.
+local function deletesCarried(app, request)
+    if request.destination.kind ~= "trash" then return false end
+    return request.scope == "inventory" or request.includeInventory == true
+        or (request.scope == "container" and request.sourceContainer ~= nil and app.world:owns(request.sourceContainer))
 end
 
 -- Runs a request. Nothing disturbs the job in progress until there is
@@ -73,7 +82,7 @@ function UI.act(playerIndex, request, options)
     end
     app:rememberSetup(request)
     local wanted, preference = App.reviewPreference(request)
-    if not wanted and not options.review then
+    if not wanted and not deletesCarried(app, request) then
         local ok
         ok, err = begin(playerIndex, app, plan, id)
         if not ok and not options.quiet then UI.say(playerIndex, err) end
@@ -82,6 +91,8 @@ function UI.act(playerIndex, request, options)
     return Review.show(playerIndex, { kind = "plan", plan = plan, request = request, interaction = id, preference = wanted and preference or nil,
         title = "LootBox", heading = plan.label,
         start = function() return begin(playerIndex, app, plan, id) end,
+        startWithoutBins = request.destination.kind == "trash" and App.reviewPreference(nil, true)
+            and function() return begin(playerIndex, app, plan, id, { reviewBins = false }) end or nil,
         other = function() UI.open(playerIndex, "plan", { request = request }); return true end })
 end
 
@@ -119,7 +130,7 @@ function UI.showBinReview(playerIndex)
     playerIndex = playerIndex or 0
     local app, err = App.get(playerIndex)
     if not app then return nil, err end
-    local status = app:status()
+    local status = app.jobs:status()
     UI.visits[playerIndex] = { app = app, id = status.reviewId }
     local plan
     plan, err = app:reviewBin()
@@ -226,6 +237,8 @@ function UI.install()
     require("LootBox/Navigation").install()
     Events.OnTick.Add(UI.tick)
     Events.OnKeyStartPressed.Add(UI.onKeyStartPressed)
+    -- Loading a save empties the game's window list; ours must not think they are still shown.
+    if Events.OnGameStart then Events.OnGameStart.Add(UI.closeAll) end
     if Events.OnDisconnect then Events.OnDisconnect.Add(UI.closeAll) end
     if Events.OnMainMenuEnter then Events.OnMainMenuEnter.Add(UI.closeAll) end
     local options = PZAPI.ModOptions:getOptions("LootBox") or PZAPI.ModOptions:create("LootBox", "LootBox")

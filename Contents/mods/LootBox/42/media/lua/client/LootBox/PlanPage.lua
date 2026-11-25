@@ -143,9 +143,11 @@ function Page.changed(page)
     Page.paint(page)
     page.plan, page.dueAt = nil, nil
     page.start:setEnable(chosen(page.request))
-    if not Page.app(page.win) then
+    local playing = Page.app(page.win) ~= nil
+    for _, card in ipairs({ page.what, page.from, page.to, page.presets }) do card:setEnable(playing) end
+    if not playing then
         page.summary:set("")
-        page.rows.emptyText = "Enter a game to plan a job. The loot list and categories work here already."
+        page.rows.emptyText = "Enter a game to plan a job. Categories and settings work here already."
         page.rows:fill({})
         page.start:setEnable(false); page.look:setEnable(false)
         return
@@ -168,8 +170,9 @@ function Page.tick(page)
     if page.dueAt and getTimestampMs() >= page.dueAt then Page.refresh(page) end
 end
 
+-- A copy with this moment's floor and containers filled in.
 function Page.ready(page)
-    local request = page.request
+    local request = copy(page.request)
     if not chosen(request) then return nil, "Choose what to move." end
     if request.scope == "area" and not request.area then return nil, "Mark the area first." end
     if request.scope == "labeled" and #(request.sourceLabels or {}) == 0 then return nil, "Choose which labelled containers to use." end
@@ -177,22 +180,26 @@ function Page.ready(page)
     if request.destination.kind == "container" and not request.destination.ref then return nil, "Choose a destination container." end
     if request.destination.kind == "floor" then
         local player = getSpecificPlayer(page.win.playerIndex)
-        request.destination.ref = request.destination.ref or page.context.square or (player and player:getCurrentSquare())
+        request.destination.ref = player and player:getCurrentSquare()
     end
     if request.scope == "lootPane" then
         local sources, err = Page.app(page.win).world:smartLootSources(nil, true)
         if not sources then return nil, err end
         request.sourceContainers = sources
     end
-    return true
+    return request
 end
 
 function Page.refresh(page, asked)
     page.dueAt = nil
     local app = Page.app(page.win)
-    local ok, err = Page.ready(page)
+    local request, err = Page.ready(page)
     local plan
-    if ok then plan, err = app:preview(page.request) end
+    if request then
+        plan, err = app:preview(request)
+        page.request.sourceContainers = request.sourceContainers
+        Page.paint(page)
+    end
     page.plan = plan
     if not plan then
         page.summary:set("")
@@ -210,13 +217,12 @@ end
 
 function Page.start(page)
     local app = Page.app(page.win)
-    local ok, err = Page.ready(page)
-    if not ok then page.message:set(err, "bad"); return end
-    local id = Log.intent("window.plan", Describe.title(page.request, App.category), app.player, "request", Log.request(page.request))
+    local what, err = Page.ready(page)
+    if not what then page.message:set(err, "bad"); return end
+    local id = Log.intent("window.plan", Describe.title(what, App.category), app.player, "request", Log.request(what))
     local UI = require "LootBox/UI"
-    local what = copy(page.request)
     what.interaction = id
-    local outcome
+    local ok, outcome
     ok, err, outcome = UI.act(page.win.playerIndex, what, { interaction = id, quiet = true })
     if not ok then page.message:set(tostring(err), "bad"); return end
     if outcome == "nothing" then
@@ -254,6 +260,7 @@ end
 
 function Page.whatMenu(page)
     local menu = K.menu(page.win.playerIndex, page.what)
+    if not menu then return end
     local filter, app = page.request.filter, Page.app(page.win)
     checked(menu, K.option(menu, "Everything", function()
         filter.all = not filter.all
@@ -322,8 +329,19 @@ local function numbered(containers)
 end
 Page.numbered = numbered
 
+-- Labels any container carries, by name.
+function Page.usedLabels(app)
+    local used, seen = {}, {}
+    for _, labels in pairs(app.state.containerLabels) do
+        for _, id in ipairs(labels) do if not seen[id] then seen[id] = true; used[#used + 1] = { id = id, name = App.categoryName(id) } end end
+    end
+    table.sort(used, function(a, b) return a.name < b.name end)
+    return used
+end
+
 function Page.fromMenu(page)
     local menu = K.menu(page.win.playerIndex, page.from)
+    if not menu then return end
     local request, app = page.request, Page.app(page.win)
     if not app then K.option(menu, "Enter a game first"); return end
     local player = app.player
@@ -363,12 +381,8 @@ function Page.fromMenu(page)
         if not picker then page.win:setVisible(true); page.message:set(err, "bad") end
     end)
     if request.area and request.scope ~= "area" then K.option(menu, "The area I marked", scope("area")) end
-    local used, seen = {}, {}
-    for _, labels in pairs(app.state.containerLabels) do
-        for _, id in ipairs(labels) do if not seen[id] then seen[id] = true; used[#used + 1] = { id = id, name = App.categoryName(id) } end end
-    end
+    local used = Page.usedLabels(app)
     if #used > 0 then
-        table.sort(used, function(a, b) return a.name < b.name end)
         local child = K.submenu(menu, "Containers labelled")
         Page.categoryMenu(child, used, function(id) return request.scope == "labeled" and indexOf(request.sourceLabels, id) ~= nil end,
             function(id)
@@ -381,6 +395,7 @@ end
 
 function Page.toMenu(page)
     local menu = K.menu(page.win.playerIndex, page.to)
+    if not menu then return end
     local request, app = page.request, Page.app(page.win)
     if not app then K.option(menu, "Enter a game first"); return end
     local destination = request.destination
@@ -409,7 +424,15 @@ function Page.toMenu(page)
         end
     end
     if app:labelCount() > 0 then
-        checked(menu, K.option(menu, "Where it belongs", to({ kind = "labels" }), nil, "Storage whose labels match each item."), destination.kind == "labels")
+        checked(menu, K.option(menu, "Where it belongs", to({ kind = "labels" }), nil, "Storage whose labels match each item."),
+            destination.kind == "labels" and #(destination.labels or {}) == 0)
+        local only = K.submenu(menu, "Only storage for")
+        Page.categoryMenu(only, Page.usedLabels(app), function(id) return destination.kind == "labels" and indexOf(destination.labels, id) ~= nil end,
+            function(id)
+                if request.destination.kind ~= "labels" then request.destination = { kind = "labels", labels = {} } end
+                toggle(request.destination.labels, id)
+                Page.changed(page)
+            end)
     end
     local match = K.submenu(menu, "Containers with the same items")
     checked(match, K.option(match, "All nearby", function() carriedOnly(); to({ kind = "matching", mode = "nearby" })() end),
@@ -442,6 +465,7 @@ end
 
 function Page.presetMenu(page)
     local menu = K.menu(page.win.playerIndex, page.presets)
+    if not menu then return end
     local app = Page.app(page.win)
     if not app then K.option(menu, "Enter a game first"); return end
     local saved = app:getSetups()

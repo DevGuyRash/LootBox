@@ -167,7 +167,7 @@ test("rows follow what is known: labels, bins and the car", function()
     local t = tree(menu)
     assert(has(t, "All Nails (40) > Put away") and has(t, "All Nails (40) > Throw away") and has(t, "All Nails (40) > To my vehicle"))
     has(t, "All Nails (40) > Throw away").onSelect()
-    assert(f.acted.destination.kind == "trash" and f.options.review == true, "Throwing away what you carry is always confirmed")
+    assert(f.acted.destination.kind == "trash" and f.acted.scope == "inventory")
 end)
 
 test("a single choice is one row, not a submenu", function()

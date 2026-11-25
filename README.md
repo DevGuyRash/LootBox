@@ -28,7 +28,7 @@ Right-click an item, a container, a container's icon or title, a vehicle, or the
 | A container, its icon, its NeatUI title or its empty space | The object's original options (for example Turn on, Settings, Disassemble), then **Take everything**, **Take my loot list**, **Take what I already carry**, **Move contents**, **Put in**, **Throw away contents**, and **Belongs here** ticks. |
 | A vehicle | **Load**, **My vehicle**, and the compartments you can reach. |
 | The ground | **Around here**: within reach, this room, this building, or an area you mark. |
-| Anything, while a job runs | **Job: ...** with Pause, Resume, Stop and Show progress. |
+| The ground, while a job runs | **Job: ...** with Pause, Resume, Stop and Show progress. |
 
 Choosing an action starts it at once. A strip appears when a job takes a while or needs you. It can be dragged, hidden, and clicked open for notes. Press the job key (**F7**, rebindable) to bring it back, or to open the planner when nothing is running.
 

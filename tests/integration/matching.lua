@@ -32,6 +32,8 @@ package.loaded["LootBox/App"] = {
     get = function(playerNum) current.appPlayer = playerNum; return current.app end,
 }
 function getPlayerLoot() return current.loot end
+function getPlayerInventory() return current.inventoryWindow end
+local function changed(f) f.loot.inventoryPane.refreshContainerCount = f.loot.inventoryPane.refreshContainerCount + 1; f.now = f.now + 1000 end
 function getCore() return {isTutorial = function() return current.tutorial end} end
 function getTimestampMs() return current.now end
 function isGamePaused() return current.paused end
@@ -382,8 +384,8 @@ test("Smart Take visibility follows tutorial preference world state and native u
     f.tutorial = true; assert(not handler:shouldBeVisible() and f.loot.inventoryPane.owner == nil)
     f.tutorial, f.preferences.matchingTransferButtons = false, false; assert(not handler:shouldBeVisible())
     f.preferences.matchingTransferButtons, f.noSquare = true, true; assert(not handler:shouldBeVisible())
-    f.noSquare, f.records, f.now = false, {}, f.now + 1000; assert(not handler:shouldBeVisible(), "Nothing eligible")
-    f.records, f.now = {{item = item("Base.Nails")}}, f.now + 1000; assert(handler:shouldBeVisible())
+    f.noSquare, f.records = false, {}; changed(f); assert(not handler:shouldBeVisible(), "Nothing eligible")
+    f.records = {{item = item("Base.Nails")}}; changed(f); assert(handler:shouldBeVisible())
 end)
 
 test("removing object or floor native peers hides only the corresponding Smart Take action", function(f)
@@ -468,10 +470,17 @@ end)
 test("matching buttons appear only while something matches, without rescanning every frame", function(f)
     local handler = f:handler("displayed")
     assert(handler:shouldBeVisible() and f.calls == 1)
-    for _ = 1, 20 do handler:shouldBeVisible() end
-    assert(f.calls == 1)
-    f.records, f.now = {}, f.now + 700
+    for _ = 1, 20 do f.now = f.now + 1000; handler:shouldBeVisible() end
+    assert(f.calls == 1, "Nothing changed, so nothing is rescanned")
+    f.records = {}; changed(f)
     assert(not handler:shouldBeVisible() and f.calls == 2)
+    f.app.active = function() return true end
+    changed(f); handler:shouldBeVisible()
+    assert(f.calls == 2, "Not while a job keeps changing containers")
+    f.app.active, f.loot.isCollapsed, f.inventoryWindow.isCollapsed = nil, true, true
+    changed(f)
+    assert(not handler:shouldBeVisible() and f.calls == 2)
+    f.inventoryWindow.isCollapsed = nil
 end)
 
 test("a click with nothing to do says so and starts nothing", function(f)

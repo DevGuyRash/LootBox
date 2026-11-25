@@ -46,6 +46,11 @@ function Review:build()
     local ready = options.kind == "bin" and plan.canApprove == true or (options.kind ~= "bin" and (#plan.moves > 0 or (plan.pending or 0) > 0))
     self.go = K.button(self, options.kind == "bin" and "Empty and continue" or trash and "Throw away" or "Start", self, Review.accept, trash and "danger" or "primary")
     self.go:setEnable(ready)
+    if options.startWithoutBins then
+        self.withoutBins = K.button(self, "Throw away, skip can checks", self, function(window) window:accept(nil, window.options.startWithoutBins) end, "danger",
+            "Does not stop to ask at trash cans, for this job only.")
+        self.withoutBins:setEnable(ready)
+    end
     self.other = K.button(self, options.kind == "bin" and "Use another can" or "Change...", self, Review.alternative, "plain")
     if not options.other then self.other:setVisible(false) end
     self.cancel = K.button(self, options.kind == "bin" and "Not now" or "Cancel", self, Review.close, "ghost")
@@ -60,12 +65,13 @@ function Review:layout()
     K.place(self.sub, x, y, width, height)
     y = y + height + K.GAP
     local footer = self:bottom() - K.ROW
-    local skipY = footer - (self.skip and (K.ROW + 4) or 0)
+    local skipY = footer - ((self.skip or self.withoutBins) and (K.ROW + 4) or 0)
     K.place(self.rows, x, y, width, skipY - y - K.GAP)
     if self.skip then K.place(self.skip, x, skipY) end
     K.place(self.cancel, x, footer)
     K.place(self.other, x + self.cancel.width + K.GAP, footer)
     K.place(self.go, x + width - self.go.width, footer)
+    if self.withoutBins then K.place(self.withoutBins, x + width - self.withoutBins.width, skipY) end
 end
 
 function Review:fail(text)
@@ -73,8 +79,8 @@ function Review:fail(text)
     self:layout()
 end
 
-function Review:accept()
-    local ok, err = self.options.start(self.skip and self.skip.on)
+function Review:accept(_, start)
+    local ok, err = (start or self.options.start)(self.skip and self.skip.on)
     Log.info(self.options.interaction, "REVIEW", "answer", "start", "ok", ok ~= nil and ok ~= false, "error", err)
     if not ok then self:fail(tostring(err or "This could not start.")); return end
     if self.skip and self.skip.on then App.setPreferences({ [self.options.preference] = false }) end

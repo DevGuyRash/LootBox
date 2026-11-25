@@ -34,9 +34,17 @@ end
 -- Buttons appear only while they have something to do. The answer is kept for
 -- a moment because the windows ask every frame.
 local function worthwhile(self, count)
-    local stamp = getTimestampMs()
-    if not self.checkedAt or stamp - self.checkedAt >= 700 or stamp < self.checkedAt or self.checkedFor ~= self.container then
-        self.checkedAt, self.checkedFor = stamp, self.container
+    local page = self.lootWindow or self.inventoryWindow
+    if page and page.isCollapsed then return false end
+    local app = App.get(self.playerNum)
+    if not app then return false end
+    local stamp, inventory, loot = getTimestampMs(), getPlayerInventory and getPlayerInventory(self.playerNum), getPlayerLoot(self.playerNum)
+    local seen = tostring(inventory and inventory.inventoryPane and inventory.inventoryPane.refreshContainerCount) .. ":"
+        .. tostring(loot and loot.inventoryPane and loot.inventoryPane.refreshContainerCount)
+    local first = self.worthwhile == nil or self.checkedFor ~= self.container
+    -- A running job changes containers constantly; the answer can wait for it.
+    if first or (self.checkedSeen ~= seen and stamp - self.checkedAt >= 700 and not (app.active and app:active())) then
+        self.checkedAt, self.checkedFor, self.checkedSeen = stamp, self.container, seen
         self.worthwhile = Log.guard(self.Type, count, self) == true
     end
     return self.worthwhile
@@ -161,7 +169,7 @@ function Condense:getControl()
     local nested = preferences.condenseNested and "Nested contents included" or "Nested contents left in place"
     local button = self:getButtonControl("Condense")
     button:setTooltip(mode .. ".\n" .. scope .. ". " .. nested
-        .. ".\nUses actual equipped reduction and native capacity. Bag objects stay in place. F7 opens Current job.")
+        .. ".\nThe bags themselves stay where they are.")
     self.control = button
     return button
 end

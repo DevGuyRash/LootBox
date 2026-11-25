@@ -24,6 +24,7 @@ local function test(name, run)
     f = {player = {}, preferences = {jobBar = true}, plan = {moves = {{}}, skipped = {}, label = "Take nails"}}
     f.app = {player = f.player, preview = function(_, request) f.previewed = request; return f.plan, f.problem end,
         start = function(_, plan, options) f.started, f.startOptions = plan, options; if f.refuse then return nil, f.refuse end return true end,
+        world = {owns = function(_, c) return c == "bag" end},
         rememberSetup = function() f.remembered = true; return true end, previewCondense = function() return f.plan, f.problem end}
     run()
     passed = passed + 1
@@ -57,9 +58,27 @@ test("a wanted review waits, then starts with the same plan", function()
     assert(f.page == "plan" and f.pageContext.request.destination.kind == "trash")
 end)
 
-test("a forced review cannot be switched off by its own checkbox", function()
-    UI.act(0, request("trash"), {review = true})
-    assert(f.review and f.review.preference == nil and not f.started)
+test("deleting carried items is always confirmed, from any entrance", function()
+    for _, change in ipairs({{scope = "inventory"}, {includeInventory = true}, {scope = "container", sourceContainer = "bag"}}) do
+        f.review = nil
+        local what = request("trash")
+        for key, value in pairs(change) do what[key] = value end
+        UI.act(0, what, {quiet = true})
+        assert(f.review and f.review.preference == nil and not f.started)
+    end
+    f.review = nil
+    UI.act(0, request("trash"))
+    assert(not f.review and f.started, "Loot that is not carried follows the player's setting")
+end)
+
+test("a review can skip trash can checks for this job only", function()
+    f.preferences.confirmQuickCleanup = true
+    local App = package.loaded["LootBox/App"]
+    local before = App.reviewPreference
+    App.reviewPreference = function(what, bin) if bin then return true, "confirmBinReviews" end return before(what) end
+    UI.act(0, request("trash"))
+    assert(f.review.startWithoutBins() and f.startOptions.reviewBins == false)
+    App.reviewPreference = before
 end)
 
 test("an area job asks for the area first and cancels quietly", function()

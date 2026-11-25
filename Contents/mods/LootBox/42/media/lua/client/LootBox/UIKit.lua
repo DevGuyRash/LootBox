@@ -201,7 +201,6 @@ function K.toggle(parent, text, on, target, changed, tooltip)
         local t = self.enable and K.colors.text or K.colors.faint
         self:drawText(K.fit(self.caption, self.width - box - K.GAP - 2), box + K.GAP + 2, (self.height - K.LINE) / 2, t.r, t.g, t.b, 1, K.FONT)
     end
-    parent:addChild(child)
     return child
 end
 
@@ -427,6 +426,7 @@ end
 
 -- Menus opened from windows, so choices live in submenus and not in dropdowns.
 function K.menu(playerIndex, anchor)
+    if not getSpecificPlayer(playerIndex) then return nil end
     local menu = ISContextMenu.get(playerIndex, anchor:getAbsoluteX(), anchor:getAbsoluteY() + anchor:getHeight())
     menu:bringToTop()
     return menu
@@ -498,9 +498,13 @@ function Window:remember()
     remembered[self.name] = { x = self.x, y = self.y, width = self.width, height = self.height }
 end
 
+function Window:isKeyConsumed(key) return key == Keyboard.KEY_ESCAPE end
+function Window:onKeyRelease(key) if self:isKeyConsumed(key) then self:close() end end
+
 function Window:show()
     self:initialise()
     self:addToUIManager()
+    self:setWantKeyEvents(true)
     self:setVisible(true)
     self:bringToTop()
     return self
