@@ -103,10 +103,10 @@ function Node:sub(icon, title, item)
     end)
 end
 
--- One choice needs no submenu.
+-- One choice needs no submenu, unless it deletes things.
 local function group(host, icon, title, rows, item)
     if #rows == 0 then return end
-    if #rows == 1 then
+    if #rows == 1 and rows[1].icon ~= "trash" then
         local row = rows[1]
         host:row(row.icon, row.single or row.title, row.run, row.tip)
         return

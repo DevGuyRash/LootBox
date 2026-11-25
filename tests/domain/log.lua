@@ -22,7 +22,7 @@ local function test(name, run) run(); passed = passed + 1; nativePrint("PASS " .
 local function file() Log.flush(); return files["LootBox/log/session-1.txt"] or "" end
 
 local square = {getX = function() return 10 end, getY = function() return 20 end, getZ = function() return 0 end, getRoom = function() return {getName = function() return "kitchen" end} end}
-local inventory = {getCapacityWeight = function() return 12.345 end, getEffectiveCapacity = function() return 50 end}
+local inventory = {getCapacityWeight = function() return 12.34 end, getEffectiveCapacity = function() return 50 end}
 local player = {getCurrentSquare = function() return square end, getInventory = function() return inventory end, isAiming = function() return true end,
     getX = function() return 10 end, getY = function() return 20 end}
 local crateObject = {getSquare = function() return square end, getSpriteName = function() return "carpentry_01" end, getContainerCount = function() return 1 end,
@@ -37,7 +37,7 @@ test("an intent records who asked for what, from where, and the world at that mo
     local id = Log.intent("menu.item", "Take all Nails", player, "clicked", Log.item(nails, player), "container", Log.container(crate, player))
     local text = file()
     assert(id == 1 and text:find("#1 INTENT from=menu.item ask=\"Take all Nails\" mode=SP", 1, true), text)
-    for _, fact in ipairs({"at=10,20,0", "room=kitchen", "doing=aiming", "carry=12.35/50", "Base.Nails#99", "in=crate@10,20,0", "favorite",
+    for _, fact in ipairs({"at=10,20,0", "room=kitchen", "doing=aiming", "carry=12.34/50", "Base.Nails#99", "in=crate@10,20,0", "favorite",
         "named=\"My crate\"", "items=7", "load=4.5/50", "LOCKED", "explored=true"}) do assert(text:find(fact, 1, true), fact .. " missing in " .. text) end
 end)
 

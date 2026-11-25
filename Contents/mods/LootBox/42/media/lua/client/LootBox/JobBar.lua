@@ -97,6 +97,13 @@ function JobBar:onMouseUp()
     return true
 end
 
+-- "Paused by aiming. Choose Resume job to continue." says the same thing as the buttons.
+local function pausedLine(reason)
+    reason = tostring(reason or ""):gsub("%s*Choose Resume[^%.]*%.?", "")
+    if reason == "" then return "Paused" end
+    return reason:find("^Paused") and reason or ("Paused. " .. reason)
+end
+
 local function noteRows(status)
     local rows, byReason = {}, {}
     for _, reason in ipairs(status.reasons or {}) do
@@ -132,18 +139,21 @@ function JobBar:read(status)
     else
         self.label = status.label or "LootBox job"
         if status.state == "needs_review" then line, tone = "Check the trash can to continue", "warn"
-        elseif status.state == "paused" then line, tone = "Paused. " .. tostring(status.reason or ""), "warn"
+        elseif status.state == "paused" then line, tone = pausedLine(status.reason), "warn"
         elseif status.state == "pausing" then line, tone = "Pausing...", "warn"
         elseif status.state == "cancelling" then line, tone = "Stopping...", "warn"
         elseif status.state == "failed" then line, tone = tostring(status.reason or "Stopped"), "bad"
-        else line = tostring(status.waiting or status.itemName or status.reason or "Working") end
+        else
+            line = tostring(status.waiting or status.itemName or status.reason or "Working")
+            if (status.carried or 0) > 0 then line = line .. ", carrying " .. status.carried end
+        end
     end
     if status.intent == "pour" then
         local litres = string.format("%.2f L poured", status.pourLiters or 0)
         line = line ~= "" and (line .. ". " .. litres) or litres
     elseif status.condense then
         line = tostring(status.condense.transfers or 0) .. " moves, carrying " .. string.format("%.1f", status.condense.currentWeight or 0)
-            .. (status.state == "paused" and (". Paused. " .. tostring(status.reason or "")) or "")
+            .. (status.state == "paused" and (". " .. pausedLine(status.reason)) or "")
     end
     local survey = status.survey
     if survey and status.state == "running" then line = "Room " .. tostring(math.min(survey.roomsTotal, survey.roomsDone + 1)) .. " of " .. tostring(survey.roomsTotal) .. ". " .. line end

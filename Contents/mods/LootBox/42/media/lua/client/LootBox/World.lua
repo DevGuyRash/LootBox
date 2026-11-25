@@ -1215,6 +1215,28 @@ function World:_discover()
     end
 end
 
+local SIGHT = 8
+
+-- Trash cans the player can see from here.
+function World:noticeBins(cell, x, y, z)
+    local playerNum = call(self.player, "getPlayerNum")
+    local ok, err = pcall(function()
+        for dy = -SIGHT, SIGHT do for dx = -SIGHT, SIGHT do
+            local square = cell:getGridSquare(x + dx, y + dy, z)
+            local objects = square and square:getObjects()
+            for index = 0, objects and objects:size() - 1 or -1 do
+                local object = objects:get(index)
+                local container = object:getContainer()
+                if container and self:isTrash(container) and square:isSeen(playerNum) and permitted(self.player, square) then
+                    self:_containers(square, true)
+                    break
+                end
+            end
+        end end
+    end)
+    if not ok then Log.fault(nil, "World:noticeBins", err) end
+end
+
 function World:observeNearby()
     local changed = self.dirty == true
     self.dirty = false
@@ -1233,6 +1255,7 @@ function World:observeNearby()
             self:_containers(square, true)
         end
     end end
+    self:noticeBins(cell, x, y, z)
     for key, memory in pairs(self.state.trash) do
         if type(memory) == "table" and inspected[tostring(memory.x) .. ":" .. tostring(memory.y) .. ":" .. tostring(memory.z)] then
             local container, reason = self:_resolveTrash(memory, key)
