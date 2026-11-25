@@ -92,7 +92,7 @@ end
 local PickWindow = K.Window:derive("LootBoxPick")
 
 function PickWindow:build()
-    self.picker = Picker.new(self, { selection = self.selection, chosenTitle = "Chosen", onlyCategories = self.onlyCategories })
+    self.picker = Picker.new(self, { selection = self.selection, chosenTitle = "Chosen" })
     self.ok = K.button(self, "Use these", self, function(window) window.done(window.picker.selection); window:close() end, "primary")
     self.no = K.button(self, "Cancel", self, PickWindow.close, "ghost")
 end
@@ -114,15 +114,6 @@ function Main:pick(title, filter, done)
     window.title, window.selection, window.done = title, selection, done
     window.onClosed = function() if self.picking == window then self.picking = nil end end
     self.picking = window
-    return K.Window.show(window)
-end
-
-function Main.pickCategories(title, ids, done)
-    local window = K.Window.new(PickWindow, "pick", 560, 420, 460, 320)
-    local selection = { ids = {}, types = {} }
-    for _, id in ipairs(ids) do selection.ids[#selection.ids + 1] = id end
-    window.title, window.selection, window.onlyCategories = title, selection, true
-    window.done = function(chosen) done(chosen.ids) end
     return K.Window.show(window)
 end
 

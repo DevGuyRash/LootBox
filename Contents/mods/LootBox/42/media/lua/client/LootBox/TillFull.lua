@@ -198,7 +198,7 @@ function TillFull:inspect(record)
         local effects = TillFull.automaticEffects(item, self.kind)
         return effects, effects == nil and "This is not safe to consume automatically" or nil
     end
-    local protected, reason = self.world:protected(item, { allowFavorite = true, allowEquippedConsumption = true })
+    local protected, reason = self.world:protected(item, { allowFavorite = true, allowEquippedConsumption = true, using = true })
     if protected then return nil, "Protected: " .. tostring(reason or "selected item") end
     local opening = self.recipe ~= nil and not record.opened
     if opening and not Opening.allowed(self.player, item, self.kind) then return nil, "You are too full" end

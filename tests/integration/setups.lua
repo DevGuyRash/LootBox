@@ -28,7 +28,7 @@ end
 Events = nil
 package.loaded["LootBox/World"] = { new = function(_, state)
     return { key = function(_, container) return container.id end, itemId = function(_, item) return item.id end,
-        discover = function() end, observeNearby = function() return false end,
+        discover = function() end, forgetGlance = function() end, observeNearby = function() return false end,
         protected = function(_, item) return state.keep[item.id] == true end }
 end }
 package.loaded["LootBox/Jobs"] = { new = function()
@@ -36,6 +36,7 @@ package.loaded["LootBox/Jobs"] = { new = function()
         tick = function() end, start = function() return true end }
 end }
 package.loaded["LootBox/TillFull"] = {new = function() error("Unexpected consumption boundary") end}
+package.loaded["LootBox/AutoPutAway"] = {yield = function() end, forget = function() end, update = function() end}
 package.loaded["LootBox/AutoNeeds"] = {interruptObservation = function() end, step = function() end}
 local App = require "LootBox/App"
 local Store = require "LootBox/Store"

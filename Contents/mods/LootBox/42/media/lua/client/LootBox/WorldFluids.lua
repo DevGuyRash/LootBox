@@ -4,7 +4,7 @@ local Inventory=require "LootBox/PourInventory"
 local Log=require "LootBox/Log"
 local W={}
 local donorPolicy={allowEquippedConsumption=true}
-local receiverPolicy={allowMainInventoryFluidReceive=true}
+local receiverPolicy={allowMainInventoryFluidReceive=true,using=true}
 -- The fixture is still there, allowed and beside the player.
 function W.live(p,a)
     local o,s,here=a.object,a.square,p:getCurrentSquare()

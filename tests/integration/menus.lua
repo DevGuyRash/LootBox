@@ -49,9 +49,10 @@ package.loaded["LootBox/PaneClicks"] = {attach = function() end}
 package.loaded["LootBox/ConsumeMenu"] = {add = function() end}
 package.loaded["LootBox/PourMenu"] = {add = function() end}
 package.loaded["LootBox/DispenserMenu"] = {add = function() end}
+package.loaded["LootBox/StorageView"] = {refresh = function() f.refreshed = true end, where = function(s) return s.name end, show = function(_, s) f.shownStorage = s; return true, s.name end}
 local Menus = require "LootBox/Menus"
 Menus.install({act = function(_, request, options) f.acted, f.options = request, options end, say = function(_, text) f.said = text end,
-    open = function(_, page, context) f.opened, f.openContext = page, context end, showJob = function() f.shown = true end})
+    putAway = function() f.putAway = true end, open = function(_, page, context) f.opened, f.openContext = page, context end, showJob = function() f.shown = true end})
 
 local function container(kind, fields)
     local c = {kind = kind, facts = {kind = kind, items = 0, takeable = 0, explored = true, locked = false, owned = false, capacity = 50, types = {}, categories = {}}}
@@ -59,6 +60,7 @@ local function container(kind, fields)
     function c:getType() return kind == "floor" and "floor" or kind end
     function c:getContainingItem() return self.item end
     function c:getVehiclePart() end
+    function c:getType() return kind end
     function c:getParent() return nil end
     function c:getItems() return {size = function() return 1 end, get = function() return {} end} end
     function c:isItemAllowed() return not self.refuses end
@@ -72,6 +74,7 @@ local function item(name, where, category)
     function i:getFullType() return "Base." .. name end
     function i:getName() return name end
     function i:getContainer() return self.where end
+    function i:getID() return name end
     return i
 end
 local function setup()
@@ -80,7 +83,11 @@ local function setup()
     local player = {getInventory = function() return main end, getCurrentSquare = function() return square end, isDead = function() return false end, getVehicle = function() end}
     f = {main = main, square = square, player = player, carried = {}, carriedCategory = {}, matching = 0, jobs = {state = "idle"}, presets = {},
         checklist = {ids = {}, types = {}}, labels = {}, preferences = {contextMenus = true, inventoryShortcuts = true, worldShortcuts = true, vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true, tillFullEnabled = true}}
-    local world = {graph = {list = function() return {} end, matches = function() return false end}}
+    local world = {graph = {list = function() return {} end, matches = function() return false end, customMatches = function() return {} end}}
+    world.HOME_RANGE = 20
+    function world:nearHere() return {x = 1, y = 2, range = 20} end
+    function world:pass(run) return run() end
+    function world:putAway() return f.ready or {} end
     function world:owns(c) return c.facts.owned end
     function world:containerFacts(c) return c.facts end
     function world:binDistance() return f.bins and 12 or nil end
@@ -94,16 +101,35 @@ local function setup()
     function world:countMatching() return f.matching end
     function world:roomFacts() return f.roomFacts end
     function world:key(c) return c.kind ~= "corpse" and c or nil end
-    function world:describe() return {} end
+    function world:describe(i) return {fullType = i:getFullType(), categoryId = "native:" .. i.category, labels = {}} end
+    function world:isTrash(c) return c.kind == "bin" end
+    function world:labelsInside(c) return c.types or {}, c.categories or {} end
+    function world:contentsHaveHomes() return f.storage == true end
+    function world:fitting() return f.fits or {} end
+    function world:home() return f.home, f.home == nil and f.placed == true end
+    function world:glance() return {storages = f.storages or {}} end
     f.app = {world = world, state = {}}
     function f.app:status() return f.jobs end
     function f.app:getChecklist() return f.checklist end
     function f.app:getSetups() return {presets = f.presets} end
-    function f.app:labels(c) return f.labels[c] or {} end
+    function f.app:labels(c) local copy = {}; for index, id in ipairs(f.labels[c] or {}) do copy[index] = id end; return copy end
     function f.app:setLabels(c, ids) f.labels[c] = ids; return true end
+    function f.app:toggleLabel(c, id)
+        local kept = {}
+        for _, value in ipairs(f.labels[c] or {}) do if value ~= id then kept[#kept + 1] = value end end
+        if #kept == #(f.labels[c] or {}) then kept[#kept + 1] = id end
+        return self:setLabels(c, kept)
+    end
+    function f.app:storageDetails(c) return f.details and f.details[c] or {} end
+    function f.app:setStorage(c, details) f.details = {[c] = details}; return true end
+    function f.app:markOf(i, make) return (make or f.marks and f.marks[i]) and "item:" .. i.name .. ":" .. i:getFullType() or nil end
+    function f.app:setItemPlace(i, c, on) f.place = {item = i, container = c, on = on}; return true end
+    function f.app:setItemWanted(i, on) f.wanted = {item = i, on = on}; return true end
     function f.app:onChecklist() return f.listed == true end
     function f.app:toggleChecklist() f.toggled = true; return true end
     function f.app:isKept() return false end
+    function f.app:isTypeKept() return f.typeKept == true end
+    function f.app:keepType(fullType, on) f.keptType = {fullType, on}; return true end
     function f.app:protect(i) f.kept = (f.kept or 0) + 1; return true end
     function f.app:itemLabels() return {} end
     function f.app:currentContainer() return f.open end
@@ -143,7 +169,7 @@ test("an ordinary item with nothing to do beyond itself gets no bulk rows", func
     Menus.inventoryMenu(0, menu, {item("Hammer", f.main, "Tool")})
     local t = tree(menu)
     assert(not has(t, "All Hammer") and not has(t, "Drop") and not has(t, "Sort") and not has(t, "Settings") and not has(t, "help"))
-    assert(has(t, "LootBox > On my loot list") and has(t, "LootBox > Keep this one"))
+    assert(has(t, "LootBox > Pick up when looting") and has(t, "LootBox > Keep > Every Hammer") and has(t, "LootBox > Keep > Only this one"))
 end)
 
 test("more of the same elsewhere offers them as one submenu named for the item", function()
@@ -161,22 +187,26 @@ end)
 
 test("rows follow what is known: labels, bins and the car", function()
     f.carried["Base.Nails"] = 40
-    f.storage, f.bins, f.car = true, true, true
+    f.home, f.bins, f.car = {name = "Pantry", container = {}, tiles = 4}, true, true
     local menu = newMenu()
     Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
     local t = tree(menu)
-    assert(has(t, "All Nails (40) > Put away") and has(t, "All Nails (40) > Throw away") and has(t, "All Nails (40) > To my vehicle"))
+    assert(has(t, "All Nails (40) > Put away in Pantry") and has(t, "All Nails (40) > Throw away") and has(t, "All Nails (40) > To my vehicle"))
     has(t, "All Nails (40) > Throw away").onSelect()
     assert(f.acted.destination.kind == "trash" and f.acted.scope == "inventory")
+    has(t, "Put away in Pantry").onSelect()
+    assert(f.acted.destination.near.range == 20, "The place that was named, not a further one")
 end)
 
 test("a single choice is one row, not a submenu", function()
     f.carried["Base.Nails"] = 1
-    f.storage = true
+    f.home = {name = "Pantry", container = {}, tiles = 40}
     local menu = newMenu()
     Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
     local t = tree(menu)
-    assert(has(t, "LootBox > Put away all Nails (1)") and not has(t, "All Nails (1) >"))
+    has(t, "Put away all Nails (1) in Pantry").onSelect()
+    assert(f.acted.destination.near == nil)
+    assert(has(t, "LootBox > Put away all Nails (1) in Pantry") and not has(t, "All Nails (1) >"))
 end)
 
 test("loot items offer taking only when there is more than what was clicked", function()
@@ -281,31 +311,133 @@ test("a key ring is not offered for planks", function()
 end)
 
 test("labels are ticked in place, starting with what is already inside", function()
-    local crate = container("crate", {takeable = 5, categories = {["native:Food"] = 4, ["native:Tool"] = 1}})
+    local crate = container("crate", {takeable = 5})
+    crate.categories = {"native:Food", "native:Tool"}
     open(crate)
     local menu = newMenu()
     Menus.containerMenu(0, menu, crate)
     local t = tree(menu)
-    assert(has(t, "Belongs here > Food") and has(t, "Belongs here > Tool") and has(t, "Belongs here > More..."))
-    has(t, "Belongs here > Food").onSelect()
-    assert(f.labels[crate][1] == "native:Food" and not f.acted, "Labelling starts no job")
+    assert(has(t, "Belongs here > Label with the categories inside (2)") and has(t, "Belongs here > Name and more..."))
+    has(t, "Label with the categories inside (2)").onSelect()
+    assert(table.concat(f.labels[crate], " ") == "native:Food native:Tool" and not f.acted, "Labelling starts no job")
     menu = newMenu()
     Menus.containerMenu(0, menu, crate)
     t = tree(menu)
-    local row = has(t, "Belongs here: Food > Food")
-    assert(row.checked)
+    local row = has(t, "Belongs here: Food +1 > Food")
+    assert(row.checked and not has(t, "Label with the categories"), "It is labelled so already")
     row.onSelect()
-    assert(#f.labels[crate] == 0)
+    assert(table.concat(f.labels[crate], " ") == "native:Tool")
 end)
 
 test("what is carried that fits a container is offered by count", function()
     local crate = container("crate", {takeable = 5, types = {["Base.Nails"] = 5}})
     open(crate)
-    f.carried["Base.Nails"], f.labels[crate], f.carriedCategory["native:Food"] = 7, {"native:Food"}, 3
+    f.carried["Base.Nails"], f.labels[crate], f.fits = 7, {"native:Food"}, {item("A", f.main), item("B", f.main), item("C", f.main)}
     local menu = newMenu()
     Menus.containerMenu(0, menu, crate)
     local t = tree(menu)
     assert(has(t, "Put in > More of what is inside (7)") and has(t, "Put in > What belongs here (3)"))
+    has(t, "Put in > What belongs here (3)").onSelect()
+    assert(f.acted.destination.ref == crate and f.acted.only.A and f.acted.only.C)
+end)
+
+test("one click on an item says its kind belongs in the container it lies in, or the open one", function()
+    local crate = container("crate", {takeable = 1})
+    open(crate)
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", crate)})
+    local row = has(tree(menu), "LootBox > Belongs here")
+    assert(not row.checked)
+    row.onSelect()
+    assert(f.labels[crate][1] == "type:Base.Nails" and f.refreshed and not f.acted)
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", crate)})
+    row = has(tree(menu), "LootBox > Belongs here")
+    assert(row.checked)
+    row.onSelect()
+    assert(#f.labels[crate] == 0)
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    has(tree(menu), "LootBox > Belongs in Crate").onSelect()
+    assert(f.labels[crate][1] == "type:Base.Nails")
+end)
+
+test("where an item goes is one list for its kind, with its category and this one item beside it", function()
+    local crate, ring = container("crate", {takeable = 1}), container("KeyRing", {owned = true})
+    ring.refuses = true
+    open(crate)
+    table.insert(f.pages.inventory.backpacks, {inventory = ring})
+    f.storages = {{key = "world:far", name = "Shed (40 tiles away)"}, {key = "bag:1", name = "Pack", carried = true}}
+    f.home = {name = "Pantry", point = {x = 1, y = 1, z = 0}}
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    local t = tree(menu)
+    assert(has(t, "Where it goes: Pantry > Crate") and has(t, "Where it goes: Pantry > Shed (40 tiles away)"))
+    assert(not has(t, "KeyRing") and not has(t, "> Pack"), "A key ring takes no nails, and open bags are listed once")
+    t["LootBox > Where it goes: Pantry > Shed (40 tiles away)"].onSelect()
+    assert(f.labels["world:far"][1] == "type:Base.Nails", "Storage out of sight can be chosen too")
+    has(t, "All of Material > Crate").onSelect()
+    assert(f.labels[crate][1] == "native:Material")
+    has(t, "Only this one > Crate").onSelect()
+    assert(f.place.container == crate and f.place.on == true)
+    has(t, "Show me").onSelect()
+    assert(f.shownStorage == f.home and f.said == "Pantry")
+end)
+
+test("picking up and keeping can be for this one or for every one", function()
+    local crate = container("crate", {takeable = 1})
+    open(crate)
+    local menu, nails = newMenu(), item("Nails", crate)
+    Menus.inventoryMenu(0, menu, {nails})
+    local t = tree(menu)
+    has(t, "Pick up when looting > Every Nails").onSelect(); assert(f.toggled)
+    has(t, "Pick up when looting > Only this one").onSelect(); assert(f.wanted.item == nails and f.wanted.on == true)
+    has(t, "Keep > Every Nails").onSelect(); assert(f.keptType[1] == "Base.Nails" and f.keptType[2] == true)
+    has(t, "Keep > Only this one").onSelect(); assert(f.kept == 1)
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    assert(not has(tree(menu), "Pick up when looting >"), "One that is carried is already picked up")
+end)
+
+test("a container is labelled as what is inside, and its labels copied to another", function()
+    local crate, other = container("crate", {takeable = 2}), container("shelves", {takeable = 0})
+    crate.types, crate.categories = {"type:Base.Nails", "type:Base.Saw"}, {"native:Material"}
+    open(crate, other)
+    f.labels[crate] = {"item:7:Base.Axe", "type:Base.Nails"}
+    local menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    local t = tree(menu)
+    assert(not has(t, "Paste labels"))
+    has(t, "Label with exactly these items (2)").onSelect()
+    assert(table.concat(f.labels[crate], " ") == "item:7:Base.Axe type:Base.Nails type:Base.Saw")
+    has(t, "Copy labels").onSelect()
+    menu = newMenu()
+    Menus.containerMenu(0, menu, other)
+    t = tree(menu)
+    assert(not has(t, "Label with") and not has(t, "Copy labels") and not has(t, "When to fill it"))
+    has(t, "Paste labels").onSelect()
+    assert(table.concat(f.labels[other], " ") == "type:Base.Nails type:Base.Saw", "An item's one place is not copied")
+    menu = newMenu()
+    Menus.containerMenu(0, menu, other)
+    t = tree(menu)
+    has(t, "When to fill it > Last").onSelect()
+    assert(f.details[other].order == "last")
+    assert(not has(t, "Paste labels"), "They are all there")
+    has(t, "Clear labels").onSelect()
+    assert(#f.labels[other] == 0 and f.details[other].order == "usual")
+end)
+
+test("trash cans, corpses and the player's own inventory cannot be labelled", function()
+    for _, kind in ipairs({"bin", "floor"}) do
+        setup()
+        local c = container(kind, {takeable = 1})
+        open(c)
+        local menu = newMenu()
+        Menus.containerMenu(0, menu, c)
+        Menus.inventoryMenu(0, menu, {item("Nails", c)})
+        local t = tree(menu)
+        assert(not has(t, "Belongs here") and not has(t, "Where it goes > " .. kind), kind)
+    end
 end)
 
 test("the ground outdoors with nothing in reach adds no LootBox entry at all", function()
@@ -384,7 +516,7 @@ test("a refused action is told to the player", function()
     function f.app:toggleChecklist() return nil, "The disk is full" end
     f.carried["Base.Nails"] = 1
     Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
-    has(tree(menu), "On my loot list").onSelect()
+    has(tree(menu), "Pick up when looting").onSelect()
     assert(f.said == "The disk is full")
 end)
 

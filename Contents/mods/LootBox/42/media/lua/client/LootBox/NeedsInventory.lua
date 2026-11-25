@@ -18,9 +18,10 @@ local function usableContainer(container, player)
         and call(container, "isLockedToCharacter", player) == false
 end
 
+local USING = {using = true}
 local function canTraverse(world, item)
     if call(item, "isFavorite") ~= false then return false end
-    local protected, reason = world:protected(item)
+    local protected, reason = world:protected(item, USING)
     return protected == false or protected == true and (reason == "Bag contains items" or reason == "Equipped"
         or reason == "Held" or reason == "Attached")
 end
@@ -36,7 +37,7 @@ local function itemAllowed(world, item, kind, equipped)
             if fluid == bag then return false end
         end
     end
-    local protected, reason = world:protected(item, {allowEquippedConsumption = equipped == true})
+    local protected, reason = world:protected(item, {allowEquippedConsumption = equipped == true, using = true})
     return protected == false or (equipped == true and bag ~= nil and protected == true and reason == "Bag contains items")
 end
 
@@ -71,7 +72,7 @@ end
 local function toolAccessible(player, world, tool)
     local main = call(player, "getInventory")
     return tool ~= nil and usableContainer(main, player) and call(tool, "getContainer") == main
-        and Items.holds(main, tool) and call(tool, "isFavorite") == false and world:protected(tool) == false
+        and Items.holds(main, tool) and call(tool, "isFavorite") == false and world:protected(tool, USING) == false
 end
 
 local function accessible(player, options, kind, world, item, plan)

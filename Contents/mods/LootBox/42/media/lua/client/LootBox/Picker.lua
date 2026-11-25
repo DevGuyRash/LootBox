@@ -15,7 +15,6 @@ function Picker.new(parent, options)
     self.search = K.entry(parent, "Search", self, function(owner, text) owner.query = string.lower(text or ""); owner:browse() end)
     self.categoryTab = K.button(parent, "Categories", self, function(owner) owner:setMode("categories") end, "ghost")
     self.itemTab = K.button(parent, "Items", self, function(owner) owner:setMode("items") end, "ghost")
-    if options.onlyCategories then self.itemTab:setVisible(false); self.categoryTab:setVisible(false) end
     self.list = K.list(parent, self, function(owner, row) owner:toggle(row) end)
     self.list.emptyText = "No matches."
     self.chosenLabel = K.label(parent, options.chosenTitle or "Chosen", "accent")
@@ -34,13 +33,13 @@ function Picker:setMode(mode)
     self:browse()
 end
 
-function Picker:setSelection(selection, locked)
-    self.selection, self.locked = selection, locked
-    self:refresh()
+function Picker:setSelection(selection, keep)
+    self.selection = selection
+    self:refresh(keep)
 end
 
 function Picker:toggle(row)
-    if self.locked or not row.key then return end
+    if not row.key then return end
     local list = row.kind == "type" and self.selection.types or self.selection.ids
     local index = has(list, row.key)
     if index then table.remove(list, index) else list[#list + 1] = row.key end
@@ -57,7 +56,7 @@ function Picker:browse(keep)
         if #rows < LIMIT then rows[#rows + 1] = row else hidden = hidden + 1 end
     end
     if not catalog then rows[1] = { title = tostring(err), tone = "warn" }
-    elseif self.mode == "items" and not self.options.onlyCategories then
+    elseif self.mode == "items" then
         for _, item in ipairs(catalog.items) do
             if matches(item.name .. " " .. item.fullType) then
                 if #rows < LIMIT then
@@ -100,7 +99,6 @@ function Picker:refresh(keep)
         rows[#rows + 1] = { title = Describe.type(fullType), key = fullType, kind = "type", icon = Describe.texture(fullType) or false,
             right = "remove", rightTone = "faint", tooltip = fullType }
     end
-    if self.locked then for _, row in ipairs(rows) do row.right = nil end end
     self.chosen:fill(rows, keep)
     self.chosenLabel:set((self.options.chosenTitle or "Chosen") .. (#rows > 0 and ("  " .. #rows) or ""))
     self:browse(keep)
@@ -109,7 +107,7 @@ end
 function Picker:layout(x, y, width, height)
     local left = math.floor((width - K.GAP) * 0.56)
     local right = width - left - K.GAP
-    local tabs = self.options.onlyCategories and 0 or (self.categoryTab.width + self.itemTab.width + K.GAP)
+    local tabs = self.categoryTab.width + self.itemTab.width + K.GAP
     K.place(self.search, x, y + math.floor((K.ROW - K.ENTRY) / 2), left - tabs)
     K.place(self.categoryTab, x + left - tabs + K.GAP, y)
     K.place(self.itemTab, x + left - self.itemTab.width, y)
@@ -120,8 +118,7 @@ end
 
 function Picker:setVisible(visible)
     for _, widget in ipairs({ self.search, self.list, self.chosen, self.chosenLabel }) do widget:setVisible(visible) end
-    local tabs = visible and not self.options.onlyCategories
-    self.categoryTab:setVisible(tabs); self.itemTab:setVisible(tabs)
+    self.categoryTab:setVisible(visible); self.itemTab:setVisible(visible)
 end
 
 return Picker

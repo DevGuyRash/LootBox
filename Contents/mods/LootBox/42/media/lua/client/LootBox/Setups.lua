@@ -1,3 +1,5 @@
+local Labels = require "LootBox/Labels"
+
 local Setups = {}
 
 Setups.defaults = { pourLootToLoot = false, pourMainOnly = false, pourEquippedFirst = false, pourMostRoomFirst = false,
@@ -5,7 +7,8 @@ Setups.defaults = { pourLootToLoot = false, pourMainOnly = false, pourEquippedFi
     tillFullEnabled = true, tillFullBothNeeds = false, contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
     vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true, confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
     smartTakeAllContainers = true, matchingTransferButtons = true, jobBar = true, rememberLastSetup = true, detailedLog = true,
-    condenseButton = true, condenseRebalance = false, condenseUseUnequipped = false, condenseNested = false }
+    condenseButton = true, condenseRebalance = false, condenseUseUnequipped = false, condenseNested = false,
+    storageTitles = true, storageTips = true, putAwayButton = true, autoPutAway = false }
 
 local scopes = { inventory = true, container = true, lootPane = true, reach = true, room = true,
     building = true, area = true, labeled = true }
@@ -23,7 +26,7 @@ local function strings(value, labels)
     for index, entry in pairs(value) do
         if not integer(index) or index < 1 or index > #value or type(entry) ~= "string"
             or #entry > 256 or not entry:find("%S")
-            or (labels and not (entry:match("^native:.+") or entry:match("^custom:.+"))) then
+            or (labels and not (entry:match("^native:.+") or entry:match("^custom:.+") or Labels.direct(entry))) then
             return nil, "Categories and item types must form a dense list of valid IDs"
         end
         count = count + 1

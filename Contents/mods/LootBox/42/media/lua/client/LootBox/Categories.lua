@@ -1,3 +1,4 @@
+local Labels = require "LootBox/Labels"
 local Sort = require "LootBox/Sort"
 
 local Categories = {}
@@ -180,7 +181,8 @@ local function matches(graph, id, descriptor, labels, visited)
         local current = table.remove(stack)
         if not visited[current] then
             visited[current] = true
-            if labels[current] or descriptor.categoryId == current then return true end
+            if labels[current] or descriptor.categoryId == current or current == Labels.REST
+                or Labels.typeOf(current) == descriptor.fullType then return true end
             local definition = graph.byId[current]
             if definition then
                 if definition.typeSet[descriptor.fullType] then return true end

@@ -22,7 +22,7 @@ function Feedback.job(player, plan, view, measured)
     local condense = plan and plan.action == "condense"
     local kind = condense and "Condense" or destination == "trash" and "Cleanup"
         or destination == "inventory" and "Loot run" or destination == "vehicle" and "Vehicle haul"
-        or (destination == "labels" or destination == "matching") and "Sort" or "Transfer"
+        or destination == "labels" and "Put away" or destination == "matching" and "Sort" or "Transfer"
     local detail = {}
     local moved, cleared = view.moved or 0, view.cleared or 0
     if destination == "trash" then

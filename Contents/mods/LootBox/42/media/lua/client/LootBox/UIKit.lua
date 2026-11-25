@@ -214,7 +214,12 @@ function K.label(parent, text, tone, font)
     function child:set(value, newTone)
         if newTone then local c = K.colors[newTone]; self.r, self.g, self.b = c.r, c.g, c.b end
         value = tostring(value or "")
-        if self.shown ~= value then self.shown = value; self:setName(value) end
+        if self.shown == value then return end
+        self.shown = value
+        -- Naming a label moves it back to where it was made.
+        local x = self.x
+        self:setName(value)
+        self:setX(x)
     end
     return child
 end

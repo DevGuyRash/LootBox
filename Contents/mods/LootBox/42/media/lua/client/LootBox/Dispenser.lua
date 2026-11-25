@@ -67,7 +67,7 @@ function Dispenser.destinations(player, world, stand, snapshot)
     local out = {}
     for _, entry in ipairs((snapshot or Inventory.snapshot(player, world)).entries) do
         if entry.fullType == BOTTLE and entry.container == player:getInventory() and entry.free > 0
-            and not world:protected(entry.item) and #out < 12 then
+            and not world:protected(entry.item, { using = true }) and #out < 12 then
             out[#out + 1] = { item = entry.item, id = entry.id, state = reading(entry.fluid), test = entry.fluid, label = entry.label }
         end
     end

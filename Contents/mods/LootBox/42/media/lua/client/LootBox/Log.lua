@@ -224,6 +224,11 @@ function Log.request(request)
     elseif destination.kind == "vehicle" then out[#out + 1] = destination.ref and Log.vehicle(destination.ref) or "remembered" end
     if destination.labels and #destination.labels > 0 then out[#out + 1] = "labels=" .. table.concat(destination.labels, "+") end
     out[#out + 1] = "bags=" .. tostring(request.includeBags ~= false)
+    if request.only then
+        local count = 0
+        for _ in pairs(request.only) do count = count + 1 end
+        out[#out + 1] = "only=" .. count
+    end
     if request.includeInventory then out[#out + 1] = "carried=true" end
     return "{" .. table.concat(out, " ") .. "}"
 end

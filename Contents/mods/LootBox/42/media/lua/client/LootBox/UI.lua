@@ -7,6 +7,8 @@ local JobBar = require "LootBox/JobBar"
 local Review = require "LootBox/Review"
 local AreaPicker = require "LootBox/AreaPicker"
 local PlanList = require "LootBox/PlanList"
+local StorageView = require "LootBox/StorageView"
+local Items = require "LootBox/Items"
 local Log = require "LootBox/Log"
 
 local UI = { visits = {} }
@@ -22,8 +24,6 @@ function UI.say(playerIndex, text, good)
 end
 
 function UI.open(playerIndex, page, context) return Main.show(playerIndex or 0, page, context) end
-
-function UI.pick(_, title, ids, done) return Main.pickCategories(title, ids, done) end
 
 function UI.showJob(playerIndex, problem)
     local bar = JobBar.show(playerIndex or 0, problem)
@@ -51,6 +51,22 @@ local function continues(playerIndex, app, request, id)
     Log.info(id, outcome and "CONTINUES" or "REFUSED", "job", request.shortcutIntent, "outcome", outcome, "reason", err)
     if not outcome then UI.say(playerIndex, err); return true, nil, err end
     return true, true, outcome
+end
+
+-- A job for certain items, as one for their kinds, which the planner can show and change.
+local function editable(app, request)
+    if not request.only then return request end
+    local result, types, seen = {}, {}, {}
+    for key, value in pairs(request) do result[key] = value end
+    Items.eachCarried(app.player, function(item)
+        local fullType = tostring(item:getFullType())
+        if request.only[tostring(item:getID())] and not seen[fullType] then seen[fullType] = true; types[#types + 1] = fullType end
+    end)
+    result.only, result.title, result.shortcutIntent = nil, nil, nil
+    result.filter = { all = false, ids = {}, types = types }
+    result.destination = {}
+    for key, value in pairs(request.destination) do if key ~= "near" then result.destination[key] = value end end
+    return result
 end
 
 -- Runs a request. Nothing disturbs the job in progress until there is
@@ -104,7 +120,26 @@ function UI.act(playerIndex, request, options)
         start = function() return begin(playerIndex, app, plan, id) end,
         startWithoutBins = request.destination.kind == "trash" and App.reviewPreference(nil, true)
             and function() return begin(playerIndex, app, plan, id, { reviewBins = false }) end or nil,
-        other = function() UI.open(playerIndex, "plan", { request = request }); return true end })
+        other = function() UI.open(playerIndex, "plan", { request = editable(app, request) }); return true end })
+end
+
+-- Puts away what is carried and has a place at hand. The button and the menu are the same job.
+function UI.putAway(playerIndex, origin)
+    playerIndex = playerIndex or 0
+    local app, err = App.get(playerIndex)
+    if not app then return nil, err end
+    local id = Log.intent(origin, "Put Away", app.player)
+    app.world:forgetGlance()
+    local only, count = {}, 0
+    for _, entry in ipairs(app.world:putAway()) do only[tostring(entry.item:getID())], count = true, count + 1 end
+    if count == 0 then
+        Log.info(id, "END", "state", "nothing-to-do")
+        UI.say(playerIndex, "Nothing you carry has a place here")
+        return true
+    end
+    return UI.act(playerIndex, { shortcutIntent = "put-away", scope = "inventory", includeInventory = false, includeBags = true,
+        filter = { all = true, ids = {}, types = {} }, only = only, title = "Put away what I carry", sourceLabels = {},
+        destination = { kind = "labels", labels = {}, near = app.world:nearHere() } }, { interaction = id })
 end
 
 function UI.condense(playerIndex)
@@ -182,8 +217,9 @@ function UI.snapshot(playerIndex)
                 for at = 0, math.min(60, items and items:size() or 0) - 1 do Log.trace(id, "item", "state", Log.item(items:get(at), player)) end
             end
         end
-        for _, entry in ipairs(app.world:labelledContainers()) do
-            Log.trace(id, "label", "key", entry.key, "name", entry.name, "labels", table.concat(entry.labels, "+"), "loaded", entry.container ~= nil)
+        for _, entry in ipairs(app.world:storages()) do
+            Log.trace(id, "label", "key", entry.key, "name", entry.name, "labels", table.concat(entry.labels, "+"), "order", entry.order,
+                "tiles", entry.tiles, "loaded", entry.container ~= nil)
         end
         for _, bin in ipairs(app.world:knownBins()) do Log.trace(id, "trash-can", "at", bin.key, "holds", bin.capacity, "away", bin.away) end
         Log.trace(id, "saved", "vehicle", app.state.vehicle and app.state.vehicle.script, "lootList", Log.request({ filter = app:getChecklist(), destination = {} }))
@@ -198,10 +234,12 @@ function UI.closeAll()
     AreaPicker.closeAll()
     JobBar.closeAll()
     K.resetLayout()
+    StorageView.closeAll()
     UI.visits = {}
 end
 
 function UI.tick()
+    StorageView.tick()
     local enabled = App.preference("jobBar")
     for playerIndex = 0, getNumActivePlayers() - 1 do
         local app = App.peek(playerIndex)
@@ -241,7 +279,9 @@ function UI.install()
     if UI.installed then return end
     UI.installed = true
     App.escapeGuard = UI.escapeGuard
+    require("LootBox/AutoPutAway").windows = UI.escapeGuard
     require("LootBox/Menus").install(UI)
+    StorageView.install()
     require "keyBinding"
     local known = {}
     for _, binding in ipairs(keyBinding) do known[binding.value] = true end

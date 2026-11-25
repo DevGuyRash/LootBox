@@ -6,8 +6,11 @@ local Jobs = require "LootBox/Jobs"
 local Setups = require "LootBox/Setups"
 local Recovery = require "LootBox/Recovery"
 local TillFull = require "LootBox/TillFull"
+local AutoPutAway = require "LootBox/AutoPutAway"
 local AutoNeeds = require "LootBox/AutoNeeds"
 local Describe = require "LootBox/Describe"
+local Items = require "LootBox/Items"
+local Labels = require "LootBox/Labels"
 local Log = require "LootBox/Log"
 require "LootBox/CompletionHUD"
 
@@ -74,6 +77,9 @@ function App.setPreferences(patch)
             for _, instance in pairs(sessions) do
                 if instance.autoNeeds then instance.autoNeeds.stock, instance.autoNeeds.nativeAttempt, instance.autoNeeds.blocked = nil, nil, {} end
             end
+        end
+        if not candidate.autoPutAway then
+            for _, instance in pairs(sessions) do AutoPutAway.forget(instance) end
         end
         preferences, preferencesError = candidate, nil
         Log.detailed = candidate.detailedLog
@@ -164,11 +170,7 @@ function App.saveCategory(definition)
     return candidate.id
 end
 
-local function without(list, id)
-    local result = {}
-    for _, value in ipairs(list or {}) do if value ~= id then result[#result + 1] = value end end
-    return result
-end
+local without = Labels.without
 
 -- Deleting a category also removes it wherever this session can see it used.
 function App.deleteCategory(id)
@@ -205,6 +207,7 @@ end
 -- and their numbers are not given out again.
 local function knownCategory(id)
     if type(id) ~= "string" then return false end
+    if Labels.direct(id) then return true end
     local number = loadError and tonumber(id:match("^custom:(%d+)$"))
     if number then nextCategoryId = math.max(nextCategoryId, number + 1); return true end
     return id:match("^native:.+") ~= nil or App.category(id) ~= nil
@@ -230,11 +233,19 @@ local function repairState(state)
         end
         state[name] = clean
     end
-    local keep = {}
-    for key, flag in pairs(type(state.keep) == "table" and state.keep or {}) do
-        if type(key) == "string" and flag == true then keep[key] = true end
+    local storage = {}
+    for key, value in pairs(type(state.storage) == "table" and state.storage or {}) do
+        local details = type(key) == "string" and Labels.details(value) or nil
+        if details then storage[key] = details else note("storage dropped " .. tostring(key)) end
     end
-    state.keep = keep
+    state.storage = storage
+    for _, name in ipairs({ "keep", "keepTypes" }) do
+        local clean = {}
+        for key, flag in pairs(type(state[name]) == "table" and state[name] or {}) do
+            if type(key) == "string" and flag == true then clean[key] = true end
+        end
+        state[name] = clean
+    end
     local vehicle = state.vehicle
     if vehicle ~= nil then
         local valid = type(vehicle) == "table" and type(vehicle.script) == "string"
@@ -286,6 +297,8 @@ function App.get(playerIndex, passiveNeeds)
         Log.warn(nil, "world-data-unreadable", "path", path, "error", err)
     end
     for _, text in ipairs(notes) do Log.warn(nil, "world-data-repaired", "note", text) end
+    -- What left home while this was on says nothing about what came back while it was off.
+    if not App.preference("autoPutAway") then state.trip = nil end
     instance.world = World.new(player, state)
     instance.world.graph, instance.world.preference = graph, App.preference
     instance.recovery = Recovery.new(player, instance.world, path)
@@ -297,6 +310,13 @@ function App.get(playerIndex, passiveNeeds)
     Log.info(nil, "session", "player", Log.player(player), "storageLabels", instance:labelCount(), "categories", #definitions,
         "knownBins", instance.world.knownBins and #instance.world:knownBins(), "vehicle", state.vehicle and state.vehicle.script)
     return instance
+end
+
+Describe.given = function(container)
+    for _, instance in pairs(sessions) do
+        local name = instance.world:givenName(container)
+        if name then return name end
+    end
 end
 
 function App.peek(playerIndex)
@@ -327,8 +347,15 @@ function Instance:persist()
     return ok, err
 end
 
-function Instance:labels(container)
-    local key = self.world:key(container)
+-- A container, or the saved key of one that need not be loaded.
+local function keyOf(self, target)
+    if type(target) == "string" then return target end
+    local key, err = self.world:key(target)
+    return key, err or "Container is no longer available"
+end
+
+function Instance:labels(target)
+    local key = keyOf(self, target)
     return key and copy(self.state.containerLabels[key] or {}) or {}
 end
 
@@ -341,16 +368,99 @@ local function validLabels(ids)
     return result
 end
 
-function Instance:setLabels(container, ids)
-    local key, err = self.world:key(container)
-    if not key then return nil, err or "Container is no longer available" end
+-- A mark on one item means nothing once no container and no list names it.
+local function dropMarks(self, gone)
+    local used = {}
+    for _, labels in pairs(self.state.containerLabels) do for _, id in ipairs(labels) do used[id] = true end end
+    for _, id in ipairs((self.state.checklist or {}).ids or {}) do used[id] = true end
+    for _, id in ipairs(gone) do
+        if Labels.itemOf(id) and not used[id] then
+            for item, labels in pairs(self.state.itemLabels) do
+                local kept = without(labels, id)
+                if #kept ~= #labels then self.state.itemLabels[item] = #kept > 0 and kept or nil end
+            end
+        end
+    end
+end
+
+local function changedStorage(self)
+    self.storageRevision = (self.storageRevision or 0) + 1
+    self.world:forgetGlance()
+    return self:persist()
+end
+
+function Instance:setLabels(target, ids)
+    local key, err = keyOf(self, target)
+    if not key then return nil, err end
     local labels
     labels, err = validLabels(ids)
     if not labels then return nil, err end
+    local before = self.state.containerLabels[key] or {}
     self.state.containerLabels[key] = #labels > 0 and labels or nil
-    self.world:_observe(container)
-    Log.info(nil, "storage-label", "container", Log.container(container, self.player), "labels", table.concat(labels, "+"))
-    return self:persist()
+    dropMarks(self, before)
+    if target ~= key then self.world:_observe(target) end
+    Log.info(nil, "storage-label", "key", key, "container", target ~= key and Log.container(target, self.player) or nil,
+        "labels", table.concat(labels, "+"))
+    return changedStorage(self)
+end
+
+function Instance:toggleLabel(target, id)
+    local labels = self:labels(target)
+    local kept = without(labels, id)
+    if #kept == #labels then kept[#kept + 1] = id end
+    return self:setLabels(target, kept)
+end
+
+function Instance:storageDetails(target)
+    local key = keyOf(self, target)
+    return key and copy(self.state.storage[key] or {}) or {}
+end
+
+-- details: {name, order}; only the fields given change. An empty name takes the name off.
+function Instance:setStorage(target, details)
+    local key, err = keyOf(self, target)
+    if not key then return nil, err end
+    local now, container = self:storageDetails(key), target ~= key and target or self.world.endpoints[key]
+    for field, value in pairs(details) do now[field] = value end
+    now = Labels.details(now) or {}
+    if details.name ~= nil and container and self.world:valid(container) then
+        local ok
+        ok, err = self.world:rename(container, now.name)
+        if ok == nil then return nil, err end
+    end
+    self.state.storage[key] = Labels.details(now)
+    if target ~= key then self.world:_observe(target) end
+    Log.info(nil, "storage-details", "key", key, "name", now.name, "order", now.order)
+    return changedStorage(self)
+end
+
+-- The mark that stands for this very item, made the first time it is needed.
+function Instance:markOf(item, make)
+    local id = self.world:itemId(item)
+    for _, label in ipairs(self.state.itemLabels[id] or {}) do if Labels.itemOf(label) then return label end end
+    if not make or not id then return nil end
+    local mark = Labels.ofItem(id, tostring(item:getFullType()))
+    local labels = self:itemLabels(item)
+    labels[#labels + 1] = mark
+    self.state.itemLabels[id] = labels
+    return mark
+end
+
+-- One item has one place, so a new one replaces the old.
+function Instance:setItemPlace(item, target, on)
+    local key, err = keyOf(self, target)
+    if not key then return nil, err end
+    local mark = self:markOf(item, on)
+    if not mark then return true end
+    for other, labels in pairs(self.state.containerLabels) do
+        if other ~= key and Labels.has(labels, mark) then
+            local kept = without(labels, mark)
+            self.state.containerLabels[other] = #kept > 0 and kept or nil
+        end
+    end
+    local labels = without(self:labels(key), mark)
+    if on then labels[#labels + 1] = mark end
+    return self:setLabels(target, labels)
 end
 
 function Instance:itemLabels(item)
@@ -362,6 +472,7 @@ function Instance:setItemLabels(item, ids)
     if not labels then return nil, err end
     local key = self.world:itemId(item)
     self.state.itemLabels[key] = #labels > 0 and labels or nil
+    self.world:forgetGlance()
     Log.info(nil, "item-label", "item", Log.item(item, self.player), "labels", table.concat(labels, "+"))
     return self:persist()
 end
@@ -372,6 +483,13 @@ function Instance:protect(item, value)
     Log.info(nil, "keep", "item", Log.item(item, self.player), "on", value == true)
     return self:persist()
 end
+
+function Instance:keepType(fullType, value)
+    self.state.keepTypes[fullType] = value == true or nil
+    Log.info(nil, "keep-type", "type", fullType, "on", value == true)
+    return self:persist()
+end
+function Instance:isTypeKept(fullType) return self.state.keepTypes[fullType] == true end
 
 function Instance:isProtected(item) return self.world:protected(item) end
 function Instance:isKept(item) return self.state.keep[self.world:itemId(item)] == true end
@@ -392,7 +510,9 @@ function Instance:setChecklist(filter)
     for _, fullType in ipairs(filter.types) do
         if type(fullType) == "string" and fullType ~= "" and not seen[fullType] then types[#types + 1] = fullType; seen[fullType] = true end
     end
+    local before = (self.state.checklist or {}).ids or {}
     self.state.checklist = { ids = labels, types = types, all = false }
+    dropMarks(self, before)
     Log.info(nil, "loot-list", "categories", table.concat(labels, "+"), "types", #types)
     return self:persist()
 end
@@ -407,6 +527,24 @@ function Instance:toggleChecklist(kind, key)
     list[kind] = kept
     return self:setChecklist(list)
 end
+
+-- Marks one item to be picked up. The mark comes off once it is carried.
+function Instance:setItemWanted(item, on)
+    local mark = self:markOf(item, on)
+    if not mark or (on and true or false) == self:onChecklist("ids", mark) then return true end
+    return self:toggleChecklist("ids", mark)
+end
+
+local function unmarkCarried(self)
+    for _, mark in ipairs(copy((self.state.checklist or {}).ids or {})) do
+        local id, fullType = Labels.itemOf(mark)
+        if id and Items.eachCarried(self.player, function(item)
+            return tostring(item:getID()) == id and tostring(item:getFullType()) == fullType end) then
+            Log.info(nil, "picked-up", "mark", mark)
+            self:toggleChecklist("ids", mark)
+        end
+    end
+end
 function Instance:forgetCategory(id)
     for _, field in ipairs({ "containerLabels", "itemLabels" }) do
         for key, labels in pairs(self.state[field]) do
@@ -415,6 +553,7 @@ function Instance:forgetCategory(id)
         end
     end
     if self.state.checklist then self.state.checklist.ids = without(self.state.checklist.ids, id) end
+    self.world:forgetGlance()
     local data = self:getSetups()
     local document = self.setups
     if document and data then
@@ -472,9 +611,10 @@ function Instance:deleteSetup(id)
     return saveSetups(self, candidate)
 end
 
+-- A job for certain items only cannot be set up again.
 function Instance:rememberSetup(request)
     local options, err = App.getPreferences()
-    if not options.rememberLastSetup then return true end
+    if not options.rememberLastSetup or request.only then return true end
     local data
     data = setupDocument(self)
     local setup
@@ -579,6 +719,7 @@ local function retireConsumption(self)
 end
 
 function Instance:start(plan, options)
+    if not (options and options.automatic) then AutoPutAway.yield(self) end
     local ok, err = clearConsumption(self)
     if not ok then return nil, err end
     if self.borrowed and self.borrowed.begin then
@@ -663,10 +804,12 @@ function Instance:again(request)
     if coming and coming.shortcutIntent == intent and coming.sourceContainer == request.sourceContainer then return true, "running" end
     local status = self.jobs:status()
     local ok, err
+    -- Certain items were chosen then, and others may have been since; only a load on its way is carried on with.
+    if request.only and started(status) and status.canResume and (status.carried or 0) == 0 then return false end
     if started(status) then
         if not status.canResume then return true, "running" end
         ok, err = self:resume()
-    elseif self.parked and started(self.parked:status()) then ok, err = self:resumePrevious()
+    elseif not request.only and self.parked and started(self.parked:status()) then ok, err = self:resumePrevious()
     else return false end
     return true, ok and "resumed" or nil, err
 end
@@ -687,6 +830,7 @@ end
 
 -- Eating, drinking and pouring borrow the player: the job pauses, then carries on.
 function Instance:borrow(begin)
+    AutoPutAway.yield(self)
     local ok, err = clearConsumption(self)
     if not ok then return nil, err end
     if self.borrowed then return nil, "Another action is about to start" end
@@ -857,6 +1001,17 @@ function App.onNeedsUpdate(player)
     AutoNeeds.step(instance, options, currentPreferences, now)
 end
 
+-- Asked every update, answered once a second unless a put-away of its own is running.
+function App.onHomeUpdate(player)
+    local options = currentPreferences()
+    if not options.autoPutAway or not player or not player:isLocalPlayer() then return end
+    local index = player:getPlayerNum()
+    if player ~= getSpecificPlayer(index) or not player:getCurrentSquare() then return end
+    local instance = sessions[index]
+    if not instance or instance.player ~= player then instance = App.get(index) end
+    if instance then AutoPutAway.update(instance, getTimestampMs()) end
+end
+
 function App.tick()
     -- Poll as well as subscribing: native UI may consume the key event first.
     local escapeDown = Keyboard and isKeyDown and isKeyDown(Keyboard.KEY_ESCAPE) or false
@@ -875,6 +1030,7 @@ function App.tick()
         if not instance.needsOnly and (not instance.lastObserve or stamp - instance.lastObserve >= 1000) then
             instance.lastObserve = stamp
             if instance.world:observeNearby() then instance.seenAt = instance.seenAt or stamp end
+            unmarkCarried(instance)
             if instance.seenAt and stamp - instance.seenAt >= SIGHTINGS_MS then instance:persist() end
         end
     end
@@ -896,7 +1052,7 @@ end
 
 if Events then
     Events.OnTick.Add(App.tick)
-    if Events.OnPlayerUpdate then Events.OnPlayerUpdate.Add(App.onNeedsUpdate) end
+    if Events.OnPlayerUpdate then Events.OnPlayerUpdate.Add(App.onNeedsUpdate); Events.OnPlayerUpdate.Add(App.onHomeUpdate) end
     if Events.OnKeyStartPressed then Events.OnKeyStartPressed.Add(App.onKeyStartPressed) end
     if Events.OnSave then Events.OnSave.Add(App.save) end
     if Events.OnDisconnect then Events.OnDisconnect.Add(App.reset) end

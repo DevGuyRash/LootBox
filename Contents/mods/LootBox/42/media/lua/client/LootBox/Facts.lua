@@ -17,7 +17,6 @@
 -- world:countCarriedFilter(filter)             -> the same for a filter
 --                                          exclude leaves out what lies inside that container.
 -- world:roomFacts(square)               -> {name, containers, groundItems, truncated}, or nil outside a room
--- world:labelledContainers()            -> list of {key, labels, container or nil, name, point or nil}
 -- world:deletionAllowed()               -> boolean, false where a server forbids emptying cans
 -- world:knownBins(near)                 -> list of {key, point, capacity, away}, nearest first; away is in tiles from
 --                                          the player or from near, whichever is closer
@@ -200,39 +199,8 @@ function Facts:roomFacts(square)
     return result
 end
 
--- An endpoint that has since been removed or reloaded must not be offered.
-local function endpoint(self, key)
-    local container = self.endpoints[key]
-    if container and self:valid(container) then return container end
-end
-
-local function pointOf(key)
-    local x, y, z = key:match("^%a+:(%-?%d+):(%-?%d+):(%-?%d+):")
-    if key:sub(1, 6) == "world:" or key:sub(1, 7) == "corpse:" then
-        x, y, z = tonumber(x), tonumber(y), tonumber(z)
-        return x and {x = x, y = y, z = z} or nil
-    end
-end
-
 local function squarePoint(square)
     if square then return {x = square:getX(), y = square:getY(), z = square:getZ()} end
-end
-
-function Facts:labelledContainers()
-    local result = {}
-    for key, labels in pairs(self.state.containerLabels) do
-        if storageLabel(key, labels) then
-            local container, copy = endpoint(self, key), {}
-            for index, id in ipairs(labels) do copy[index] = id end
-            -- Saved keys end in the part ID for vehicles and the container type for fixtures.
-            local kind = key:sub(1, 4) == "bag:" and "Bag" or key:match("([^:]+)$") or "Container"
-            result[#result + 1] = {key = key, labels = copy, container = container,
-                name = container and self:name(container) or getTextOrNull and (getTextOrNull("IGUI_ContainerTitle_" .. kind)
-                    or getTextOrNull("IGUI_VehiclePart" .. kind)) or kind,
-                point = container and squarePoint(self:square(container)) or pointOf(key)}
-        end
-    end
-    return Sort(result, function(entry) return entry.name, entry.key end)
 end
 
 function Facts.binPoint(key)
