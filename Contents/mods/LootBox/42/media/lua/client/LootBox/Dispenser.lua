@@ -95,7 +95,10 @@ function Dispenser:stand(what)
     return stand and stand.kind == what and stand or nil
 end
 
-function Dispenser:jug() return self.jugId and Items.find(self.player, self.jugId) or nil end
+function Dispenser:jug()
+    if self.jugId then return (Items.find(self.player, self.jugId)) end
+    return self.watch and self.watch:find() or nil
+end
 
 local function handle(self, stand, jug, done)
     local player = self.player
@@ -131,17 +134,15 @@ function Dispenser:take()
     local stand = self:stand("mounted")
     if not stand then return self:finish("cancelled", "The bottle is no longer on its stand") end
     local litres = stand.object:getFluidContainer():getAmount()
-    local watch = Items.watch(self.player, { interaction = self.interaction, makes = function(item)
+    self.watch = Items.watch(self.player, { interaction = self.interaction, makes = function(item)
         if item:getFullType() ~= BOTTLE then return false end
         return -math.abs(item:getFluidContainer():getAmount() - litres)
     end })
     handle(self, stand, nil, function()
-        self:await(function() return self:stand("bare") and watch:find() end, function(jug)
+        self:await(function() return self:stand("bare") and self:jug() end, function(jug)
             self.jugId, self.phase = jug:getID(), "pour"
         end, function()
-            local jug = watch:find()
-            self.jugId = jug and jug:getID()
-            self:finish("failed", jug and "The bottle was taken, but its empty stand is not here" or "The game did not take the bottle")
+            self:finish("failed", self:jug() and "The empty stand is not here" or "The game did not take the bottle")
         end)
     end)
 end

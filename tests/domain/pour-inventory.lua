@@ -1,5 +1,9 @@
 package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.path
+for _, name in ipairs({ 'TimedActions/ISTimedActionQueue', 'TimedActions/ISInventoryTransferUtil' }) do package.loaded[name] = package.loaded[name] or true end
 local Pour = require "LootBox/PourInventory"
+local function collect(p, w, source, loot, options)
+    return Pour.plan(Pour.snapshot(p, w, source:getContainer(), loot), source, options)
+end
 
 local function container(owner)
     local c={items={}, owner=owner}
@@ -65,36 +69,30 @@ do
     item(stray.bag,"Full",1,1)
     item(loot,"Loot",1,0)
     local invalid=item(p.main,"Invalid",1,0);invalid.fluid.reject=true
-    local result=assert(Pour.collect(p,w,source,loot,{}))
+    local result=assert(collect(p,w,source,loot,{}))
     assert(result.source.item==source and #result.targets==7)
     assert(result.fill[1].item==small and result.fill[2].item==duplicate and result.fill[3].item==large)
-    local eq=assert(Pour.collect(p,w,source,loot,{pourFillScope="equipped-first",pourFillOrder="largest-first"}))
+    local eq=assert(collect(p,w,source,loot,{pourFillScope="equipped-first",pourFillOrder="largest-first"}))
     assert(eq.fill[1].item==gear and eq.fill[2].item==deeper and eq.fill[3].item==nested and eq.fill[4].item==large)
-    local only=assert(Pour.collect(p,w,source,loot,{pourFillScope="main-only"}))
+    local only=assert(collect(p,w,source,loot,{pourFillScope="main-only"}))
     assert(#only.targets==7 and #only.fill==3)
     assert(result.fill[1].place=="Main inventory" and eq.fill[3].place=="Hydration bag")
-    assert(Pour.revalidate(p,w,result.fill[4],loot,{},result.source))
     local inBag=result.fill[#result.fill]
-    assert(inBag.item==inStray and inBag.scope=="carried" and Pour.revalidate(p,w,inBag,loot,{},result.source))
+    assert(inBag.item==inStray and inBag.scope=="carried")
     stray.bag.lock=true
-    assert(not Pour.revalidate(p,w,inBag,loot,{},result.source))
     p.gear[gear]=nil
-    assert(not Pour.revalidate(p,w,result.fill[4],loot,{},result.source))
 end
 do
     local p,w,loot=fixture()
     local source=item(loot,"Source",2,1)
     local target=item(loot,"Loot",1,0)
     local other=item(p.main,"Main",1,0)
-    local r=assert(Pour.collect(p,w,source,loot,{}));assert(#r.targets==1 and r.targets[1].item==other)
+    local r=assert(collect(p,w,source,loot,{}));assert(#r.targets==1 and r.targets[1].item==other)
     local opt={pourLootToLoot=true}
-    r=assert(Pour.collect(p,w,source,loot,opt));assert(#r.targets==2)
-    assert(Pour.revalidate(p,w,r.targets[1],loot,opt,r.source))
-    assert(not Pour.revalidate(p,w,r.targets[1],container(),opt,r.source))
-    assert(not Pour.revalidate(p,w,r.targets[1],loot,{},r.source))
-    w.deny=true;assert(not Pour.collect(p,w,source,loot,opt))
-    w.deny=false;source.sealed=true;assert(not Pour.collect(p,w,source,loot,opt))
-    source.sealed=false;source.fluid.cannotEmpty=true;assert(not Pour.collect(p,w,source,loot,opt))
+    r=assert(collect(p,w,source,loot,opt));assert(#r.targets==2)
+    w.deny=true;assert(not collect(p,w,source,loot,opt))
+    w.deny=false;source.sealed=true;assert(not collect(p,w,source,loot,opt))
+    source.sealed=false;source.fluid.cannotEmpty=true;assert(not collect(p,w,source,loot,opt))
     source.fluid.cannotEmpty=false;loot.floor=true
     local function wrapper(i)
         local component={}
@@ -107,24 +105,21 @@ do
     end
     local so,sf=wrapper(source)
     local to,tf=wrapper(target)
-    assert(not Pour.collect(p,w,source,loot,opt), "item-only floor fluid is never offered or borrowed")
+    assert(not collect(p,w,source,loot,opt), "item-only floor fluid is never offered or borrowed")
     source.wrapper,target.wrapper=so,to
     sf.multitile=true
-    assert(not Pour.collect(p,w,source,loot,opt), "stock rejects multi-tile world fluid even with an item component")
+    assert(not collect(p,w,source,loot,opt), "stock rejects multi-tile world fluid even with an item component")
     sf.multitile=false
-    r=assert(Pour.collect(p,w,source,loot,opt));assert(r.source.object==so and r.source.fluid==sf and sf~=source.fluid)
+    r=assert(collect(p,w,source,loot,opt));assert(r.source.object==so and r.source.fluid==sf and sf~=source.fluid)
     source.fluid,target.fluid=nil,nil
-    r=assert(Pour.collect(p,w,source,loot,opt));assert(r.source.object==so and r.source.fluid==sf)
+    r=assert(collect(p,w,source,loot,opt));assert(r.source.object==so and r.source.fluid==sf)
     assert(#r.targets==1 and r.targets[1].item==other, "native world-to-world is unavailable")
-    assert(Pour.revalidate(p,w,r.targets[1],loot,opt,r.source))
     so.stale=true
-    assert(not Pour.revalidate(p,w,r.targets[1],loot,opt,r.source))
     so.stale=false
     local fake=item(loot,"Source",2,1)
     fake.wrapper=so
-    assert(not Pour.collect(p,w,fake,loot,opt), "same-name pseudo-item cannot borrow a real wrapper")
+    assert(not collect(p,w,fake,loot,opt), "same-name pseudo-item cannot borrow a real wrapper")
     so.getItem=function() return target end
-    assert(not Pour.revalidate(p,w,r.targets[1],loot,opt,r.source))
 end
 do
     local p,w,loot=fixture()
@@ -134,47 +129,10 @@ do
     local ghost=item(p.main,"Ghost",1,0);ghost.fluid.owner=b
     local multi=item(p.main,"MultiTile",1,0);function multi.fluid:isMultiTileMoveable() return true end
     local tiny=item(p.main,"Tiny",1,.99999)
-    local r=assert(Pour.collect(p,w,source,loot,{}))
+    local r=assert(collect(p,w,source,loot,{}))
     assert(#r.targets==1 and r.targets[1].item==b)
     b.fluid.amount=1
-    assert(Pour.accessible(p,w,r.targets[1],loot))
-    assert(not Pour.revalidate(p,w,r.targets[1],loot,{},r.source))
     source.fluid.amount=0
-    assert(Pour.accessible(p,w,r.source,loot))
-    assert(not Pour.revalidate(p,w,r.source,loot,{}))
-end
-do
-    local p,w,loot=fixture()
-    local original=item(loot,"Source",2,1)
-    item(p.main,"Bottle",1,0)
-    local r=assert(Pour.collect(p,w,original,loot,{}))
-    local moved=item(p.main,"Source",2,1);moved.id=original.id
-    assert(not Pour.rebind(p,w,r.source,moved,loot,loot))
-    local rebound=assert(Pour.rebind(p,w,r.source,moved,p.main,loot))
-    assert(rebound.item==moved and rebound.id==original.id and rebound.scope=="main")
-    moved.name="Unrelated"
-    assert(not Pour.rebind(p,w,r.source,moved,p.main,loot))
-    moved.name="Source"
-    local old=moved.fluid
-    local water,gas={},{}
-    local parts={{water,.8},{gas,.2}}
-    local released=0
-    function old:createFluidSample()
-        return {size=function() return #parts end,
-            getFluid=function(_,i) return parts[i+1][1] end,
-            getPercentage=function(_,i) return parts[i+1][2] end,
-            release=function() released=released+1 end}
-    end
-    local mix=assert(Pour.mix(rebound))
-    parts={{gas,.2},{water,.8}}
-    assert(Pour.sameMix(rebound,mix) and released==2)
-    parts={{gas,.25},{water,.75}}
-    assert(not Pour.sameMix(rebound,mix) and released==3)
-    moved.fluid=item(p.main,"Other",2,0).fluid
-    moved.fluid.owner=moved
-    assert(not Pour.stillHere(p,w,rebound,loot,{}))
-    local valid,after=Pour.accessible(p,w,rebound,loot,true)
-    assert(valid and after.fluid==moved.fluid and after.amount==0)
 end
 do
     local p,w,loot=fixture()
@@ -189,18 +147,18 @@ do
     for _=1,600 do item(loot,"Nonfluid") end
     local late=item(loot,"Late",1,0)
     local opt={pourLootToLoot=true}
-    local plan=assert(Pour.collect(p,w,source,loot,opt))
+    local plan=assert(collect(p,w,source,loot,opt))
     assert(seen==2 and not plan.truncated and #plan.fill==1 and plan.fill[1].item==late)
     for _=1,4000 do item(loot,"Nonfluid") end
     seen=0
-    plan=assert(Pour.collect(p,w,source,loot,opt))
+    plan=assert(collect(p,w,source,loot,opt))
     assert(seen==2 and plan.truncated and #plan.fill==0 and #plan.targets==1 and plan.targets[1].item==late)
 end
 do
     local p,w,loot=fixture()
     local source=item(p.main,"Source",3,2)
     for _=1,513 do item(p.main,"Bottle",1,0) end
-    local plan=assert(Pour.collect(p,w,source,loot,{}))
+    local plan=assert(collect(p,w,source,loot,{}))
     assert(plan.truncated and #plan.fill==0 and #plan.targets==512)
 end
 do
@@ -209,11 +167,10 @@ do
     local custom=bag(p.main,"Custom modded tote")
     local held=item(custom.bag,"Bottle",1,0)
     function p:isEquipped(i) return i==custom end
-    local plan=assert(Pour.collect(p,w,source,loot,{}))
+    local plan=assert(collect(p,w,source,loot,{}))
     assert(#plan.targets==1 and plan.targets[1].item==held and plan.targets[1].scope=="equipped")
     custom.container=loot -- capability alone cannot make a stale bag part of main inventory
-    assert(not Pour.stillHere(p,w,plan.targets[1],loot,{}))
-    plan=assert(Pour.collect(p,w,source,loot,{}))
+    plan=assert(collect(p,w,source,loot,{}))
     assert(#plan.targets==0)
 end
 do
@@ -318,14 +275,9 @@ do
     local b=assert(inverse(opt))
     assert(#b.donors==3 and b.donors[3].source.item==sibling)
     for _,d in ipairs(b.donors) do local i=d.source.item;assert(i~=receiver and i~=hidden and i~=empty) end
-    assert(not Pour.revalidate(p,w,target,loot,opt,one),"normal carried-source action cannot target loot")
-    assert(Pour.revalidate(p,w,target,loot,{},one,receiver))
-    assert(not Pour.revalidate(p,w,target,loot,{},one,sibling))
-    assert(not Pour.revalidate(p,w,target,loot,{},b.donors[3].source,receiver))
-    assert(Pour.revalidate(p,w,target,loot,opt,b.donors[3].source,receiver))
     assert(not Pour.fillFrom(Pour.snapshot(p,w,loot,nil),{receiver},opt),"an unshown holder is not a destination")
     assert(not Pour.fillFrom(Pour.snapshot(p,w,loot,loot),{receiver,sibling},opt),"several loot receivers are never one choice")
-    assert(#assert(Pour.collect(p,w,main,loot,opt)).targets==0,"inverse menu cannot widen regular Pour Into")
+    assert(#assert(collect(p,w,main,loot,opt)).targets==0,"inverse menu cannot widen regular Pour Into")
     pack.bag.lock=true;assert(#assert(inverse()).donors==1)
     loot.lock=true;assert(not inverse(opt));loot.lock=false
     receiver.fluid.amount=2;assert(not inverse(opt));receiver.fluid.amount=0
@@ -350,7 +302,7 @@ do
     local empty,same=vessel("Empty",1,0,{}),vessel("Same",1,.4,{{water,1}})
     local trace=vessel("Trace",1,.5,{{water,.998},{milk,.002}})
     local other=vessel("Milk",1,.95,{{milk,1}})
-    local plan=assert(Pour.collect(p,w,source,nil,{}))
+    local plan=assert(collect(p,w,source,nil,{}))
     local relation={}
     for _,e in ipairs(plan.targets) do relation[e.item]=e.relation end
     assert(relation[empty]=="empty" and relation[same]=="same" and relation[trace]=="same" and relation[other]=="mixes")
@@ -375,7 +327,7 @@ do
     for _=1,nails do item(p.main,"Nails") end
     item(p.main,"Bottle",1,0)
     function p:getWornItems() equipment=equipment+1;return nil end
-    assert(Pour.collect(p,w,source,nil,{}))
+    assert(collect(p,w,source,nil,{}))
     assert(equipment<=4,"cargo without liquid is not tested against the player's equipment")
     local bottle=item(p.main,"Bottle",1,.5)
     bottle.fluid.getTranslatedContainerName=function() return "Water Bottle" end
@@ -389,11 +341,8 @@ do
     local p,w=fixture()
     local source=item(p.main,"Source",3,2)
     local target=item(p.main,"Bottle",1,0)
-    local e=assert(Pour.collect(p,w,source,nil,{})).targets[1]
-    local ok,live=Pour.accessible(p,w,e,nil);assert(ok and live.item==target)
+    local e=assert(collect(p,w,source,nil,{})).targets[1]
     target.id=999
-    local _,why=Pour.accessible(p,w,e,nil);assert(why=="vessel-identity")
     target.id=e.id;target.container=container()
-    _,why=Pour.accessible(p,w,e,nil);assert(why=="item-moved")
 end
 print("PASS PourInventory scope, order, exact endpoints, inverse donor direction and native suitability")

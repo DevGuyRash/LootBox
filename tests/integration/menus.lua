@@ -48,7 +48,7 @@ package.loaded["LootBox/ContainerFocus"] = {select = function() return false end
 package.loaded["LootBox/PaneClicks"] = {attach = function() end}
 package.loaded["LootBox/ConsumeMenu"] = {add = function() end}
 package.loaded["LootBox/PourMenu"] = {add = function() end}
-package.loaded["LootBox/MountedDispenserMenu"] = {add = function() end}
+package.loaded["LootBox/DispenserMenu"] = {add = function() end}
 local Menus = require "LootBox/Menus"
 Menus.install({act = function(_, request, options) f.acted, f.options = request, options end, say = function(_, text) f.said = text end,
     open = function(_, page, context) f.opened, f.openContext = page, context end, showJob = function() f.shown = true end})

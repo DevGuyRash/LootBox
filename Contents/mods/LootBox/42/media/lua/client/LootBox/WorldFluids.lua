@@ -5,22 +5,14 @@ local Log=require "LootBox/Log"
 local W={}
 local donorPolicy={allowEquippedConsumption=true}
 local receiverPolicy={allowMainInventoryFluidReceive=true}
+-- The fixture is still there, allowed and beside the player.
 function W.live(p,a)
-    if p~=getSpecificPlayer(p:getPlayerNum()) or ISWorldObjectContextMenu.disableWorldMenu
-        or (ISWorldMap_instance and ISWorldMap_instance:isVisible()) then return false,"world-menu-disabled" end
-    local trade=ISTradingUI and ISTradingUI.GetUIForPlayer(p)
-    if trade and trade:isVisible() then return false,"trading" end
-    local o,s=a.object,a.square
-    local here=p:getCurrentSquare()
-    if not here or not s or o:getSquare()~=s or here:getZ()~=s:getZ() or s:getBuilding()~=p:getBuilding()
-        or getCell():getGridSquare(s:getX(),s:getY(),s:getZ())~=s then return false,"fixture-square" end
-    local i=o:getObjectIndex()
-    local objects=s:getObjects()
-    if i<0 or i>=objects:size() or objects:get(i)~=o then return false,"fixture-removed" end
-    if not SafeHouse or not SafeHouse.isSafehouseAllowInteract(s,p) or not SafeHouse.isSafehouseAllowLoot(s,p) then return false,"safehouse" end
+    local o,s,here=a.object,a.square,p:getCurrentSquare()
+    if not here or not s or o:getSquare()~=s or o:getObjectIndex()<0 then return false,"it is gone" end
+    if not SafeHouse.isSafehouseAllowInteract(s,p) or not SafeHouse.isSafehouseAllowLoot(s,p) then return false,"safehouse" end
     local corrected=luautils.getCorrectSquareForWall(p,s)
-    return corrected and math.abs(here:getX()-s:getX())<=1 and math.abs(here:getY()-s:getY())<=1 and here:canReachTo(corrected),
-        "fixture-out-of-reach"
+    return here:getZ()==s:getZ() and corrected~=nil and math.abs(here:getX()-s:getX())<=1
+        and math.abs(here:getY()-s:getY())<=1 and here:canReachTo(corrected),"too far"
 end
 
 local function capture(p,o)

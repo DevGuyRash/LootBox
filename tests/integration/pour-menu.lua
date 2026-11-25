@@ -1,4 +1,5 @@
 -- Item Pour Into and Fill From from the native right-click selection, with the
+for _, name in ipairs({ 'TimedActions/ISTimedActionQueue', 'TimedActions/ISInventoryTransferUtil' }) do package.loaded[name] = package.loaded[name] or true end
 -- real selection, snapshot, plan and row modules. Panes, items and the native
 -- menu are doubles.
 package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.path
@@ -56,6 +57,7 @@ local function item(c, kind, name)
     function i:getFullType() return kind end
     function i:getContainer() return self.source end
     function i:isSealed() return self.sealed == true end
+    function i:isFavorite() return self.favorite == true end
     function i:getInventory() return self.bag end
     c.contents[#c.contents + 1] = i
     return i
@@ -89,7 +91,7 @@ local function fixture()
     f.main, f.crate = container("inventory"), container("crate")
     local square = {}
     f.player = { getInventory = function() return f.main end, getSquare = function() return square end,
-        getPrimaryHandItem = function() return f.pack end }
+        getPrimaryHandItem = function() return f.pack end, getSecondaryHandItem = function() end }
     f.pack = item(f.main, "Base.Bag", "Field Bag")
     f.pouch = container("bag", f.pack)
     f.pack.bag = f.pouch
@@ -99,10 +101,9 @@ local function fixture()
     f.app = { world = {
         protected = function() return false end,
         name = function(_, c) return c == f.crate and "Kitchen Shelf" or nil end,
-        consumptionSource = function(_, i, c) return f.sourceDenied ~= true and c == f.crate and i.source == c end,
-        pourShelfAnchor = function(_, c) return not f.noAnchor and c == f.crate and { c } or nil end } }
-    function f.app:startPour(source, targets, options, receiver)
-        f.calls[#f.calls + 1] = { source = source, targets = targets, options = options, receiver = receiver }
+        consumptionSource = function(_, i, c) return f.sourceDenied ~= true and c == f.crate and i.source == c end, } }
+    function f.app:startPour(source, targets, id)
+        f.calls[#f.calls + 1] = { source = source, targets = targets, id = id }
         return not f.refuse, f.refuse
     end
     FluidContainer = { CanTransfer = function(from, to) return from ~= to end }
@@ -171,9 +172,7 @@ test("one Pour Into after the native Fluid entry dispatches one frozen batch in 
     click(all); click(all); click(one)
     assert(#f.calls == 1 and f.calls[1].source.item == f.source and #f.calls[1].targets == 2)
     assert(f.calls[1].targets[1].item == f.bagged and f.calls[1].targets[2].item == f.bottle)
-    local options = f.calls[1].options
-    assert(options.pourFillScope == "equipped-first" and options.pourFillOrder == "largest-first"
-        and options.pourRoute == "fill-all" and options.interaction == 5)
+    assert(f.calls[1].id == 5)
     assert(f.asked[1] == "menu.item" and f.asked[2] == "Pour Into > Pour into all (2)")
     assert(not package.loaded["Fluids/ISFluidTransferAction"], "native actions must remain lazy at menu render")
     local again
@@ -204,7 +203,7 @@ test("identical vessels share a row per place and every row keeps its exact vess
     click(needed(group.child, "All (2)"))
     assert(#f.calls[1].targets == 2 and f.calls[1].targets[1].item == a and f.calls[1].targets[2].item == c)
     click(needed(needed(child(), "Canteen, 0.6 / 1 L - Main inventory (2)").child, "One"))
-    assert(#f.calls[2].targets == 1 and f.calls[2].targets[1].item == a and f.calls[2].options.pourRoute == "single")
+    assert(#f.calls[2].targets == 1 and f.calls[2].targets[1].item == a)
     click(needed(child(), "Canteen, 0.6 / 1 L - Field Bag"))
     assert(f.calls[3].targets[1].item == b)
 end)
@@ -233,21 +232,18 @@ test("two selections, hidden loot and loot-to-loot stay exact, and nothing is sh
     assert(not option(root({ f.shelf }).child, "Shelf Bottle, 0 / 0.5 L"))
     f.preferences.pourLootToLoot = true
     click(needed(root({ f.shelf }).child, "Shelf Bottle, 0 / 0.5 L"))
-    assert(f.calls[1].source.item == f.shelf and f.calls[1].targets[1].item == f.shelfTarget and f.calls[1].options.pourLootToLoot == true)
+    assert(f.calls[1].source.item == f.shelf and f.calls[1].targets[1].item == f.shelfTarget)
     f.preferences.pourLootToLoot = nil
     for _, v in ipairs({ f.source, f.bottle, f.bagged }) do v:getFluidContainer().amount = v:getFluidContainer().capacity end
     assert(not root({ f.shelf }))
     f.bottle:getFluidContainer().amount = 0
     assert(needed(root({ f.shelf }).child, "Bottle, 0 / 1 L"))
-    f.noAnchor = true; assert(not root({ f.shelf }), "a vessel that cannot be put back is not offered"); f.noAnchor = nil
     f.sourceDenied = true; assert(not root({ f.shelf }))
 end)
 
 test("loot Fill From on one exact receiver lists allowed donors and one frozen click", function()
     f.preferences.pourMainOnly = true -- a batch policy cannot hide an explicit bagged donor
     f.bagged:getFluidContainer().amount = .75
-    local anchor = { f.crate }
-    f.app.world.pourShelfAnchor = function(_, c) if c == f.crate then return anchor end end
     local items = { f.shelfTarget }
     local parent = open(items)
     assert(not option(parent, "Pour Into"))
@@ -256,9 +252,8 @@ test("loot Fill From on one exact receiver lists allowed donors and one frozen c
     items[1] = f.bottle
     assert(click(needed(root.child, "Bottle, 0.75 / 2 L")))
     click(needed(root.child, "Milk, 1.5 / 2 L"))
-    assert(#f.calls == 1 and f.calls[1].source.item == f.bagged and f.calls[1].receiver == f.shelfTarget and #f.calls[1].targets == 1
-        and f.calls[1].targets[1].item == f.shelfTarget and f.calls[1].targets[1].pourAnchor == anchor
-        and f.calls[1].options.pourRoute == "portable-fill-from")
+    assert(#f.calls == 1 and f.calls[1].source.item == f.bagged and #f.calls[1].targets == 1
+        and f.calls[1].targets[1].item == f.shelfTarget)
     f.preferences.pourLootToLoot = true
     f.shelfTarget:getFluidContainer().amount = .1
     click(needed(needed(open({ f.shelfTarget }), "Fill From").child, "Shelf Milk, 1 / 2 L"))
@@ -272,13 +267,11 @@ test("loot Fill From on one exact receiver lists allowed donors and one frozen c
     open({ f.shelfTarget }, parent)
     assert(#parent.options == 1 and needed(f.branded, "Fill From"))
     f.visible = false; assert(not option(open({ f.shelfTarget }), "Fill From")); f.visible = true
-    f.app.world.pourShelfAnchor = function() return nil end
-    assert(not option(open({ f.shelfTarget }), "Fill From"))
 end)
 
 test("carried receivers: one fills from any carried donor, a stack fills all or one", function()
     click(needed(needed(open({ f.bottle }), "Fill From").child, "Milk, 1.5 / 2 L"))
-    assert(f.calls[1].source.item == f.source and f.calls[1].targets[1].item == f.bottle and not f.calls[1].receiver)
+    assert(f.calls[1].source.item == f.source and f.calls[1].targets[1].item == f.bottle)
     click(needed(needed(open({ f.bagged }), "Fill From").child, "Milk, 1.5 / 2 L"))
     assert(f.calls[2].targets[1].item == f.bagged)
     local second = vessel(f.main, "Base.Bottle", "Bottle", 1, .2)
