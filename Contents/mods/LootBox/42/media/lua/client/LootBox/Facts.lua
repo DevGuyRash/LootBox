@@ -6,22 +6,26 @@
 -- world:hasStorageLabels()              -> boolean, any container has a label
 -- world:storageAccepts(descriptor)      -> boolean, some labelled container takes this item
 -- world:rememberedVehicleLoaded()       -> boolean
+-- world:isRememberedVehicle(vehicle)    -> boolean
 -- world:containerFacts(container)       -> {kind, items, takeable, explored, locked, owned, used, capacity,
---                                           types = {fullType = count}, categories = {native id = count}, truncated}
+--                                           types = {fullType = count}, categories = {native or custom id = count}, truncated}
 --                                          kind: main, bag, fixture, vehicle, corpse, floor or bin.
---                                          Counts cover the container itself, not bags inside it.
--- world:countCarried(fullType)          -> number over main inventory and carried bags
--- world:countCarriedCategory(id)        -> number, native or custom category
+--                                          items counts everything; takeable, types and categories leave out
+--                                          protected and unwanted items. Bags inside are not opened.
+-- world:countMatching(container, filter)       -> number of unprotected items the filter {ids, types, all} selects
+-- world:countCarried(fullType, exclude)        -> number of unprotected carried items; nil fullType counts every type
+-- world:countCarriedCategory(id, exclude)      -> the same for a native or custom category
+-- world:countCarriedFilter(filter)             -> the same for a filter
+--                                          exclude leaves out what lies inside that container.
 -- world:roomFacts(square)               -> {name, containers, groundItems, truncated}, or nil outside a room
 -- world:labelledContainers()            -> list of {key, labels, container or nil, name, point or nil}
 -- world:knownBins()                     -> list of {key, container or nil, name, point, capacity, used or nil}
 
-local Catalog = require "LootBox/Catalog"
 local Log = require "LootBox/Log"
 local call = require "LootBox/Safe"
 local Sort = require "LootBox/Sort"
 
-local MAX_ITEMS, MAX_SQUARES = 400, 150
+local MAX_ITEMS, MAX_SQUARES, SNAPSHOT_MS = 400, 150, 50
 local Facts = {}
 
 local function size(list) return call(list, "size") or 0 end
@@ -70,10 +74,22 @@ function Facts:rememberedVehicleLoaded()
     local square = getCell():getGridSquare(remembered.x, remembered.y, remembered.z)
     for _, vehicle in ipairs({getVehicleById and getVehicleById(remembered.id) or false,
         self.vehicles[tostring(remembered.id)] or false, call(square, "getVehicleContainer") or false}) do
-        if vehicle and call(vehicle, "getKeyId") == remembered.keyId and call(vehicle, "getScriptName") == remembered.script
-            and call(vehicle, "isRemovedFromWorld") ~= true and call(vehicle, "getSquare") then return true end
+        if vehicle and self:isRememberedVehicle(vehicle) and call(vehicle, "isRemovedFromWorld") ~= true and call(vehicle, "getSquare") then return true end
     end
     return false
+end
+
+function Facts:isRememberedVehicle(vehicle)
+    local remembered = self.state.vehicle
+    return type(remembered) == "table" and remembered.keyId ~= nil and vehicle ~= nil and call(vehicle, "getKeyId") == remembered.keyId
+        and call(vehicle, "getScriptName") == remembered.script
+end
+
+local function eachTakeable(self, list, visit)
+    for index = 0, math.min(size(list), MAX_ITEMS) - 1 do
+        local item = call(list, "get", index)
+        if item and not self:protected(item) then visit(item) end
+    end
 end
 
 function Facts:containerFacts(container)
@@ -83,40 +99,75 @@ function Facts:containerFacts(container)
         explored = call(container, "isExplored") ~= false, locked = call(container, "isLockedToCharacter", self.player) == true,
         owned = self:owns(container), used = call(container, "getCapacityWeight") or 0,
         capacity = call(container, "getEffectiveCapacity", self.player) or 0, truncated = count > MAX_ITEMS}
-    for index = 0, math.min(count, MAX_ITEMS) - 1 do
-        local item = call(list, "get", index)
-        local fullType, category = tostring(call(item, "getFullType")), Catalog.categoryId(item)
-        result.types[fullType] = (result.types[fullType] or 0) + 1
-        result.categories[category] = (result.categories[category] or 0) + 1
-        if call(item, "isUnwanted", self.player) ~= true and not self:protected(item) then result.takeable = result.takeable + 1 end
-    end
+    local custom = {}
+    eachTakeable(self, list, function(item)
+        if call(item, "isUnwanted", self.player) == true then return end
+        local descriptor = self:describe(item)
+        local key = descriptor.fullType .. "|" .. tostring(descriptor.categoryId) .. "|" .. table.concat(descriptor.labels, "|")
+        custom[key] = custom[key] or self.graph and self.graph:customMatches(descriptor) or {}
+        result.takeable = result.takeable + 1
+        result.types[descriptor.fullType] = (result.types[descriptor.fullType] or 0) + 1
+        result.categories[descriptor.categoryId] = (result.categories[descriptor.categoryId] or 0) + 1
+        for _, id in ipairs(custom[key]) do result.categories[id] = (result.categories[id] or 0) + 1 end
+    end)
     return result
 end
 
-local function carried(self, matches)
-    local pending, seen, cursor, total = {call(self.player, "getInventory")}, {}, 1, 0
+function Facts:countMatching(container, filter)
+    local total = 0
+    eachTakeable(self, call(container, "getItems"), function(item)
+        if filter.all or self.graph and self.graph:matchesFilter(filter, self:describe(item)) then total = total + 1 end
+    end)
+    return total
+end
+
+-- One menu asks many of these questions at once, so a snapshot answers them all for a moment.
+local function carriedItems(self)
+    local stamp = getTimestampMs and getTimestampMs()
+    local snapshot = self.carriedSnapshot
+    if stamp and snapshot and stamp >= snapshot.stamp and stamp - snapshot.stamp < SNAPSHOT_MS then return snapshot.entries end
+    local entries, seen, cursor = {}, {}, 1
+    local pending = {{container = call(self.player, "getInventory"), within = {}}}
     while pending[cursor] do
-        local list = not seen[pending[cursor]] and call(pending[cursor], "getItems")
-        seen[pending[cursor]] = true
+        local container, within = pending[cursor].container, {}
+        cursor = cursor + 1
+        for outer in pairs(pending[cursor - 1].within) do within[outer] = true end
+        within[container] = true
+        local list = not seen[container] and call(container, "getItems")
+        seen[container] = true
         for index = 0, (list and size(list) or 0) - 1 do
             local item = call(list, "get", index)
-            if matches(item) then total = total + 1 end
-            pending[#pending + 1] = call(item, "getInventory")
+            if item and not self:protected(item) then entries[#entries + 1] = {descriptor = self:describe(item), within = within} end
+            local inside = call(item, "getInventory")
+            if inside then pending[#pending + 1] = {container = inside, within = within} end
         end
-        cursor = cursor + 1
+    end
+    if stamp then self.carriedSnapshot = {stamp = stamp, entries = entries} end
+    return entries
+end
+
+local function countCarried(self, exclude, matches)
+    local total = 0
+    for _, entry in ipairs(carriedItems(self)) do
+        if not (exclude and entry.within[exclude]) and matches(entry.descriptor) then total = total + 1 end
     end
     return total
 end
 
-function Facts:countCarried(fullType)
-    return carried(self, function(item) return tostring(call(item, "getFullType")) == fullType end)
+function Facts:countCarried(fullType, exclude)
+    return countCarried(self, exclude, function(descriptor) return fullType == nil or descriptor.fullType == fullType end)
 end
 
-function Facts:countCarriedCategory(id)
-    return carried(self, function(item)
-        local descriptor = self:describe(item)
+function Facts:countCarriedCategory(id, exclude)
+    return countCarried(self, exclude, function(descriptor)
         if self.graph then return self.graph:matches(id, descriptor) end
         return descriptor.categoryId == id
+    end)
+end
+
+function Facts:countCarriedFilter(filter)
+    return countCarried(self, nil, function(descriptor)
+        return filter.all == true or self.graph ~= nil and self.graph:matchesFilter(filter, descriptor)
     end)
 end
 
