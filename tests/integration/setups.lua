@@ -36,6 +36,7 @@ package.loaded["LootBox/Jobs"] = { new = function()
         tick = function() end, start = function() return true end }
 end }
 package.loaded["LootBox/TillFull"] = {new = function() error("Unexpected consumption boundary") end}
+package.loaded["LootBox/AutoNeeds"] = {interruptObservation = function() end, step = function() end}
 local App = require "LootBox/App"
 local Store = require "LootBox/Store"
 local function fixture()
@@ -80,20 +81,20 @@ test("quick reviews default off while interface features stay on and copies rema
     local preferences, err = App.getPreferences()
     assert(not err)
     for _, name in ipairs({ "tillFullEnabled", "contextMenus", "inventoryShortcuts", "worldShortcuts", "vehicleShortcuts",
-        "categoryShortcuts", "savedShortcuts", "matchingTransferButtons", "rememberLastSetup", "showTips" }) do
+        "matchingTransferButtons", "rememberLastSetup", "jobBar", "detailedLog" }) do
         assert(preferences[name] == true)
     end
-    for _, name in ipairs({"tillFullBothNeeds", "confirmQuickMoves", "confirmQuickCleanup", "confirmBinReviews", "showQuickProgress"}) do assert(preferences[name] == false) end
+    for _, name in ipairs({"tillFullBothNeeds", "confirmQuickMoves", "confirmQuickCleanup", "confirmBinReviews"}) do assert(preferences[name] == false) end
     preferences.contextMenus = false
     assert(App.getPreferences().contextMenus == true)
 end)
 
 test("context toggles survive an application restart and apply across worlds", function()
-    assert(App.setPreferences({ contextMenus = false, categoryShortcuts = false }))
+    assert(App.setPreferences({ contextMenus = false, vehicleShortcuts = false }))
     App.reset()
     assert(App.getPreferences().contextMenus == false)
-    assert(App.getPreferences().categoryShortcuts == false)
-    assert(App.getPreferences().showTips == true)
+    assert(App.getPreferences().vehicleShortcuts == false)
+    assert(App.getPreferences().jobBar == true)
     worldName = "server:two"
     assert(App.get(0))
     assert(App.getPreferences().contextMenus == false)
@@ -214,33 +215,6 @@ test("failed setup writes preserve the last workflow preset list and next identi
     assert(#app:getSetups().presets == 2 and app:lastSetup({}).scope == "room")
 end)
 
-test("malformed optional preferences do not block existing labels or Keep", function(app)
-    assert(Store.save("LootBox/preferences", { contextMenus = "bad" }))
-    App.reset(); app = assert(App.get(0))
-    local options, err = App.getPreferences()
-    assert(err and options.contextMenus == true)
-    assert(not App.setPreferences({ contextMenus = false }))
-    local crate, item = { id = "crate" }, { id = "item" }
-    assert(app:setLabels(crate, { "native:Food" }))
-    assert(app:protect(item, true))
-    assert(app:labels(crate)[1] == "native:Food" and app:isKept(item))
-    assert(Store.load("LootBox/preferences").contextMenus == "bad")
-end)
-
-test("malformed optional setups remain read-only without blocking labels or checklists", function(app)
-    assert(Store.save(app.path .. "/setups", { nextId = 1, presets = false }))
-    App.reset(); app = assert(App.get(0))
-    local saved, err = app:getSetups()
-    assert(err and #saved.presets == 0)
-    assert(not app:saveSetup("Do not erase damaged setups", request()))
-    assert(not app:rememberSetup(request()))
-    local crate = { id = "crate" }
-    assert(app:setLabels(crate, { "native:Food" }))
-    assert(app:setChecklist({ ids = { "native:Food" }, types = {}, all = false }))
-    assert(app:getChecklist().ids[1] == "native:Food")
-    assert(Store.load(app.path .. "/setups").presets == false)
-end)
-
 test("invalid request shapes are rejected without losing an existing setup", function(app)
     assert(app:saveSetup("Valid", request()))
     local invalid = {
@@ -260,45 +234,20 @@ test("invalid request shapes are rejected without losing an existing setup", fun
     assert(#app:getSetups().presets == 1 and app:getSetups().presets[1].name == "Valid")
 end)
 
-test("unavailable category references remain saved and produce a resolution error", function(app)
-    local category = assert(App.saveCategory({ name = "Temporary", types = { "Example.Widget" }, includes = {} }))
-    local setup = request(); setup.filter.ids = { category }
-    local id = assert(app:saveSetup("Temporary category workflow", setup))
-    assert(App.deleteCategory(category))
-    local resolved, err = app:loadSetup(id, {})
-    assert(not resolved and err:find(category, 1, true))
-    assert(app:getSetups().presets[1].setup.filter.ids[1] == category)
-    assert(app:resolveSetup(request(), {}))
-end)
-
-test("setup count and malformed saved identities fail with the original document retained", function(app)
-    for index = 1, 32 do assert(app:saveSetup("Setup " .. index, request())) end
-    assert(not app:saveSetup("Thirty-third", request()))
-    assert(#app:getSetups().presets == 32)
-    assert(Store.save(app.path .. "/setups", { nextId = 2, presets = {
-        { id = "setup:1", name = "One", setup = request() },
-        { id = "setup:1", name = "Duplicate", setup = request() },
-    } }))
-    App.reset(); app = assert(App.get(0))
-    local _, err = app:getSetups()
-    assert(err and not app:saveSetup("Do not overwrite", request()))
-    assert(#Store.load(app.path .. "/setups").presets == 2)
-end)
-
 test("legacy explicit review values survive while missing review settings use direct defaults", function()
     assert(Store.save("LootBox/preferences", {confirmQuickMoves = true, matchingTransferButtons = false}))
     App.reset()
     local preferences, err = App.getPreferences()
     assert(not err and preferences.confirmQuickMoves == true and preferences.matchingTransferButtons == false)
-    assert(preferences.confirmQuickCleanup == false and preferences.confirmBinReviews == false and preferences.showQuickProgress == false)
+    assert(preferences.confirmQuickCleanup == false and preferences.confirmBinReviews == false)
 end)
 
 test("review and quick-progress choices persist independently across restarts", function()
-    assert(App.setPreferences({confirmQuickMoves = true, confirmQuickCleanup = true, confirmBinReviews = true, showQuickProgress = true}))
+    assert(App.setPreferences({confirmQuickMoves = true, confirmQuickCleanup = true, confirmBinReviews = true}))
     assert(App.setPreferences({confirmQuickCleanup = false}))
     App.reset()
     local preferences = App.getPreferences()
-    assert(preferences.confirmQuickMoves and not preferences.confirmQuickCleanup and preferences.confirmBinReviews and preferences.showQuickProgress)
+    assert(preferences.confirmQuickMoves and not preferences.confirmQuickCleanup and preferences.confirmBinReviews)
 end)
 
 test("matching setups normalize all carried sources and retain only portable destination mode", function(app)
@@ -371,6 +320,40 @@ test("Til Full policy preferences persist and reject non-booleans", function()
     assert(not preferences.tillFullEnabled and preferences.tillFullBothNeeds)
     assert(not App.setPreferences({tillFullBothNeeds = "both"}))
     assert(App.getPreferences().tillFullBothNeeds)
+end)
+
+test("a retired or damaged preference falls back alone and settings stay editable", function()
+    assert(Store.save("LootBox/preferences", {contextMenus = "bad", showTips = true, confirmQuickMoves = true}))
+    App.reset()
+    local preferences = App.getPreferences()
+    assert(preferences.contextMenus == true and preferences.confirmQuickMoves == true and preferences.showTips == nil)
+    assert(App.setPreferences({contextMenus = false}))
+    App.reset(); assert(App.getPreferences().contextMenus == false and App.getPreferences().confirmQuickMoves == true)
+end)
+
+test("damaged presets are dropped one by one and the rest stay usable", function(app)
+    assert(Store.save(app.path .. "/setups", {nextId = 2, presets = {
+        {id = "setup:1", name = "One", setup = request()}, {id = "setup:1", name = "Duplicate", setup = request()},
+        {id = "setup:7", name = "Seven", setup = {scope = "nowhere"}}, "junk"}, lastSetup = {scope = "nowhere"}}))
+    App.reset(); app = assert(App.get(0))
+    local saved = app:getSetups()
+    assert(#saved.presets == 1 and saved.presets[1].name == "One" and saved.lastSetup == nil)
+    local id = assert(app:saveSetup("Two", request()))
+    assert(id ~= "setup:1")
+end)
+
+test("deleting a category removes it from presets and keeps the preset", function(app)
+    local category = assert(App.saveCategory({name = "Temporary", types = {"Example.Widget"}, includes = {}}))
+    local setup = request(); setup.filter.ids = {category, "native:Tool"}
+    local id = assert(app:saveSetup("Temporary category workflow", setup))
+    assert(App.deleteCategory(category))
+    local resolved = assert(app:loadSetup(id, {}))
+    assert(#resolved.filter.ids == 1 and resolved.filter.ids[1] == "native:Tool")
+end)
+
+test("at most 32 presets are kept", function(app)
+    for index = 1, 32 do assert(app:saveSetup("Preset " .. index, request())) end
+    assert(not app:saveSetup("Thirty-third", request()) and #app:getSetups().presets == 32)
 end)
 
 print(passed .. " setup and preference integration cases passed (explicit world/action and native file doubles)")

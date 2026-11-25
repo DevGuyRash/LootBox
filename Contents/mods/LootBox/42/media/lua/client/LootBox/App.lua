@@ -195,10 +195,8 @@ local function escaped(text)
     return hex:gsub(string.rep(".", 96), "%0/"):gsub("/$", "")
 end
 
-local function scope(player)
-    local world = getWorld():getWorld()
-    local identity = tostring(world) .. ":" .. tostring(player:getUsername()) .. ":" .. player:getPlayerNum()
-    return "LootBox/world/" .. escaped(identity)
+local function identityOf(player)
+    return tostring(getWorld():getWorld()) .. ":" .. tostring(player:getUsername()) .. ":" .. player:getPlayerNum()
 end
 
 -- Keep every readable entry. One damaged value must not cost the player the rest.
@@ -254,11 +252,13 @@ local function repairState(state)
     return state, notes
 end
 
-local paths = setmetatable({}, { __mode = "k" })
+-- A username can settle after the player object exists, so the identity is
+-- checked each time and only its encoding is remembered.
+local paths = {}
 local function pathOf(player)
-    local known = paths[player]
-    if not known then known = scope(player); paths[player] = known end
-    return known
+    local identity = identityOf(player)
+    if not paths[identity] then paths[identity] = "LootBox/world/" .. escaped(identity) end
+    return paths[identity]
 end
 
 function App.get(playerIndex, passiveNeeds)

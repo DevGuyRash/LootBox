@@ -50,18 +50,16 @@ local function subject(scope, option)
     local function check(value)
         if value == nil or rawequal(value, scope.objects) or rawequal(value, scope.actor) or rawequal(value, scope.root) then return end
         if rawequal(value, scope.owner) or rawequal(value, scope.container) then result = "mine"; return end
-        if type(value) == "table" then
-            local object = rawget(value, "object")
-            if object ~= nil then
-                if rawequal(object, scope.owner) then result = "mine" else result = result or "other" end
-            end
-            return
-        end
-        if type(value) ~= "userdata" then return end
+        local kind = type(value)
+        if kind ~= "table" and kind ~= "userdata" then return end
         if instanceof(value, "ItemContainer") then
             if value:getContainingItem() == nil and value:getParent() ~= scope.actor then result = result or "other" end
-        elseif instanceof(value, "IsoObject") and not instanceof(value, "IsoPlayer") then
-            result = result or "other"
+        elseif instanceof(value, "IsoObject") then
+            if not instanceof(value, "IsoPlayer") then result = result or "other" end
+        elseif kind == "table" then
+            local object = rawget(value, "object")
+            if rawequal(object, scope.owner) then result = "mine"
+            elseif object ~= nil then result = result or "other" end
         end
     end
     check(option.target)

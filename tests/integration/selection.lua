@@ -76,14 +76,15 @@ function ISTextBox:updateButtons() self.yes.enabled = self.validateFn(self.valid
 function ISTextBox:addToUIManager() self.registered = true end
 function ISTextBox:bringToTop() self.raised = true end
 function ISTextBox:destroy() self.registered, self.removed = false, true; self.nativeDestroys = (self.nativeDestroys or 0) + 1 end
-package.loaded["LootBox/Widgets"] = {
+package.loaded["LootBox/UIKit"] = {
     color = function(role) return {role = role} end,
-    text = function(_, x, y, width, height, text)
-        local panel = geometry({text = text}, x, y, width, height)
-        function panel:getScrollHeight() return 64 end
+    text = function(_, text)
+        local panel = geometry({text = text}, 0, 0, 10, 10)
+        function panel:measure() return 64 end
+        function panel:set(value) self.text = value end
         return panel
     end,
-    setText = function(panel, text) panel.text = text end,
+    place = function(widget, x, y, width, height) widget.x, widget.y, widget.width, widget.height = x, y, width, height end,
 }
 local Selection = require "LootBox/Selection"
 

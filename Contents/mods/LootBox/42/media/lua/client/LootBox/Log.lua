@@ -19,6 +19,7 @@ local function try(object, method, ...)
         return fn(object, ...)
     end, ...)
     if ok then return value end
+    return nil
 end
 
 local function is(object, class)
@@ -225,6 +226,15 @@ function Log.request(request)
     out[#out + 1] = "bags=" .. tostring(request.includeBags ~= false)
     if request.includeInventory then out[#out + 1] = "carried=true" end
     return "{" .. table.concat(out, " ") .. "}"
+end
+
+for _, name in ipairs({ "point", "where", "container", "fluid", "item", "vehicle", "queue", "player", "request" }) do
+    local describe = Log[name]
+    Log[name] = function(...)
+        local ok, text = pcall(describe, ...)
+        if ok then return text end
+        return "{unreadable}"
+    end
 end
 
 -- Writing ----------------------------------------------------------------

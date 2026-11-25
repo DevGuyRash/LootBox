@@ -28,6 +28,7 @@ package.loaded["ISUI/InventoryWindow/ISInventoryWindowContainerControls"] = true
 package.loaded["ISUI/LootWindow/ISLootWindowContainerControls"] = true
 package.loaded["LootBox/App"] = {
     getPreferences = function() return current.preferences, current.preferenceError end,
+    preference = function(key) if current.preferences[key] == nil then return key == "smartTakeAllContainers" or nil end return current.preferences[key] end,
     get = function(playerNum) current.appPlayer = playerNum; return current.app end,
 }
 function getPlayerLoot() return current.loot end
@@ -45,7 +46,7 @@ end
 
 local function fixture()
     local f = {preferences = {matchingTransferButtons = true, smartTakeAllContainers = false}, now = 1000, fontHeight = 14, fontWidth = 7,
-        calls = 0, quick = {}, progress = {}, records = {}}
+        calls = 0, quick = {}, progress = {}, records = {{item = item("Base.Hinge")}}}
     current = f
     local inventory = {isEmpty = function() return f.emptyInventory == true end}
     local selectedBag = {isEmpty = function() return true end}
@@ -107,14 +108,9 @@ local function fixture()
         AddHandler = function(class) add(ISLootWindowContainerControls_HandlerList, class) end,
         AddFloorHandler = function(class) add(ISLootWindowContainerControls_FloorHandlerList, class) end,
     }
-    f.ui = {replaceAction = function(playerNum, callback)
-        f.replaceCalls, f.replacePlayer = (f.replaceCalls or 0) + 1, playerNum
-        if f.replaceError then return nil, f.replaceError end
-        if f.deferReplacement then f.pendingReplacement = callback; return true end
-        return callback()
-    end, condense = function(playerNum) f.condensePlayer = playerNum end, quickAction = function(playerNum, context, request)
-        f.quick[#f.quick + 1] = {player = playerNum, context = context, request = request}
-    end, showProgress = function(playerNum, reason)
+    f.ui = {condense = function(playerNum) f.condensePlayer = playerNum end, act = function(playerNum, request, options)
+        f.quick[#f.quick + 1] = {player = playerNum, request = request, options = options}
+    end, say = function(playerNum, reason)
         f.progress[#f.progress + 1] = {player = playerNum, reason = reason}
     end}
     package.loaded["LootBox/Matching"] = nil
@@ -172,9 +168,7 @@ test("inventory matching companions name distinct destinations with compact nati
     assert(nearby.control.width == 94 and nearby.control.height == 18)
     assert(not displayed.control.iconRight and not displayed.control.titleLeft)
     assert(not nearby.control.iconRight and not nearby.control.titleLeft)
-    assert(displayed.control.tooltip:find("ALL carried containers", 1, true))
-    assert(nearby.control.tooltip:find("ALL carried containers", 1, true))
-    assert(nearby.control.tooltip:find("matching floor stacks", 1, true))
+    assert(displayed.control.tooltip:find("all your bags", 1, true) and nearby.control.tooltip:find("nearby", 1, true))
     local displayedControl, nearbyControl = displayed.control, nearby.control
     f.fontHeight, f.fontWidth = 20, 10
     assert(displayed:getControl() == displayedControl and nearby:getControl() == nearbyControl)
@@ -213,11 +207,9 @@ test("removing a native peer does not leave an orphan companion", function(f)
     assert(f:handler("nearby"):shouldBeVisible())
 end)
 
-test("a disabled preference or damaged preferences hide the extension", function(f)
+test("a disabled preference hides the extension", function(f)
     local handler = f:handler("displayed")
     f.preferences.matchingTransferButtons = false; assert(not handler:shouldBeVisible())
-    f.preferences.matchingTransferButtons, f.preferenceError = true, "Damaged preferences"
-    assert(not handler:shouldBeVisible())
 end)
 
 test("hover previews cache ordinary frames and refresh hidden-source changes within the bounded age", function(f)
@@ -267,12 +259,12 @@ test("click recomputes source matches and sends a deduplicated portable all-cont
     f.records = {{item = old}}; handler:onMouseOverButton()
     f.records = {{item = currentItem}, {item = currentItem}, {item = item("Base.Bandage")}}
     handler:perform()
-    assert(f.calls == 3 and #f.quick == 1 and f.appPlayer == 3)
+    assert(f.calls == 2 and #f.quick == 1 and f.appPlayer == 3)
     local call = f.quick[1]
-    assert(call.player == 3 and call.context.kind == "matching")
+    assert(call.player == 3)
     assert(call.request.scope == "inventory" and call.request.includeBags == true and call.request.includeInventory == false)
     assert(call.request.destination.kind == "matching" and call.request.destination.mode == "nearby")
-    assert(call.request.shortcutIntent == "matching:nearby" and f.replacePlayer == 3)
+    assert(call.request.shortcutIntent == "matching:nearby")
     assert(#call.request.filter.types == 1 and call.request.filter.types[1] == "Base.Bandage")
     assert(call.request.filter.all == false and call.request.destination.targets == nil)
 end)
@@ -290,11 +282,6 @@ test("a matching click does not overwrite another mod's global placeholder", fun
     f:handler("displayed"):perform()
     assert(_ == sentinel)
     _ = previous
-end)
-
-test("no matches is an ordinary native-style no-op", function(f)
-    f:handler("nearby"):perform()
-    assert(f.calls == 1 and #f.quick == 0 and #f.progress == 0)
 end)
 
 test("paused game input does not plan or start a transfer", function(f)
@@ -344,9 +331,9 @@ test("Smart Take All captures one displayed source and uses all carried destinat
         assert(handler:shouldBeVisible())
         handler:perform()
         local call = f.quick[#f.quick]
-        assert(call.player == 3 and f.appPlayer == 3 and call.context.container == f.displayed)
+        assert(call.player == 3 and f.appPlayer == 3)
         assert(call.request.scope == "container" and call.request.sourceContainer == f.displayed)
-        assert(call.request.shortcutIntent == "smart:all" and f.replacePlayer == 3)
+        assert(call.request.shortcutIntent == "smart:all")
         assert(call.request.includeInventory == false and call.request.includeBags == false and call.request.excludeUnwanted == true)
         assert(call.request.filter.all == true and call.request.destination.kind == "inventory")
         f.loot.inventoryPane.inventory = {}
@@ -369,8 +356,8 @@ end)
 
 test("Smart matching remains visible when the selected carried bag is empty", function(f)
     assert(f.inventoryPane.inventory:isEmpty() and f:smart("matching"):shouldBeVisible())
-    f.emptyInventory = true
-    assert(not f:smart("matching"):shouldBeVisible() and f:smart("all"):shouldBeVisible())
+    f.records = {}
+    assert(not f:smart("matching"):shouldBeVisible())
 end)
 
 test("Smart Take hover follows the displayed container and clears only its own highlight", function(f)
@@ -394,10 +381,9 @@ test("Smart Take visibility follows tutorial preference world state and native u
     handler:onMouseOverButton()
     f.tutorial = true; assert(not handler:shouldBeVisible() and f.loot.inventoryPane.owner == nil)
     f.tutorial, f.preferences.matchingTransferButtons = false, false; assert(not handler:shouldBeVisible())
-    f.preferences.matchingTransferButtons, f.preferenceError = true, "Damaged preferences"; assert(not handler:shouldBeVisible())
-    f.preferenceError, f.noSquare = nil, true; assert(not handler:shouldBeVisible())
-    f.noSquare, f.onlyUnwanted = false, true; assert(not handler:shouldBeVisible())
-    f.onlyUnwanted, f.emptyTarget = false, true; assert(not handler:shouldBeVisible())
+    f.preferences.matchingTransferButtons, f.noSquare = true, true; assert(not handler:shouldBeVisible())
+    f.noSquare, f.records, f.now = false, {}, f.now + 1000; assert(not handler:shouldBeVisible(), "Nothing eligible")
+    f.records, f.now = {{item = item("Base.Nails")}}, f.now + 1000; assert(handler:shouldBeVisible())
 end)
 
 test("removing object or floor native peers hides only the corresponding Smart Take action", function(f)
@@ -412,10 +398,11 @@ end)
 
 test("Smart Take empty matches paused input and native failures cannot start partial jobs", function(f)
     local handler = f:smart("matching")
-    handler:perform(); assert(#f.quick == 0 and #f.progress == 0)
+    f.records = {}
+    handler:perform(); assert(#f.quick == 0 and f.progress[1].reason == "Nothing to take")
     f.paused = true; handler:perform(); assert(f.smartCalls == 1 and #f.quick == 0)
     f.paused, f.smartError = false, "Displayed source changed"; handler:perform()
-    assert(#f.quick == 0 and f.progress[1].player == 3 and f.progress[1].reason == f.smartError)
+    assert(#f.quick == 0 and f.progress[2].player == 3 and f.progress[2].reason == f.smartError)
 end)
 
 
@@ -478,55 +465,26 @@ test("Smart Take default is all-visible and active-only preference is honored", 
     assert(not f.smartAll and f.quick[2].request.scope == "container")
 end)
 
-test("repeated Smart Take queues latest click snapshot without opening an empty action", function(f)
-    f.deferReplacement = true
-    local handler = f:smart("matching")
-    f.records = {{item = item("Base.Bandage")}}
-    handler:perform(); handler:perform()
-    assert(f.replaceCalls == 2 and f.smartCalls == 2 and #f.quick == 0)
-    f.records = {{item = item("Base.Bandage")}}
-    f.pendingReplacement()
-    assert(f.smartCalls == 2 and f.quick[1].request.filter.types[1] == "Base.Bandage")
-    f.deferReplacement, f.records = false, {}
-    handler:perform()
-    assert(#f.quick == 1 and #f.progress == 0)
-end)
-
-test("fresh inventory matching waits for replacement and rescans", function(f)
-    f.deferReplacement = true
-    f.records = {{item = item("Base.Nails")}}
-    f:handler("nearby"):perform()
+test("matching buttons appear only while something matches, without rescanning every frame", function(f)
+    local handler = f:handler("displayed")
+    assert(handler:shouldBeVisible() and f.calls == 1)
+    for _ = 1, 20 do handler:shouldBeVisible() end
     assert(f.calls == 1)
-    f.pendingReplacement()
-    assert(f.calls == 2 and #f.quick == 1)
+    f.records, f.now = {}, f.now + 700
+    assert(not handler:shouldBeVisible() and f.calls == 2)
 end)
 
-test("queued Smart Take captures click sources and cannot widen when the pane changes", function(f)
-    f.deferReplacement = true
-    f.records = {{item = item("Base.Nails")}}
-    local handler = f:smart("all")
-    local clicked = handler.container
-    handler:perform()
-    handler.container = {}
-    f.pendingReplacement()
-    assert(f.quick[1].request.sourceContainer == clicked)
-    f.preferences.smartTakeAllContainers = true
-    local captured = {{}, {}}
-    f.sources = captured
-    handler:perform()
-    f.sources = {{}, {}, {}}
-    f.pendingReplacement()
-    assert(f.quick[2].request.sourceContainers == captured and #captured == 2)
+test("a click with nothing to do says so and starts nothing", function(f)
+    f.records = {}
+    f:handler("nearby"):perform()
+    assert(#f.quick == 0 and f.progress[1].reason == "Nothing matches")
 end)
 
-test("matching destinations changed during cleanup cannot redirect the new request", function(f)
-    f.deferReplacement = true
+test("toolbar clicks carry one logged interaction", function(f)
     f.records = {{item = item("Base.Nails")}}
-    f.targets = {{ref = {}}}
-    f:handler("displayed"):perform()
-    f.targets = {{ref = {}}}
-    local result, err = f.pendingReplacement()
-    assert(result == nil and err:find("destinations changed", 1, true) and #f.quick == 0)
+    f:handler("displayed"):perform(); f:smart("all"):perform()
+    local first, second = f.quick[1].options.interaction, f.quick[2].options.interaction
+    assert(type(first) == "number" and type(second) == "number" and first ~= second)
 end)
 
 print(passed .. " matching toolbar cases passed (explicit native handler and App boundary doubles)")
