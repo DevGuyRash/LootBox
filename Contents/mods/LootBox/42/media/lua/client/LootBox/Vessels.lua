@@ -54,28 +54,30 @@ function Vessels.pour(flow, source, target, opts)
     end
     Log.trace(flow.interaction, "POUR", "litres", string.format("%.3f", amount), "from", Log.item(source, flow.player),
         "into", Log.item(target, flow.player))
+    local enough = amount - math.max(Vessels.TOLERANCE, amount * 0.02)
+    local function full()
+        local litres = gained()
+        if litres >= enough then return litres end
+    end
     local function settled(litres)
         flow.liters = flow.liters + litres
         return opts.done(litres)
+    end
+    -- What arrived counts however the action ended: a pour that empties its
+    -- source makes the game stop it just before the server reports it done.
+    local function ended(why)
+        return function()
+            local litres = gained()
+            if litres > 0 and not why then return settled(litres) end
+            flow.liters = flow.liters + math.max(0, litres)
+            return opts.failed(why or "The game did not confirm the pour")
+        end
     end
     flow:act({ op = "pour", allow = opts.allow, limitMs = 300000, begin = function()
         require "Fluids/ISFluidTransferAction"
         local from, to = ISFluidContainer:new(a), ISFluidContainer:new(b)
         ISTimedActionQueue.add(ISFluidTransferAction:new(flow.player, from, from:getFluidObject(), to, to:getFluidObject(), amount))
-    end }, function()
-        flow:await(function()
-            local litres = gained()
-            if litres >= amount - math.max(Vessels.TOLERANCE, amount * 0.02) then return litres end
-        end, settled, function()
-            local litres = gained()
-            if litres > 0 then return settled(litres) end
-            return opts.failed("The game did not confirm the pour")
-        end)
-    end, function(why)
-        local litres = gained()
-        if litres > 0 then flow.liters = flow.liters + litres end
-        return opts.failed(why)
-    end)
+    end }, function() flow:await(full, settled, ended()) end, function(why) flow:await(full, settled, ended(why), 1500) end)
 end
 
 -- Where a vessel on the ground stands, so it can be put back the same way; nil

@@ -61,7 +61,7 @@ end
 local function allowed(self, phase)
     if self.problem then return false end
     if not self.allow then return true end
-    local ok, why, check = Log.guard("Act.allow", self.allow, phase)
+    local ok, why, check = Log.guard("Act.allow", self.allow, phase, self.action)
     if ok then return true end
     self.problem, self.check = why or "The game or your selection changed", check
     return false
@@ -109,38 +109,43 @@ end
 
 -- Queues stock actions and follows them.
 --   begin    queues the actions with the game's own functions
---   main     main(action): which of them does the work; default the last one
---   allow    allow(phase) with phase "start" or "run"; false, reason stops it
+--   main     main(action): which of them does the work; default the first
+--   allow    allow(phase, action), phase "start" or "run"; false, reason stops it
 --   keepAfter  what is queued behind it must happen even if the work stops
 --   onStart, onPerform, limitMs
 function Act.run(player, opts)
-    local queue = queueOf(player)
     if not Act.idle(player) then return nil, "Finish the current action first", "busy" end
     local blocked = Act.blocked(player)
     if blocked then return nil, blocked, "blocked" end
     local self = setmetatable({ player = player, op = opts.op, interaction = opts.interaction, allow = opts.allow, owned = {}, keep = {},
         onStart = opts.onStart, onPerform = opts.onPerform, startedAt = getTimestampMs(),
         limit = opts.limitMs or Act.LIMIT_MS }, Act)
+    -- The game may start the first action inside the call that queues it, so
+    -- each is taken in hand on its way there.
+    local add = ISTimedActionQueue.add
+    ISTimedActionQueue.add = function(action)
+        if action.character == player then
+            local after = self.action ~= nil
+            self.owned[action] = true
+            if after and opts.keepAfter then self.keep[action] = true end
+            hook(self, action)
+            if not after and (not opts.main or opts.main(action)) then
+                self.action = action
+                hookMain(self, action)
+            end
+        end
+        return add(action)
+    end
     local ok, why = pcall(opts.begin)
+    ISTimedActionQueue.add = add
     if not ok then
         Log.fault(self.interaction, "Act.begin:" .. tostring(opts.op), why)
         why = "The game could not start this action"
     end
-    local main
-    for _, action in ipairs(queue.queue) do
-        self.owned[action] = true
-        if not opts.main or opts.main(action) then main = action end
-    end
-    local past = false
-    for _, action in ipairs(queue.queue) do
-        if past and opts.keepAfter then self.keep[action] = true end
-        past = past or action == main
-        hook(self, action)
-    end
-    if main then hookMain(self, main) end
-    self.action = main
+    local main = self.action
+    if main and not self.performed and not self.stopped and not queued(queueOf(player), main) then main = nil end
     if not ok or not main then
-        why = not ok and why or "The game did not start this action"
+        why = not ok and why or self.problem or "The game did not start this action"
         self:cancel(why)
         return nil, why, "not-started"
     end

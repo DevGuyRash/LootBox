@@ -268,10 +268,10 @@ function TillFull:open(record)
     local watch = Opening.watch(player, item, recipe, self.kind, self.interaction)
     self:act({ op = "open", keepAfter = true,
         main = function(action) return action.Type == "ISHandcraftAction" end,
-        allow = function(phase)
+        allow = function(phase, action)
             if phase == "run" then return self:permitted() end
             if not self:inspect(record) then return false, GONE end
-            return Opening.binds(self.run.action, record.id), "The game chose a different item to open"
+            return Opening.binds(action, record.id), "The game chose a different item to open"
         end,
         begin = function()
             if automatic then Opening.queueAutomatic(player, automatic.plan) else Opening.queue(player, item, recipe) end

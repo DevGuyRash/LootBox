@@ -88,9 +88,9 @@ function Fixture:pour(entry, live)
     end
     self:act({ op = self.take and "fixture-fill" or "fixture-pour", keepAfter = true,
         main = function(action) return action.Type == kind end,
-        allow = function(phase)
+        allow = function(phase, action)
             if phase == "run" then return true end
-            expected = self.take and self.run.action.waterUnit or self.run.action.addUnits
+            expected = self.take and action.waterUnit or action.addUnits
             return Inventory.current(self.player, self.world, entry) ~= nil, "The vessel moved or is gone"
         end,
         begin = function() queue(self, live.item) end,
