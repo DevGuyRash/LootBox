@@ -2174,6 +2174,7 @@ function Jobs:onFault(err, trace)
         "player", Log.player(self.player))
     execution.faults = (execution.faults or 0) + 1
     local op, skipped = self.operation and self.operation.op, false
+    if self.pending then self:logOpEnd(self.pending.op, "interrupted", "internal error") end
     if record then
         self.operation, self.pending, execution.walk = nil, nil, nil
         local reason = "An internal error stopped this item; the LootBox log has the details"
