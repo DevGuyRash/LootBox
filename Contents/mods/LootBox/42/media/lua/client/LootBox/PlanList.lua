@@ -1,6 +1,5 @@
 -- Turns a job plan into short, grouped rows: what moves where, what stays and
 -- why, and what is still unknown.
-local K = require "LootBox/UIKit"
 local Describe = require "LootBox/Describe"
 
 local PlanList = {}

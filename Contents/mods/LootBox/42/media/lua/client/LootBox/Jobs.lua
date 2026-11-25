@@ -8,7 +8,6 @@ local Setups = require "LootBox/Setups"
 local Completion = require "LootBox/CompletionFeedback"
 local Log = require "LootBox/Log"
 local Sort = require "LootBox/Sort"
-local call = require "LootBox/Safe"
 local Facts = require "LootBox/Facts"
 local Jobs = {}
 Jobs.__index = Jobs

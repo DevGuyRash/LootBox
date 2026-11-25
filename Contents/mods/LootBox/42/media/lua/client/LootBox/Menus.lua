@@ -190,7 +190,6 @@ local function listFilter(app)
 end
 
 local function everything() return { ids = {}, types = {}, all = true } end
-local function oneType(fullType) return { ids = {}, types = { fullType }, all = false } end
 local function oneCategory(id) return { ids = { id }, types = {}, all = false } end
 
 -- Taking everything takes a bag with what is in it.
