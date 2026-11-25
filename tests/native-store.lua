@@ -24,4 +24,19 @@ local longPath = "LootBox/world/" .. string.rep("a", 96) .. "/" .. string.rep("b
 assert(#longPath > 256, "The native identity fixture must exceed the former total-path restriction")
 assert(Store.save(longPath, { labels = { "native:Food", "native:Tool" } }))
 assert(assert(Store.load(longPath)).labels[2] == "native:Tool", "Native parent-directory creation must support chunked identities")
+local damagedBase = "LootBox/damaged"
+for _, slot in ipairs({ ".a.txt", ".b.txt" }) do
+    local damaged = assert(getFileWriter(damagedBase .. slot, true, false))
+    damaged:write("damaged" .. slot)
+    damaged:close()
+end
+local unusable, _, state = Store.load(damagedBase)
+assert(unusable == nil and state.damaged == true, "Two damaged slots must be reported")
+assert(Store.save(damagedBase, { name = "Started over" }), "Damaged slots must not block saving forever")
+assert(assert(Store.load(damagedBase)).name == "Started over")
+local backup = assert(getFileReader(damagedBase .. ".damaged.txt", false), "The damaged text must be kept")
+assert(tostring(backup:readLine()) == "damaged.a.txt" and tostring(backup:readLine()) == "damaged.b.txt")
+backup:close()
+assert(Store.save(damagedBase, { name = "Started over" }), "Saving unchanged data succeeds")
+
 print("Native storage contracts passed using the installed game's real file readers and writers")

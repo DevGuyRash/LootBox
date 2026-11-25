@@ -3093,6 +3093,124 @@ test("cancelling a paused job shows one stopped card and no planned moves", func
     PZActionCompletionHUD = nil
 end)
 
+test("a seated player is told once, at the start, unless nothing needs walking", function()
+    local f = fixture(9)
+    item(f.source); item(f.source)
+    f.seatedIn = {}
+    local plan = assert(f.jobs:preview(request("inventory")))
+    local started, problem = f.jobs:start(plan)
+    assert(not started and problem:find("Get out of the vehicle", 1, true) and f.jobs:status().state == "idle")
+    f.seatedIn = nil
+    assert(f.jobs:start(plan) and finish(f).done == 2, "The same plan starts after getting out")
+    local g = fixture(9)
+    item(g.source)
+    g.seatedIn, g.reachable = {}, {[g.source] = true}
+    start(g, request("inventory"))
+    assert(finish(g).done == 1, "Storage within reach of the seat needs no walk")
+end)
+
+test("sitting down during a job pauses it once and Resume repeats the same step", function()
+    local f = fixture(9)
+    item(f.source); item(f.source)
+    start(f)
+    local seated = true
+    function f.adapter:begin(op)
+        if op.kind == "approach" and seated then return nil, "Get out of the vehicle to continue", "seated" end
+        return Native.begin(self, op)
+    end
+    local stopped = finish(f)
+    assert(stopped.state == "paused" and stopped.skipped == 0 and stopped.reason:find("Get out of the vehicle", 1, true))
+    seated = false
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 2 and status.skipped == 0)
+end)
+
+test("time without ticks extends deadlines, ordinary frames do not", function()
+    local f = fixture(3)
+    item(f.source)
+    start(f)
+    for _ = 1, 5 do tick(f) end
+    assert(f.extended == nil)
+    f.now = f.now + 90000
+    tick(f)
+    assert(f.extended and f.extended >= 90000 and f.extended <= 90200)
+    assert(finish(f).done == 1)
+    local g = fixture(3); g.client = true; g.source.explored = false
+    start(g, request("inventory"))
+    for _ = 1, 50 do tick(g); if g.source.requested then break end end
+    g.now = g.now + 60000
+    g.source.reply = function() item(g.source) end
+    g.scheduled[1] = {at = g.now + 400, run = g.source.reply}
+    local status = finish(g)
+    assert(status.done == 1, "A paused game must not use up the wait for a server reply")
+end)
+
+test("leaving a bin during its multiplayer inspection goes back to it", function()
+    local f = fixture(2); f.client = true
+    local bin = container("inspected bin", 4)
+    bin.trash, bin.uninspected, bin.explored, f.bins = true, true, false, {bin}
+    item(f.source)
+    start(f, request("trash"))
+    for _ = 1, 50 do tick(f); if bin.requested then break end end
+    f.position = "source"
+    local status = awaitState(f, "needs_review")
+    assert(f.position == bin.position and status.skipped == 0 and f.approaches[bin.position] >= 2)
+    assert(f.jobs:cancel()); finish(f)
+end)
+
+test("an empty multiplayer container costs about a second", function()
+    local f = fixture(3); f.client = true; f.source.explored = false
+    start(f, request("inventory"))
+    for _ = 1, 50 do tick(f); if f.source.requested then break end end
+    local asked = f.now
+    finish(f)
+    assert(f.now - asked >= 1000 and f.now - asked <= 2000, "Waited " .. (f.now - asked))
+end)
+
+test("a vehicle the job unlocked is locked again after the last delivery", function()
+    local f = fixture(9); f.sources = {f.source}
+    local car = {}
+    item(f.source)
+    function f.adapter:begin(op)
+        if op.kind == "vehicle" and not op.relock then
+            op.unlocked = {{vehicle = car, partId = "TrunkDoor"}, {vehicle = car, partId = "DoorFrontLeft"}, {vehicle = car, partId = "TrunkDoor"}}
+        end
+        return Native.begin(self, op)
+    end
+    start(f, request("vehicle", car))
+    assert(finish(f).state == "finished")
+    local last = f.operations[#f.operations]
+    assert(last.kind == "vehicle" and last.vehicle == car and table.concat(last.relock, ",") == "TrunkDoor,DoorFrontLeft")
+    assert(f.transfers[#f.transfers].destination == f.destination)
+end)
+
+test("a vehicle that cannot be locked again is reported", function()
+    local f = fixture(9)
+    item(f.source)
+    function f.adapter:begin(op)
+        if op.relock then return nil, "The driver seat is occupied" end
+        if op.kind == "vehicle" then op.unlocked = {{vehicle = op.vehicle, partId = "TrunkDoor"}} end
+        return Native.begin(self, op)
+    end
+    start(f, request("vehicle", {}))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 1)
+    assert(status.reasons[1].reason:find("left unlocked", 1, true) and status.reasons[1].reason:find("seat is occupied", 1, true))
+end)
+
+test("staged personal gear does not keep ordinary jobs from running", function()
+    local f = fixture(3)
+    local personal, selected = item(f.inventory, "Base.Personal", 1), item(f.source)
+    local recovery, safe = recoveryFixture(f, personal)
+    assert(remove(f.inventory.items, personal)); safe.items[#safe.items + 1], personal.container = personal, safe
+    recovery.pending, recovery.failRestore = true, true
+    assert(f.jobs:recoverPersonalGear())
+    assert(finish(f).state == "failed" and recovery.pending)
+    start(f)
+    assert(finish(f).done == 1 and f.destination:contains(selected) and safe:contains(personal))
+end)
+
 -- The file trace, as the game writes it.
 local Log = originalRequire("LootBox/Log")
 local function trace(body)

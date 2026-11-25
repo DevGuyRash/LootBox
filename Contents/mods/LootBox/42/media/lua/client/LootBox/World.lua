@@ -210,6 +210,7 @@ function World:pruneLabels(valid)
             end
         end
     end
+    if dropped > 0 then Log.info(nil, "LABELS-PRUNED", "count", dropped) end
     return dropped
 end
 
@@ -1416,8 +1417,8 @@ function World:matchingOrder(records)
         items[#items + 1] = record.item
         byItem[record.item] = record
     end
-    local ok = pcall(pane.sortItemsByTypeAndWeight, pane, items)
-    if not ok then return nil, "The game's matching-transfer order could not be read" end
+    local ok, err = pcall(pane.sortItemsByTypeAndWeight, pane, items)
+    if not ok then Log.fault(nil, "World.matchingOrder", err); return nil, "The game's matching-transfer order could not be read" end
     local result = {}
     for _, item in ipairs(items) do result[#result + 1] = byItem[item] end
     return result
@@ -1431,9 +1432,8 @@ function World:matchingTargets(mode, records)
     if not loot or not loot.inventoryPane then return {} end
     local containers, eligible, sourceMaps, aliases = {}, {}, {}, {}
     local function itemMap(container)
-        local ok, result = pcall(rules.getItemsTable, rules, container)
-        if not ok or type(result) ~= "table" then return nil, "The game's matching-transfer rules could not read this container" end
-        return result
+        local map = itemTypes(container)
+        return map, not map and "The game's matching-transfer rules could not read this container" or nil
     end
     for _, record in ipairs(records or {}) do
         if record.item and self:canAccess(record.source) and not self:protected(record.item) then
@@ -1546,14 +1546,14 @@ function World:smartLootRecords(mode, container, allContainers)
         for _, source in ipairs(containers) do
             if not seen[source] then
                 seen[source] = true
-                local ok, map = pcall(rules.getItemsTable, rules, source)
-                if not ok or type(map) ~= "table" then return nil, "The game's matching-transfer rules could not read carried storage" end
+                local map = itemTypes(source)
+                if not map then return nil, "The game's matching-transfer rules could not read carried storage" end
                 for fullType in pairs(map) do carried[fullType] = true end
             end
         end
         for _, source in ipairs(sources) do
-            local ok, map = pcall(rules.getItemsTable, rules, source)
-            if not ok or type(map) ~= "table" then return nil, "The game's matching-transfer rules could not read this container" end
+            local map = itemTypes(source)
+            if not map then return nil, "The game's matching-transfer rules could not read this container" end
             for fullType, items in pairs(map) do
                 if carried[fullType] then for _, item in ipairs(items) do selected[item] = true end end
             end
@@ -1585,9 +1585,13 @@ function World:destinationPass(request, graph)
     local pass = {graph = graph or self.graph, accepted = {}}
     if destination.kind == "inventory" then
         pass.bags, pass.types, pass.aliases = {}, {}, {}
+        -- A bag that is itself being hauled, and any bag in it, is cargo rather than storage for the rest of the load.
+        local cargo = {}
         for _, record in ipairs(self:records(call(self.player, "getInventory"), true)) do
             local container = isBag(record.item) and call(record.item, "getInventory")
-            if container then pass.bags[#pass.bags + 1] = {container = container, factor = self:carryFactor(container)} end
+            local hauled = container and destination.cargo and destination.cargo[self:itemId(record.item)]
+            if container and (cargo[record.source] or hauled and not hauled.delivered) then cargo[container] = true
+            elseif container then pass.bags[#pass.bags + 1] = {container = container, factor = self:carryFactor(container)} end
         end
     elseif destination.kind == "matching" then
         pass.matching = {}

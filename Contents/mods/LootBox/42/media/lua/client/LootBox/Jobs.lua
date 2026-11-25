@@ -220,6 +220,12 @@ local function bagReason(self, request, graph, record)
     end
 end
 
+local function withContents(self, item, name)
+    local inside = self.world:filledBag(item)
+    name = tostring(name or item:getName())
+    return inside and name .. " (with " .. inside:getItems():size() .. " items inside)" or name
+end
+
 -- A bag that is emptied first must come after its contents, innermost first.
 local function bagsLast(self, request, records)
     if not request.includeBags then return records end
@@ -319,7 +325,7 @@ function Jobs:buildPlan(request)
                     note(notes, "Bin holds a protected item: " .. tostring(why), item, self.player)
                 end
                 approved[self.world:itemId(item)] = true
-                names[#names + 1] = tostring(item:getName())
+                names[#names + 1] = withContents(self, item)
             end
             if blocked then
                 table.insert(plan.warnings, "Skipping " .. self.world:name(bin) .. ": contains protected items, such as " .. blocked)
@@ -373,8 +379,7 @@ function Jobs:buildPlan(request)
                 seenDestinations[destination], destinations[#destinations + 1] = true, destination
             end
             if reason then note(notes, reason, item, self.player) end
-            local inside = not record.emptied and self.world:filledBag(item)
-            local row = { itemName = record.itemName .. (inside and " (with " .. inside:getItems():size() .. " items inside)" or ""), from = record.from,
+            local row = { itemName = record.emptied and record.itemName or withContents(self, item, record.itemName), from = record.from,
                 to = request.destination.kind == "trash" and "Trash can (fill, then empty)"
                     or (destination and self.world:name(destination) or (status == "Recheck after bag setup" and "Carried storage after bag setup" or "")), reason = reason,
                 status = status or (reason and "Left in place" or "Move"), tone = reason and "warning" or "success" }
@@ -473,7 +478,7 @@ function Jobs:start(plan, options)
     elseif not reviewed then reason = "Preview this job again before starting"
     else reason = seatedProblem(self, reviewed) end
     if reason then
-        Log.info(options and options.interaction, "START-REFUSED", "reason", reason, "player", Log.player(self.player))
+        Log.info(options and options.interaction or reviewed and reviewed.request.interaction, "START-REFUSED", "reason", reason, "player", Log.player(self.player))
         return nil, reason
     end
     self:bindInteraction({interaction = options and options.interaction or reviewed.request.interaction},
@@ -482,7 +487,7 @@ function Jobs:start(plan, options)
     self.reviews, self.previews, self.recoveryRequired = {}, {}, nil
     self.completion = {startedAt = now(), movedWeight = 0}
     self.plan, self.cancelled, self.ending, self.hauled, self.suspended = reviewed, false, nil, {}, nil
-    self.activeGraph, self.startedAt, self.opCount, self.loggedPhase = reviewed.graph, now(), 0, nil
+    self.activeGraph, self.startedAt, self.lastTick, self.opCount, self.loggedPhase = reviewed.graph, now(), now(), 0, nil
     Log.info(self.interaction, "START", "action", reviewed.action or "transfer", "records", #(reviewed.records or {}),
         "skipped", #reviewed.skipped, "unopened", #(reviewed.unknownSources or {}), "bins", #reviewed.bins, "player", Log.player(self.player))
     if reviewed.action == "condense" then
@@ -1509,7 +1514,7 @@ function Jobs:pickup(record)
         end
         local destination, request
         if direct then request = plan.request
-        else request = { includeBags = plan.request.includeBags, destination = { kind = "inventory" } } end
+        else request = { includeBags = plan.request.includeBags, destination = { kind = "inventory", cargo = self.hauled } } end
         destination, err, code = self:choose(request, record.item)
         if not destination then
             if not direct and #execution.batch > 0 then self:startDelivery("source")
@@ -1740,7 +1745,7 @@ function Jobs:reviewBin()
             review.canApprove = false
             review.skipped[#review.skipped + 1] = {itemName = item:getName(), status = "Protected", tone = "warning",
                 reason = tostring(reason or "Item is protected") .. "; whole-bin deletion is blocked"}
-        else review.moves[#review.moves + 1] = {itemName = item:getName(), status = "Delete", tone = "danger",
+        else review.moves[#review.moves + 1] = {itemName = withContents(self, item), status = "Delete", tone = "danger",
             from = "Existing bin contents", to = "Delete with approved cleanup"} end
         approved[self.world:itemId(item)] = true
     end
@@ -2169,13 +2174,16 @@ function Jobs:onFault(err, trace)
         "player", Log.player(self.player))
     execution.faults = (execution.faults or 0) + 1
     local op, skipped = self.operation and self.operation.op, false
+    if self.pending then self:logOpEnd(self.pending.op, "interrupted", "internal error") end
     if record then
         self.operation, self.pending, execution.walk = nil, nil, nil
         local reason = "An internal error stopped this item; the LootBox log has the details"
-        skipped = pcall(function()
+        local problem
+        skipped, problem = pcall(function()
             if delivering then self:nextDelivery(record, false, reason)
             else self:skip(record, reason); self:nextRecord(); self:finishHeavyAttempt(record, false) end
         end)
+        if not skipped then Log.fault(self.interaction, "Jobs:skip-after-fault", problem) end
         if delivering then execution.phase = "delivery" end
     elseif execution.phase == "carry" then
         self.operation, self.pending = nil, nil
@@ -2185,7 +2193,8 @@ function Jobs:onFault(err, trace)
         self:finishWhenSettled("paused", "LootBox hit an internal error; the LootBox log has the details (" .. tostring(err) .. ")", "error")
     elseif self.native:isBusy() then
         execution.draining = true
-        pcall(self.native.cancel, self.native, op)
+        local ok, problem = pcall(self.native.cancel, self.native, op)
+        if not ok then Log.fault(self.interaction, "Native.cancel", problem) end
     end
 end
 
@@ -2255,7 +2264,7 @@ function Jobs:resume()
     if reason then return nil, reason .. ". Stop that action before choosing Resume job." end
     self.execution, self.operation, self.activeGraph, self.binReview = saved.execution, saved.operation, saved.graph, nil
     self.reviews, self.previews = {}, {}
-    self.startedAt, self.opCount = saved.startedAt, saved.opCount
+    self.startedAt, self.opCount, self.lastTick = saved.startedAt, saved.opCount, now()
     self:bindInteraction(saved, "resume")
     self.suspended, self.view.state, self.view.reason = nil, "running", "Continuing the stopped job with current item and destination checks."
     self.execution.faults, self.execution.failedSources = 0, {}
