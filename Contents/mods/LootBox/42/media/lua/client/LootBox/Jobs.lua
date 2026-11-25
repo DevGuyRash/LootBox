@@ -797,6 +797,7 @@ function Jobs:admit(work)
             elseif op.personalRecovery then ok, reason = self.recovery:allows(op)
             else ok, reason = self:matches({item = item, hauled = op.hauled}, self.plan) end
             if ok then ok, reason, code = self:admits(item, op.destination, room) end
+            if ok and not self.world:serverAccepts(item, op.source, op.destination) then ok, reason, code = nil, FULL, "capacity" end
         end
         if ok then items[#items + 1] = item
         elseif #items == 0 then return nil, reason, code end
