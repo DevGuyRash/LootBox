@@ -287,6 +287,106 @@ nativeComponent.multi=true; assert(not Native.inspect(f.src,f.dst)); nativeCompo
 f.src.world=nil; assert(not Native.inspect(f.src,f.dst), "plain floor item cannot be silently borrowed")
 put(f.src,nil); f.src.world=wrapper; assert(not Native.inspect(f.src,f.dst), "detached world-only wrapper is not a clicked floor item")
 
+-- Java fluid amounts are floats. Reproduce FluidContainer.Transfer (both
+-- vessels rounded to float32 every frame, CanTransfer's 1e-4 fullness) under
+-- the stock ISFluidTransferAction arithmetic. Expected litres come from the
+-- menu request; the pre-fix tolerance failed 10 L into 12.4/25 L every time.
+local function f32(x)
+    if x<=0 then return 0 end
+    local scale=1
+    while x*scale>=16777216 do scale=scale/2 end
+    while x*scale<8388608 do scale=scale*2 end
+    return math.floor(x*scale+.5)/scale
+end
+local doubledAction,doubledRules=ISFluidTransferAction,FluidContainer
+local seed=7
+local function random() seed=(seed*16807)%2147483647;return seed/2147483647 end
+FluidContainer={CanTransfer=function(a,b) return a.amount>0 and math.abs(b.capacity-b.amount)>.0001 end}
+FluidUtil.roundTransfer=function(a) return math.floor(a*100+.5)/100 end
+ISFluidTransferAction={}
+function ISFluidTransferAction:new(_,a,aa,b,bb,amount)
+    local act={maxTime=math.max(amount*40,20),action={},progress=0,start=aa.amount}
+    local function transfer(delta)
+        if not FluidContainer.CanTransfer(aa,bb) then return end
+        local n=f32(math.max(0,aa.amount-(act.start-amount*f32(delta))))
+        n=math.min(n,aa.amount,f32(bb.capacity-bb.amount))
+        bb.amount,aa.amount=f32(bb.amount+n),f32(aa.amount-n)
+    end
+    function act:isValid() return FluidContainer.CanTransfer(aa,bb) end
+    function act:waitToStart() return false end
+    function act:update() transfer(self.progress) end
+    function act:complete() transfer(1) return true end
+    function act:perform() table.remove(fixture.queue.queue,1);fixture.queue.current=nil end
+    function act:stop() fixture.queue.queue={};fixture.queue.current=nil end
+    function act:forceStop() self:stop() end
+    return act
+end
+-- source litres, target litres, target capacity
+for _,c in ipairs({{1,8.3,10},{1,3.2,10},{.6,9.1,20},{10,12.4,25},{10,0,1},{5,.3,1},{1,0,10},{.5,.4,1},{2,0,1},{.013,.2,1}}) do
+    for trial=1,60 do
+        local f=setup(false)
+        f.src.fluid.amount=f32(c[1]-.005*random());f.src.fluid.capacity=30
+        f.dst.fluid.amount=c[2]>0 and f32(c[2]+.05*random()) or 0;f.dst.fluid.capacity=c[3]
+        local have,before=f.src.fluid.amount,f.dst.fluid.amount
+        local wanted=math.min(have,c[3]-before)
+        wanted=math.min(wanted,math.floor(wanted*100+.5)/100)
+        local title=string.format("%.3f L into %.3f/%d L",have,before,c[3])
+        assert(f.native:start(f.src,f.dst),title)
+        local act=f.queue.current
+        f.javaHandles={act.action}
+        assert(not act:waitToStart())
+        local elapsed,interfere=0,trial==60
+        while f.queue.current==act do
+            elapsed=elapsed+.8*(.85+.3*random())
+            if interfere and elapsed>act.maxTime/2 then f.dst.fluid.amount=f32(f.dst.fluid.amount+.02) end
+            if elapsed>=act.maxTime then act:perform();act:complete();break end
+            act.progress=elapsed/act.maxTime
+            if not act:isValid() then act:forceStop();break end
+            act:update()
+        end
+        f.javaHandles={}
+        local done,why,litres
+        for _=1,100 do done,why,litres=f.native:poll();if done~=nil then break end;f.now=f.now+100 end
+        if interfere and wanted>.05 then assert(not done,"outside fluid must still stop: "..title)
+        elseif not interfere then
+            assert(done and math.abs(litres-wanted)<=.005,title..": "..tostring(why))
+            assert(math.abs(f.dst.fluid.amount-before-wanted)<.002,"the last millilitres are poured too: "..title)
+        end
+    end
+end
+ISFluidTransferAction,FluidContainer=doubledAction,doubledRules
+FluidUtil.roundTransfer=function(amount) return math.floor(amount*1000+.00001)/1000 end
+print("PASS float32 vessels: every pour the pre-fix tolerance aborted completes, and outside fluid still stops one")
+
+-- The trace names the failed check and both sides in litres.
+do
+    local Log=require "LootBox/Log"
+    local lines,warn,trace={},Log.warn,Log.trace
+    Log.warn=function(_,event,...) lines[#lines+1]={event=event,...} end
+    Log.trace=Log.warn
+    local function field(line,key) for n=1,#line,2 do if line[n]==key then return line[n+1] end end end
+    local f=setup(false)
+    f.native=Native.new(f.player,41)
+    assert(f.native:start(f.src,f.dst,.4))
+    local act=f.queue.current
+    assert(not act:waitToStart());act:update()
+    f.dst.fluid.amount=.3
+    act:update();f.native:poll()
+    assert(lines[1].event=="OP" and field(lines[1],"litres")=="0.40000")
+    local last=lines[#lines]
+    assert(last.event=="OP-END" and field(last,"check")=="changed-between-frames" and field(last,"expectedLitres")=="0.40000"
+        and field(last,"sourceLost")=="0.00000" and field(last,"targetGained")=="0.10000" and field(last,"tolerance")=="0.00500")
+    f=setup(false);f.native=Native.new(f.player,42)
+    assert(f.native:start(f.src,f.dst,.4))
+    act=f.queue.current
+    assert(not act:waitToStart() and act:isValid())
+    put(f.dst,f.bag.nested)
+    assert(not act:isValid());act:forceStop();f.native:poll()
+    last=lines[#lines]
+    assert(last.event=="OP-END" and field(last,"check")=="target-location","the engine stop keeps the check that caused it")
+    Log.warn,Log.trace=warn,trace
+end
+
 print("PASS stock pour: exact owned vessels, native compatibility, SP completion, MP paired replication, partial and cancellation")
 
 -- Optional stock-Lua boundary smoke. Files are supplied by the test operator;

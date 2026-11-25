@@ -1,6 +1,7 @@
 local Inventory = require "LootBox/NeedsInventory"
 local TillFull = require "LootBox/TillFull"
 local Loan = require "LootBox/StockWaterLoan"
+local Log = require "LootBox/Log"
 
 local Auto = {}
 local SCAN, COOLDOWN, STALL = 4000, 12000, 20000
@@ -93,6 +94,7 @@ local function guardFor(instance, kind, read, policyItem, plan, loan)
             end
             return noStock
         end)
+        if not ok then Log.fault(nil,"AutoNeeds.guard",result) end
         return ok and result == true
     end
 end
@@ -107,17 +109,27 @@ local function start(instance,s,opts,read,kind,before,now)
         end
     end
     local item, plan = Inventory.select(p,opts,kind,w,nil,permitted,kind == "food" and s.readyOnly)
-    if not item or (plan and s.readyOnly) or not Inventory.eligible(p,opts,kind,w,item,plan) then return false end
+    if not item or (plan and s.readyOnly) or not Inventory.eligible(p,opts,kind,w,item,plan) then
+        if not s.nothing[kind] then Log.trace(nil,"AUTO-SCAN","kind",kind,"found","nothing eligible","need",before,"player",Log.player(p)) end
+        s.nothing[kind] = true
+        return false
+    end
+    s.nothing[kind] = nil
     local pureWater = kind == "fluid" and item:isWaterOnlySource()
     local loan = pureWater and item:getContainer() ~= p:getInventory()
     local guard = guardFor(instance,kind,read,item,plan,loan)
-    local active
+    local interaction = Log.intent("auto",kind == "food" and "eat" or "drink",p,"hunger",need(p,"food"),"thirst",need(p,"fluid"),
+        "item",Log.item(item,p),"source",Log.container(item:getContainer(),p),"opening",plan ~= nil,"loan",loan == true)
+    local active, why
     if loan then
-        active = Loan.new(p,item,guard)
+        active = Loan.new(p,item,guard,interaction)
     else
-        active = TillFull.new(p,w,{item},kind,false,nil,nil,{guard=guard,openingPlan=plan})
+        active, why = TillFull.new(p,w,{item},kind,false,nil,nil,{guard=guard,openingPlan=plan,interaction=interaction})
     end
-    if not active then return false end
+    if not active then
+        Log.warn(interaction,"REFUSED","at","start","reason",why or "The water loan could not start")
+        return false
+    end
     s.pending, s.notBefore = {controller=active, before=before, kind=kind}, now + COOLDOWN
     instance.consumption = active
     active:tick()
@@ -127,7 +139,7 @@ end
 local function step(instance, opts, read, now)
     if not opts or not (opts.autoConsumeCarried or opts.autoDrinkEquipped) or isServer() then return end
     local s = instance.autoNeeds
-    if not s then s = {blocked={}}; instance.autoNeeds = s end
+    if not s then s = {blocked={},nothing={}}; instance.autoNeeds = s end
     if s.last and now >= s.last and now - s.last < SCAN then return end
     s.last = now
     local p, pending = instance.player, s.pending
@@ -141,12 +153,17 @@ local function step(instance, opts, read, now)
             -- may choose any already-edible, allowed carried food. Never open
             -- another can in this hunger episode, even if there is no food.
             s.readyOnly = true
-        elseif c.state ~= "finished" or (c.count or 0) < 1 or not finite(after) or after >= pending.before - 0.0001 then
-            -- A manual cancellation, rejected action or uncertain acknowledgement
-            -- never authorizes a retry in the same episode.
+        elseif c.state ~= "cancelled" and (c.state ~= "finished" or (c.count or 0) < 1 or not finite(after)
+            or after >= pending.before - 0.0001) then
+            -- Only an unconfirmed outcome forbids another try in this episode.
+            -- An interruption waits out the cooldown like any other attempt.
             s.blocked[pending.kind] = true
+            Log.warn(c.interaction,"AUTO-BLOCKED","kind",pending.kind,"state",c.state,"reason",c.reason,
+                "confirmed",c.count,"needBefore",pending.before,"needNow",after)
         end
-        s.pending, s.notBefore = nil, math.max(s.notBefore, now + COOLDOWN)
+        -- What was refused before it even started is refused again in seconds.
+        local refused = c.state == "cancelled" and c.goal and not c.launched
+        s.pending, s.notBefore = nil, math.max(s.notBefore, now + (refused and 5 * COOLDOWN or COOLDOWN))
     end
     if (instance.consumption and instance.consumption:isBusy()) or not free(instance) or not safe(p) then s.stock=nil;return end
     local q = ISTimedActionQueue.getTimedActionQueue(p)
@@ -163,13 +180,18 @@ local function step(instance, opts, read, now)
         local known, src = pcall(waterSource,p)
         if known and src then
             local checked, retried = pcall(stockWater,s,p,opts,instance.world,src,thirst,now)
+            if not checked then Log.fault(nil,"AutoNeeds.stockWater",retried) end
             if not checked then s.stock = nil elseif retried then return end
         else
             s.stock = nil
-            if known and start(instance,s,opts,read,"fluid",thirst,now) then return end
+            if known then
+                if start(instance,s,opts,read,"fluid",thirst,now) then return end
+                s.notBefore = now + COOLDOWN -- an empty search walks the whole inventory too
+            end
         end
     else s.stock = nil end
-    if opts.autoConsumeCarried and hunger >= thresholds.food and not s.blocked.food then start(instance,s,opts,read,"food",hunger,now) end
+    if opts.autoConsumeCarried and hunger >= thresholds.food and not s.blocked.food
+        and not start(instance,s,opts,read,"food",hunger,now) then s.notBefore = now + COOLDOWN end
 end
 
 function Auto.interruptObservation(instance)
@@ -184,7 +206,8 @@ end
 
 function Auto.step(instance, options, readOptions, now)
     -- Missing/changed modded or build bindings cannot make an unfamiliar supply eligible.
-    local ok = pcall(step, instance, options, readOptions, now)
+    local ok, err = pcall(step, instance, options, readOptions, now)
+    if not ok then Log.fault(nil,"AutoNeeds.step",err) end
     if not ok and instance.autoNeeds then instance.autoNeeds.stock = nil end
 end
 

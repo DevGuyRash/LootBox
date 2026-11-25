@@ -1,6 +1,7 @@
 local Adapter = require "LootBox/TillFullNative"
 local OpenFull = require "LootBox/OpenFull"
 local Completion = require "LootBox/CompletionFeedback"
+local Log = require "LootBox/Log"
 local TillFull = {}
 TillFull.__index = TillFull
 
@@ -71,6 +72,7 @@ local function fluidEffects(fluid, opening, strict)
             return not strict or observed
         end)
         sample:release()
+        if not ok then Log.fault(nil, "TillFull.fluidEffects", safe) end
         if not ok or not safe then return nil, "This fluid mixture cannot be safely consumed automatically" end
     end
     return -properties:getHungerChange(), -properties:getThirstChange()
@@ -102,6 +104,7 @@ function TillFull.automaticEffects(item, kind, opening)
             end
         end
     end)
+    if not ok then Log.fault(nil, "TillFull.automaticEffects", hunger) end
     if not ok or not finite(hunger) or not finite(thirst) or hunger < 0 or thirst < 0
         or (kind == "food" and hunger <= 0) or (kind == "fluid" and thirst <= 0) then return end
     return {hunger = hunger, thirst = thirst}
@@ -126,6 +129,7 @@ function TillFull.new(player, world, items, kind, both, openingRecipe, menuSourc
     if drinkFood then kind = "food" end
     if kind ~= "food" and kind ~= "fluid" then return nil, "Unsupported consumption action" end
     if type(items) ~= "table" then return nil, "Choose an item stack" end
+    local interaction = items.interaction or type(automatic) == "table" and automatic.interaction or nil
     if automatic and (type(automatic) ~= "table" or type(automatic.guard) ~= "function"
         or #items ~= 1 or both or openingRecipe or menuSource) then
         return nil, "Automatic intake requires one exact carried item and no opening recipe"
@@ -137,7 +141,10 @@ function TillFull.new(player, world, items, kind, both, openingRecipe, menuSourc
             local ok, record = pcall(function()
                 return {item = item, id = item:getID(), fullType = tostring(item:getFullType()), source = item:getContainer()}
             end)
-            if not ok then return nil, "The selected item is unavailable" end
+            if not ok then
+                Log.fault(interaction, "TillFull.new", record)
+                return nil, "The selected item is unavailable"
+            end
             if menuSource then
                 if not world.consumptionSource then return nil, "The selected source cannot be verified" end
                 local accessible, reason = world:consumptionSource(item, menuSource)
@@ -150,7 +157,19 @@ function TillFull.new(player, world, items, kind, both, openingRecipe, menuSourc
     end
     if #records == 0 or #records > 4096 then return nil, "Choose a nonempty bounded item stack" end
     return setmetatable({player = player, world = world, records = records, kind = kind, goal = drinkFood and "fluid" or kind, drinkFood = drinkFood, both = both == true,
-        index = 1, count = 0, native = Adapter.new(player), state = "running", attempts = 0, openingRecipe = openingRecipe, menuSource = menuSource, automatic = automatic}, TillFull)
+        index = 1, count = 0, native = Adapter.new(player, interaction), interaction = interaction, state = "running", attempts = 0, openingRecipe = openingRecipe, menuSource = menuSource, automatic = automatic}, TillFull)
+end
+
+-- Whether consuming this selection now would do anything at all.
+function TillFull.offers(player, world, items, kind, both, openingRecipe, menuSource)
+    local job, problem = TillFull.new(player, world, items, kind, both, openingRecipe, menuSource)
+    if not job then return false, problem end
+    local effects, reason = job:inspect(job.records[1])
+    if not effects then return false, reason end
+    local hunger, thirst = needs(player)
+    local portion = job:plannedPortion(hunger, thirst, effects, job.both)
+    if portion == nil then return false, "This item cannot restore the need selected by Eat or Drink" end
+    return portion > 0, string.format("no need: hunger %.3f, thirst %.3f", hunger, thirst)
 end
 
 -- Native multiplayer transfers may replace a Java object while retaining its
@@ -345,6 +364,13 @@ end
 function TillFull:finish(state, reason, outcome)
     if not self:isBusy() then return end
     self.state, self.reason = state, reason
+    local sampled, hunger, thirst = pcall(needs, self.player)
+    local record = self.records and self.records[self.index]
+    local emit = state == "finished" and Log.info or Log.warn
+    emit(self.interaction, "END", "op", "consume", "kind", self.goal, "state", state, "outcome", outcome, "reason", reason,
+        "portions", self.count, "of", self.total, "attempts", self.attempts, "submitted", self.launched == true,
+        "hunger", sampled and hunger, "thirst", sampled and thirst, "item", record and Log.item(record.item, self.player) or nil,
+        "elapsedMs", self.startedAt and getTimestampMs() - self.startedAt, "player", Log.player(self.player))
     self.records, self.inflight, self.confirmation, self.opening = nil, nil, nil, nil
     if not self.automatic and self.launched and outcome ~= "open_only" and (outcome ~= "target" or self.count > 0) then
         Completion.consume(self.player, state, reason, outcome, self.count, getTimestampMs() - self.startedAt)
@@ -382,9 +408,18 @@ end
 
 function TillFull:step()
     if not self:isBusy() then return end
-    self.startedAt = self.startedAt or getTimestampMs()
-    self.total = self.total or #self.records
     local hunger, thirst = needs(self.player)
+    if not self.startedAt then
+        self.startedAt = getTimestampMs()
+        self.total = #self.records
+        self.interaction = self.interaction or Log.intent("consume", "Til Full", self.player)
+        self.native.interaction = self.interaction
+        local record = self.records[1]
+        Log.info(self.interaction, "START", "op", "consume", "kind", self.goal, "both", self.both, "automatic", self.automatic ~= nil,
+            "opening", self.openingRecipe ~= nil or self.automatic and self.automatic.openingPlan ~= nil, "stack", self.total,
+            "hunger", hunger, "thirst", thirst, "item", Log.item(record.item, self.player),
+            "source", Log.container(record.source, self.player), "player", Log.player(self.player))
+    end
     if self.inflight then
         local before = self.inflight
         -- Native metabolism continues while an action is running. Account only
@@ -396,6 +431,11 @@ function TillFull:step()
     if self.native:isBusy() then
         local done, reason, opened, receipt = self.native:poll()
         if done == nil then return end
+        local emit = done and Log.trace or Log.warn
+        emit(self.interaction, "OP-END", "op", self.opening and "open" or "consume", "ok", done, "reason", reason,
+            "opened", opened and Log.item(opened, self.player) or nil,
+            "receipt", type(receipt) == "table" and string.format("hunger %.4f, thirst %.4f", receipt.hunger, receipt.thirst) or receipt,
+            "stopReason", self.stopReason, "targetReached", self.targetReached, "hunger", hunger, "thirst", thirst)
         if self.state == "cancelling" then self:finish("cancelled", self.reason); return end
         if self.stopReason then self:finish("cancelled", self.stopReason); return end
         if self.targetReached then self:finish("finished", "The selected need target is satisfied", "target"); return end
@@ -510,6 +550,13 @@ function TillFull:step()
         -- an intermediate progress update or an unrelated need improvement.
         if not improved or not consumed then
             if getTimestampMs() < self.confirmation then return end
+            Log.warn(self.interaction, "UNCONFIRMED", "item", Log.item(before.item, self.player), "improved", improved, "consumed", consumed,
+                "quantityExpected", string.format("%.6f", before.expectedRemaining),
+                "quantityNow", finite(quantity) and string.format("%.6f", quantity) or "unknown",
+                "hungerExpected", before.expectedHunger, "hungerDrift", before.hungerDrift, "hunger", hunger,
+                "thirstExpected", before.expectedThirst, "thirstDrift", before.thirstDrift, "thirst", thirst,
+                "requiredHunger", before.requiredHunger, "requiredThirst", before.requiredThirst,
+                "partial", before.partial, "identityUnresolved", record.identityUnresolved)
             -- Client updates conceal metabolism. This terminal-only outcome
             -- never permits another bite, and never claims literal fullness.
             local substantialHunger = hungerConfirmed or (before.hunger >= 0.01
@@ -543,6 +590,9 @@ function TillFull:step()
             self:finish("failed", "Consumption was not fully confirmed; no more items were queued"); return
         end
         self.count = self.count + 1
+        Log.trace(self.interaction, "CONFIRMED", "portion", self.count, "partial", before.partial,
+            "quantityExpected", string.format("%.6f", before.expectedRemaining), "quantityNow", string.format("%.6f", quantity),
+            "hunger", hunger, "thirst", thirst)
         if self.needCap then
             self.needCap.hunger = math.min(self.needCap.hunger, before.budgetHunger)
             self.needCap.thirst = math.min(self.needCap.thirst, before.budgetThirst)
@@ -581,6 +631,8 @@ function TillFull:step()
     if self.attempts >= 256 then self:finish("cancelled", "Til Full reached its bounded action limit"); return end
     if effects.opening then
         self.opening = true
+        Log.trace(self.interaction, "OP", "op", "open", "n", self.attempts + 1, "item", Log.item(record.item, self.player),
+            "newFluid", effects.newFluid, "hunger", hunger, "thirst", thirst)
         record.dispatched = true
         local function openingTarget()
             if self.automatic then
@@ -610,6 +662,7 @@ function TillFull:step()
         self.launched = self.launched or ok or self.native:isBusy()
         if not ok then
             self.reason = failure or "The native opening action could not start"
+            Log.warn(self.interaction, "REFUSED", "op", "open", "reason", self.reason, "queue", Log.queue(self.player))
             if self.native:isBusy() then self.state = "cancelling" else self:finish("cancelled", self.reason) end
         end
         return
@@ -636,6 +689,9 @@ function TillFull:step()
         requiredHunger = hunger - expectedHunger, requiredThirst = thirst - expectedThirst,
         lastHunger = hunger, lastThirst = thirst, hungerDrift = 0, thirstDrift = 0,
         expectedHunger = expectedHunger, expectedThirst = expectedThirst}
+    Log.trace(self.interaction, "OP", "op", "consume", "n", self.attempts + 1, "item", Log.item(record.item, self.player),
+        "portion", portion, "partial", partial, "quantity", quantity, "quantityExpected", expectedRemaining,
+        "hunger", hunger, "hungerExpected", expectedHunger, "thirst", thirst, "thirstExpected", expectedThirst)
     record.dispatched = true
     record.confirmationAudited = nil
     record.seenInMain = record.item:getContainer() == self.player:getInventory()
@@ -681,6 +737,7 @@ function TillFull:step()
     self.launched = self.launched or ok or self.native:isBusy()
     if not ok then
         self.reason = failure or "The native action could not start"
+        Log.warn(self.interaction, "REFUSED", "op", "consume", "reason", self.reason, "queue", Log.queue(self.player))
         if self.native:isBusy() then self.state = "cancelling" else self:finish("cancelled", self.reason) end
     end
 end
@@ -688,6 +745,7 @@ end
 function TillFull:tick()
     local ok, reason = pcall(self.step, self)
     if not ok then
+        Log.fault(self.interaction, "TillFull.step", reason, "index", self.index, "opening", self.opening == true)
         self.reason = "Til Full stopped safely: " .. tostring(reason)
         self.state = "cancelling"
         if self.native:isBusy() then self.native:cancel() else self:finish("failed", self.reason) end

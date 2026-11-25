@@ -1,3 +1,4 @@
+local Log = require "LootBox/Log"
 local Stacks = {}
 local LIMIT = 4096
 
@@ -80,13 +81,12 @@ local function displayedLoot(index,holder)
 end
 
 function Stacks.displayedLoot(index,holder)
-    local ok,result=pcall(displayedLoot,index,holder)
-    if ok then return result end
+    return Log.guard("PourStacks.displayedLoot",displayedLoot,index,holder)
 end
 
 -- Stock refresh assigns invPanel and name to its own itemindex row, then
 -- duplicates the first physical member at index 1 for the details header.
-local function rowMembers(row,index,membership,visible)
+local function rowMembers(row,index,membership)
     local pane=row.invPanel
     if not pane or (index~=nil and pane.player~=index) or type(pane.itemindex)~="table"
         or type(pane.collapsed)~="table" or type(row.name)~="string"
@@ -98,12 +98,8 @@ local function rowMembers(row,index,membership,visible)
     local holder=physical(first) and first:getContainer()
     if not holder then return nil end
     if pane.itemindex[row.name]~=row or pane.inventory~=holder then
-        if visible then
-            if not visible(row,holder) then return nil end
-        else
-            if not hasRow(pane.itemslist,row) or not hasRow(pane.items,row) then return nil end
-            if pane.inventory~=holder and Stacks.displayedLoot(index,holder)~=holder then return nil end
-        end
+        if not hasRow(pane.itemslist,row) or not hasRow(pane.items,row) then return nil end
+        if pane.inventory~=holder and Stacks.displayedLoot(index,holder)~=holder then return nil end
     end
     for i=2,count do
         local item=row.items[i]
@@ -192,85 +188,7 @@ end
 -- A sole raw InventoryItem is how stock passes explicitly expanded members.
 -- An arbitrary set of distinct raw objects is not evidence of a stack click.
 function Stacks.selection(items,index)
-    local ok,result=pcall(selection,items,index)
-    if ok then return result end
-end
-
-local function visibleRows(index,holders)
-    local byItem, touched, inspected = {}, {}, 0
-    local function add(page)
-        local pane=page and page.inventoryPane
-        if not pane or touched[pane] or not page.getIsVisible or not page:getIsVisible()
-            or not pane.getIsVisible or not pane:getIsVisible() or type(pane.itemslist)~="table" then return end
-        touched[pane]=true
-        local rendered,verified={},{}
-        for i,row in ipairs(pane.items or {}) do
-            if i>LIMIT then return false end
-            if type(row)=="table" then rendered[row]=true end
-        end
-        local function visible(row,holder)
-            if not rendered[row] then return false end
-            if holder==pane.inventory then return true end
-            if verified[holder]==nil then verified[holder]=Stacks.displayedLoot(index,holder)==holder end
-            return verified[holder]
-        end
-        for i,row in ipairs(pane.itemslist) do
-            if i>LIMIT then return false end
-            if type(row)=="table" and row.invPanel==pane then
-                inspected=inspected+(type(row.items)=="table" and #row.items or 1)
-                if inspected>LIMIT then return false end
-                -- The entries eligible for grouping have already had direct
-                -- membership proved by the planner. Use the stock row's direct
-                -- pointers here rather than calling native contains N times.
-                local first=type(row.items)=="table" and row.items[2] or nil
-                local holder=physical(first) and first:getContainer()
-                local members=holder and holders[holder] and rowMembers(row,index,nil,visible)
-                if members then
-                    for _,item in ipairs(members) do
-                        if byItem[item]~=nil then byItem[item]=false else byItem[item]=row end
-                    end
-                end
-            end
-        end
-    end
-    if getPlayerInventory and add(getPlayerInventory(index))==false then return {} end
-    if getPlayerLoot and add(getPlayerLoot(index))==false then return {} end
-    return byItem
-end
-
--- Optional display-only grouping. Never changes plan.targets or plan.fill.
--- The entry is the single direct choice; members do not grant batch permission.
-function Stacks.targets(plan,index)
-    local entries=plan and plan.targets or {}
-    local holders={}
-    for _,entry in ipairs(entries) do if entry.container then holders[entry.container]=true end end
-    local ok,rows=pcall(visibleRows,index,holders)
-    if not ok then rows={} end
-    local result,byRow={},{}
-    for _,entry in ipairs(entries) do
-        local row=rows[entry.item]
-        local group
-        if row and type(entry.fullType)=="string" and entry.fullType~="" then
-            byRow[row]=byRow[row] or {}
-            local scopes=byRow[row]
-            scopes[entry.scope]=scopes[entry.scope] or {}
-            local types=scopes[entry.scope]
-            group=types[entry.fullType]
-            if not group then
-                group={entry=entry,count=0,members={}}
-                types[entry.fullType]=group
-                result[#result+1]=group
-            end
-        else
-            group={entry=entry,count=0,members={}}
-            result[#result+1]=group
-        end
-        group.count=group.count+1
-        group.members[group.count]=entry
-        if Stacks.lessFilled(entry,group.entry) then group.entry=entry end
-    end
-    for _,group in ipairs(result) do table.sort(group.members,Stacks.lessFilled) end
-    return result
+    return Log.guard("PourStacks.selection",selection,items,index)
 end
 
 return Stacks

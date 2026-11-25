@@ -7,6 +7,7 @@ local OpenFull = require "LootBox/OpenFull"
 local CreatedItemReceipt = require "LootBox/CreatedItemReceipt"
 local OpenResult = require "LootBox/OpenResult"
 local Actor = require "LootBox/PourActor"
+local Log = require "LootBox/Log"
 local Native = {}
 Native.__index = Native
 local TIMEOUT = 120000
@@ -28,13 +29,19 @@ local function blocked(player, observed)
     return interrupted(player)
 end
 
-function Native.new(player) return setmetatable({player = player}, Native) end
+function Native.new(player, interaction) return setmetatable({player = player, interaction = interaction}, Native) end
 function Native:isBusy() return self.active ~= nil end
 
 local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) < math.huge
 end
 local function pack(...) return {n = select("#", ...), ...} end
+-- pcall that reports the error it catches.
+local function attempt(self, site, fn, ...)
+    local result = pack(pcall(fn, ...))
+    if not result[1] then Log.fault(self.interaction, "TillFullNative." .. site, result[2]) end
+    return unpack(result, 1, result.n)
+end
 
 local function liveCancellation(self, state)
     return state.reason or blocked(self.player,state.observedOpening)
@@ -77,12 +84,12 @@ local function settleReturn(self, state, completed)
     if not action then return end
     state.deferredReturn = nil
     local queue = queueFor(self)
-    local checked, obsolete = pcall(function()
+    local checked, obsolete = attempt(self, "settleReturn", function()
         return completed and #queue.queue == 0 and not queue.current
             and exactFoodReturn(self, state, action, queue) and depletedFood(self, state)
     end)
     if checked and obsolete then
-        local cleaned, problem = pcall(state.nativeCancel[action], action)
+        local cleaned, problem = attempt(self, "nativeCancel", state.nativeCancel[action], action)
         if cleaned then
             state.owned[action], state.restore[action] = nil, nil
             return
@@ -99,7 +106,7 @@ local function deferReturn(self, state, queue)
     if not state.allFood or not state.observesComplete or state.receipt or state.deferredReturn
         or #queue.queue ~= 2 or queue.queue[1] ~= state.consume or queue.current ~= state.consume then return end
     local action = queue.queue[2]
-    local checked, exact = pcall(exactFoodReturn, self, state, action, queue)
+    local checked, exact = attempt(self, "exactFoodReturn", exactFoodReturn, self, state, action, queue)
     if checked and exact then
         queue:removeFromQueue(action)
         state.deferredReturn = action
@@ -115,7 +122,7 @@ local function observeNeeds(self, state, action)
     if type(previous) ~= "function" then return end
     if name == "complete" then state.observesComplete = true end
     action[name] = function(current, ...)
-        local beforeOK, beforeH, beforeT = pcall(state.needSampler)
+        local beforeOK, beforeH, beforeT = attempt(self, "needSampler", state.needSampler)
         local exact = current == state.consume and current.item == state.item
         local result = pack(pcall(previous, current, ...))
         if not result[1] then
@@ -123,7 +130,7 @@ local function observeNeeds(self, state, action)
             settleReturn(self, state, false)
             error(result[2], 0)
         end
-        local afterOK, afterH, afterT = pcall(state.needSampler)
+        local afterOK, afterH, afterT = attempt(self, "needSampler", state.needSampler)
         if not exact or current.item ~= state.item or not beforeOK or not afterOK
             or not finite(beforeH) or not finite(beforeT) or not finite(afterH) or not finite(afterT) then
             state.receiptInvalid, state.receipt = true, nil
@@ -170,7 +177,7 @@ local function hook(self, state, action)
         return true
     end
     local function verifyBite(deep)
-        local ok,valid=pcall(biteAllowed,deep)
+        local ok,valid=attempt(self, "biteAllowed", biteAllowed,deep)
         if ok and valid then return true end
         state.reason=state.reason or "The exact opened item or consumption context changed"
         return false
@@ -236,7 +243,7 @@ local function hook(self, state, action)
             end
         end
         for _, pending in ipairs(preserve) do queue:removeFromQueue(pending) end
-        local ok, problem = pcall(originalStop, stopped)
+        local ok, problem = attempt(self, "originalStop", originalStop, stopped)
         -- A broken stop must not duplicate still-present actions or discard backups.
         for _, pending in ipairs(preserve) do
             if not present(queue, pending) then queue:addToQueue(pending) end
@@ -262,7 +269,7 @@ local function hook(self, state, action)
         -- onCompleted can reset the queue when the next native action refuses
         -- admission. Foreign work must survive that path as well as stop().
         for _, pending in ipairs(foreign) do queue:removeFromQueue(pending) end
-        local ok, problem = pcall(originalPerform, performed)
+        local ok, problem = attempt(self, "originalPerform", originalPerform, performed)
         if performed == state.consume then
             state.performSucceeded = ok
             if not ok then
@@ -278,7 +285,7 @@ local function hook(self, state, action)
             if not owned then state.reason=why end
         end
         if ok and performed == state.consume and state.opening and not replacement and not state.reason and not isClient() then
-            local captured, captureProblem = pcall(function()
+            local captured, captureProblem = attempt(self, "openingCapture", function()
                 local data, created = performed.logic:getRecipeData()
                 local outputs = data:getAllCreatedItems()
                 for index = 0, outputs:size() - 1 do
@@ -348,7 +355,7 @@ local function dispatchPinned(self,state,portion,queue)
     local removedQueued,failure
     for _,a in ipairs(actions) do
         if not failure or removedQueued and state.restore[a] then
-            local ok=pcall(ISTimedActionQueue.add,a)
+            local ok=attempt(self, "queue", ISTimedActionQueue.add, a)
             local queued=present(queue,a)
             if a==remove then removedQueued=queued end
             if not ok or not queued then failure="The game declined a native consumption action" end
@@ -428,7 +435,7 @@ local function checkAuto(self, state, phase, validateEffect)
 end
 
 local function autoAllowed(self, state, phase, validateEffect)
-    local ok, accepted = pcall(checkAuto, self, state, phase, validateEffect)
+    local ok, accepted = attempt(self, "checkAuto", checkAuto, self, state, phase, validateEffect)
     return ok and accepted == true
 end
 
@@ -552,7 +559,7 @@ local function dispatchAuto(self, state, phase)
                 return false
             end
             local result = pack(recipe(self, ...))
-            local checked, output = pcall(state.openingAdapter.output, player, state.openingPlan, self)
+            local checked, output = attempt(self, "openingOutput", state.openingAdapter.output, player, state.openingPlan, self)
             if checked then state.openOutput = output end
             return unpack(result, 1, result.n)
         end
@@ -611,7 +618,7 @@ function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard, pin
     end
     local queue = queueFor(self)
     if #queue.queue > 0 or queue.current then return nil, "Finish the current player action first" end
-    local ok, target = pcall(atTarget)
+    local ok, target = attempt(self, "atTarget", atTarget)
     if not ok then return nil, "Could not read current fullness" end
     if target then return nil, "Already at the requested limit" end
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget,
@@ -625,7 +632,7 @@ function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard, pin
     end
     self.active = state
     if pinOpened then
-        local checked,ok,why=pcall(dispatchPinned,self,state,portion,queue)
+        local checked,ok,why=attempt(self, "dispatchPinned", dispatchPinned,self,state,portion,queue)
         if checked and ok then return true end
         local failure=checked and why or "Native opened-item preparation failed"
         self:cancel(failure)
@@ -634,14 +641,14 @@ function Native:begin(item, kind, portion, atTarget, needSampler, autoGuard, pin
     if autoGuard then
         state.autoGuard, state.portion = autoGuard, portion
         local phase = state.source == self.player:getInventory() and "consume" or "prepare"
-        local dispatched, admitted, reason = pcall(dispatchAuto, self, state, phase)
+        local dispatched, admitted, reason = attempt(self, "dispatchAuto", dispatchAuto, self, state, phase)
         if dispatched and admitted then return true end
         local problem = dispatched and reason or "Native automatic admission failed: " .. tostring(admitted)
         if state.autoAction and present(queue, state.autoAction) then self:cancel(problem)
         else self.active = nil end
         return nil, problem
     end
-    local dispatched, err = pcall(function()
+    local dispatched, err = attempt(self, "dispatch", function()
         if kind == "food" then
             ISInventoryPaneContextMenu.eatItem(item, portion, self.player:getPlayerNum())
         else
@@ -675,7 +682,7 @@ function Native:beginExactOpen(item, plan, atTarget, guard)
     local state = {owned = {}, restore = {}, started = now(), atTarget = atTarget, autoGuard = guard,
         item = item, itemId = item:getID(), source = item:getContainer(), openingPlan = plan, kind = "food"}
     self.active = state
-    local checked, ok, failure = pcall(dispatchAuto, self, state, "open")
+    local checked, ok, failure = attempt(self, "dispatchAuto", dispatchAuto, self, state, "open")
     if checked and ok then return true end
     local problem = checked and failure or "Native automatic opening failed"
     if state.autoAction and present(queueFor(self), state.autoAction) then self:cancel(problem)
@@ -705,7 +712,7 @@ function Native:beginOpen(item, kind, recipe, atTarget)
     end
     local queue = queueFor(self)
     if #queue.queue > 0 or queue.current then return nil, "Finish the current player action first" end
-    local ok, target = pcall(atTarget)
+    local ok, target = attempt(self, "atTarget", atTarget)
     if not ok then return nil, "Could not read current fullness" end
     if target then return nil, "Already at the requested limit" end
     if isClient() then
@@ -776,7 +783,7 @@ function Native:beginOpen(item, kind, recipe, atTarget)
         return action
     end
     ISEntityUI.HandcraftStart=intercept
-    local dispatched, err = pcall(function()
+    local dispatched, err = attempt(self, "dispatch", function()
         -- Stock Open-and-Drink first transfers its world wrapper, then gives
         -- crafting the canonical selected inventory item, never the wrapper.
         local target = kind == "fluid" and fluidTarget(item) or item
@@ -887,12 +894,12 @@ local function pollAuto(self, state, queue)
             self.active = nil
             return false, "The exact carried item transfer was not confirmed"
         end
-        local sampled, target = pcall(state.atTarget)
+        local sampled, target = attempt(self, "atTarget", state.atTarget)
         if not sampled or target then
             self.active = nil
             return false, sampled and "Requested limit reached" or "Could not read current fullness"
         end
-        local checked, ok, failure = pcall(dispatchAuto, self, state, "consume")
+        local checked, ok, failure = attempt(self, "dispatchAuto", dispatchAuto, self, state, "consume")
         if checked and ok then return nil end
         state.reason = checked and failure or "Native automatic consumption failed"
         if state.autoAction and present(queue, state.autoAction) then self:cancel(state.reason); return nil end
@@ -905,7 +912,7 @@ local function pollAuto(self, state, queue)
         and not self.player:hasTrait(CharacterTrait.DISORGANIZED) then
         -- Only the original exact carried bag is a valid return. If a player
         -- takes over or the bag changes, leave the item in carried inventory.
-        local checked, ok = pcall(dispatchAuto, self, state, "return")
+        local checked, ok = attempt(self, "dispatchAuto", dispatchAuto, self, state, "return")
         if checked and ok then return nil end
         if state.autoAction and present(queue, state.autoAction) then self:cancel("Native automatic return failed"); return nil end
     end
@@ -927,7 +934,7 @@ function Native:poll()
         -- may move the item back to Floor or replace the original opened food.
         -- Let cleanup drain; the controller verifies final quantity/fullness.
         local ok, target = true, false
-        if not state.performed and not state.openResult then ok, target = pcall(state.atTarget) end
+        if not state.performed and not state.openResult then ok, target = attempt(self, "atTarget", state.atTarget) end
         if not ok then state.reason = "Could not read current fullness"
         elseif target then state.reason = "Requested limit reached"
         elseif liveCancellation(self,state) then state.reason = "Player interrupted consumption"

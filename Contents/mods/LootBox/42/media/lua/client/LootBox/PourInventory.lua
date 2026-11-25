@@ -3,15 +3,15 @@ local Pour = {}
 local MAX_ITEMS, MAX_CONTAINERS, MAX_DEPTH = 4096, 48, 8
 local MAX_TARGETS, MAX_CHOICE_WORK = 512, 8192
 
+local function index(object, key) return object[key] end
 local function call(object, method, arg, second)
     if not object then return nil end
-    local ok, value = pcall(function()
-        local fn = object[method]
-        if not fn then return nil end
-        if arg == nil then return fn(object) end
-        if second ~= nil then return fn(object,arg,second) end
-        return fn(object, arg)
-    end)
+    local ok, fn = pcall(index, object, method)
+    if not ok or not fn then return nil end
+    local value
+    if arg == nil then ok, value = pcall(fn, object)
+    elseif second == nil then ok, value = pcall(fn, object, arg)
+    else ok, value = pcall(fn, object, arg, second) end
     if ok then return value end
 end
 
@@ -29,9 +29,28 @@ local function equipped(player, item)
         or call(call(player, "getAttachedItems"), "contains", item) == true
 end
 
-local function itemName(item)
-    local name = call(item, "getName")
-    return type(name) == "string" and name ~= "" and name or "Container"
+local function text(value) return type(value) == "string" and value ~= "" and value or nil end
+local function itemName(item) return text(call(item, "getName")) or "Container" end
+
+-- The game's own names. A vessel's item name already spells out its contents in
+-- the player's language, so the vessel and the liquid are read separately.
+function Pour.liquid(fluid)
+    if not fluid or call(fluid,"getAmount") == 0 then return nil end
+    if call(fluid,"isMixture") == true then return getText and getText("Fluid_Mixture") or "Mixture" end
+    local primary=call(fluid,"getPrimaryFluid")
+    return text(call(primary,"getTranslatedName")) or text(primary) or text(call(fluid,"getUiName"))
+end
+function Pour.vesselName(entry)
+    if entry.amount > 0 then return text(call(entry.fluid,"getTranslatedContainerName")) or itemName(entry.item) end
+    return itemName(entry.item)
+end
+function Pour.litres(amount) return (string.format("%.2f",amount):gsub("0+$",""):gsub("%.$","")) end
+
+-- Filling or pouring in place neither moves nor deletes a vessel, which is all
+-- that Favorite and Keep guard against. Every other protection still applies.
+function Pour.reserved(world,item,policy)
+    local protected,reason=world:protected(item,policy)
+    return protected==true and reason~="Favorite" and reason~="Keep"
 end
 
 local function adjacentFloor(player, object)
@@ -71,7 +90,7 @@ local function entryFor(player, item, container, scope, path)
     local label=itemName(item) .. " | " .. where
     return {id=id, fullType=fullType, item=item, object=object, container=container, scope=scope, fluid=fluid,
         groundAnchor=groundAnchor,groundSquare=groundSquare,
-        capacity=capacity, amount=amount, free=free, label=label, icon=call(item, "getTex")}
+        capacity=capacity, amount=amount, free=free, label=label, place=where}
 end
 
 local function round(n)
@@ -87,6 +106,11 @@ function Pour.compatible(source, target)
         or not FluidContainer or not FluidContainer.CanTransfer then return false end
     local ok, allowed = pcall(FluidContainer.CanTransfer, source.fluid, target.fluid)
     return ok and allowed == true
+end
+
+function Pour.hasFluid(item)
+    if call(item,"getFluidContainer") then return true end
+    return call(call(item,"getWorldItem"),"getFluidContainer") ~= nil
 end
 
 local function scan(player, world, loot, allowLoot)
@@ -116,26 +140,26 @@ local function scan(player, world, loot, allowLoot)
                 local item = call(items, "get", index)
                 if item and not refs[item] and call(item,"getContainer") == container then
                     refs[item]=true
-                    local gear = container == main and equipped(player,item)
                     local id = call(item, "getID")
                     if finite(id) then
                         if ids[id] then ambiguous[id]=true end
                         ids[id]=true
                     end
-                    local entry = entryFor(player,item,container,scope or (gear and "equipped" or "main"),current.path)
+                    local bag = scope~="loot" and call(item,"getInventory") or nil
+                    local vessel = Pour.hasFluid(item)
+                    -- Ordinary cargo is neither, and most of an inventory is cargo.
+                    local gear = (vessel or bag) and container == main and equipped(player,item)
+                    local entry = vessel and entryFor(player,item,container,scope or (gear and "equipped" or "main"),current.path)
                     if entry and (scope~="loot" or (world and (call(container,"getType")=="floor" and not entry.groundAnchor
                         or (call(item,"isFavorite")~=true and call(world,"protected",item)~=true))
                         and call(world,"consumptionSource",item,container)==true)) then
                         result[#result+1]=entry
                     end
-                    if scope~="loot" then
-                        local bag=call(item,"getInventory")
-                        if bag and not containers[bag] and call(bag,"getContainingItem") == item then
-                            if #todo<MAX_CONTAINERS and current.depth<MAX_DEPTH then
-                                todo[#todo+1]={container=bag, scope=scope or (gear and "equipped" or "carried"),
-                                    depth=current.depth+1, path=itemName(item)}
-                            else truncated=true end
-                        end
+                    if bag and not containers[bag] and call(bag,"getContainingItem") == item then
+                        if #todo<MAX_CONTAINERS and current.depth<MAX_DEPTH then
+                            todo[#todo+1]={container=bag, scope=scope or (gear and "equipped" or "carried"),
+                                depth=current.depth+1, path=itemName(item)}
+                        else truncated=true end
                     end
                 end
             end
@@ -167,33 +191,16 @@ end
 function Pour.snapshot(player, world, container, lootPane)
     local entries,truncated=scan(player,world,lootPane,container~=nil and container==lootPane)
     table.sort(entries,order)
-    local sources,names={},{}
+    local sources={}
     for _,entry in ipairs(entries) do
-        if entry.container==container and round(entry.amount)>0 then
-            sources[entry.item]=entry
-            names[entry.label]=(names[entry.label] or 0)+1
-        end
+        if entry.container==container and round(entry.amount)>0 then sources[entry.item]=entry end
     end
-    local labels,indices={},{}
-    for _,entry in ipairs(entries) do
-        if sources[entry.item] then
-            local name=entry.label
-            if names[name]>1 then
-                indices[name]=(indices[name] or 0)+1
-                name=name.." #"..indices[name]
-            end
-            labels[entry.item]=name
-        end
-    end
-    return {entries=entries,sources=sources,labels=labels,truncated=truncated,mixtures={}}
+    return {entries=entries,sources=sources,truncated=truncated,mixtures={}}
 end
 
 function Pour.source(snapshot, item)
     local template=snapshot and snapshot.sources[item]
-    if not template then return nil end
-    local source=copy(template)
-    source.label=snapshot.labels[item]
-    return source
+    return template and copy(template) or nil
 end
 
 -- A snapshot is a menu-open boundary, not action authorization. Cache both
@@ -208,32 +215,58 @@ local function mixture(snapshot,entry)
     return result
 end
 
--- Invert a single explicitly selected loot vessel. Never infer the receiver
--- from item type, label, a collapsed stack, or the active tab after the click.
-function Pour.fillFrom(snapshot,receiver,options)
-    local target
+-- The same liquid within a percent. Anything else would be contaminated by a
+-- pour and is only ever offered as one explicit choice.
+function Pour.sameLiquid(a,b)
+    if type(a)~="table" or type(b)~="table" then return false end
+    for kind,ratio in pairs(a) do if math.abs(ratio-(b[kind] or 0))>.01 then return false end end
+    for kind,ratio in pairs(b) do if ratio>.01 and not a[kind] then return false end end
+    return true
+end
+function Pour.relation(donorMix,targetAmount,targetMix)
+    if targetAmount==0 then return "empty" end
+    return Pour.sameLiquid(donorMix,targetMix) and "same" or "mixes"
+end
+
+-- Portable donors for explicitly selected receivers: one clicked loot vessel,
+-- or carried vessels. Never infer a receiver from a type, label or later tab.
+function Pour.fillFrom(snapshot,receivers,options)
+    local wanted,targets={},{}
+    for _,item in ipairs(receivers) do wanted[item]=true end
     for _,e in ipairs(snapshot.entries) do
-        if e.item==receiver and e.scope=="loot" and round(e.free)>0 then target=copy(e);break end
-    end
-    if not target then return end
-    if target.amount>0 then
-        target.pourSignature=mixture(snapshot,target)
-        if not target.pourSignature then return end
-    end
-    local donors,refs={},{}
-    local truncated=snapshot.truncated
-    for _,e in ipairs(snapshot.entries) do
-        if not refs[e.fluid] and Pour.legalScope(e,target,options,receiver) and Pour.compatible(e,target) then
-            local mix=mixture(snapshot,e)
+        if wanted[e.item] and round(e.free)>0 and (e.scope~="loot" or #receivers==1) then
+            local target=copy(e)
+            local mix=mixture(snapshot,target)
             if mix then
-                if #donors>=MAX_TARGETS then truncated=true;break end
-                local donor=copy(e)
-                donor.pourSignature=mix
-                donors[#donors+1],refs[e.fluid]=donor,true
+                if type(mix)=="table" then target.pourSignature=mix end
+                targets[#targets+1]=target
             end
         end
     end
-    return {target=target,donors=donors,truncated=truncated}
+    if #targets==0 then return nil end
+    local donors,refs,truncated,work={},{},snapshot.truncated,MAX_CHOICE_WORK
+    for _,e in ipairs(snapshot.entries) do
+        local mix=not wanted[e.item] and not refs[e.fluid] and round(e.amount)>0 and mixture(snapshot,e)
+        if mix then
+            local accepts={}
+            for _,target in ipairs(targets) do
+                work=work-1
+                if Pour.legalScope(e,target,options,target.item) and Pour.compatible(e,target) then
+                    local choice=copy(target)
+                    choice.relation=Pour.relation(mix,choice.amount,choice.pourSignature)
+                    accepts[#accepts+1]=choice
+                end
+            end
+            if #accepts>0 then
+                local donor=copy(e)
+                donor.pourSignature=mix
+                donors[#donors+1]={source=donor,targets=accepts}
+                refs[e.fluid]=true
+            end
+            if #donors>=MAX_TARGETS or work<=0 then truncated=true;break end
+        end
+    end
+    return {targets=targets,donors=donors,truncated=truncated}
 end
 
 function Pour.sortFill(fill,options)
@@ -249,16 +282,24 @@ function Pour.sortFill(fill,options)
     end)
 end
 
-local function plan(snapshot, sourceItem, options, budget, capture)
+-- A batch never mixes liquids and follows the player's scope and order.
+function Pour.batch(entries,options)
+    local fill={}
+    for _,e in ipairs(entries) do
+        if e.relation~="mixes" and (options.pourFillScope~="main-only" or e.scope=="main") then fill[#fill+1]=e end
+    end
+    Pour.sortFill(fill,options)
+    return fill
+end
+
+local function plan(snapshot, sourceItem, options, budget)
     options=options or {}
     local source=Pour.source(snapshot,sourceItem)
     if not source then return nil,"The selected vessel cannot pour from here" end
-    if capture then
-        source.pourSignature=mixture(snapshot,source)
-        if not source.pourSignature then return nil,"The selected vessel's mixture is unavailable." end
-    end
+    source.pourSignature=mixture(snapshot,source)
+    if not source.pourSignature then return nil,"The selected vessel's mixture is unavailable." end
     local truncated=snapshot.truncated
-    local targets,fill,names,refs={},{},{},{[source.fluid]=true}
+    local targets,refs={},{[source.fluid]=true}
     for _, template in ipairs(snapshot.entries) do
         if budget then
             if budget.left<=0 then return nil,"Too many vessel combinations; select one exact vessel." end
@@ -266,33 +307,21 @@ local function plan(snapshot, sourceItem, options, budget, capture)
         end
         if not refs[template.fluid] and Pour.legalScope(source,template,options) and Pour.compatible(source,template) then
             refs[template.fluid]=true
-            local signature=not capture or mixture(snapshot,template)
+            local signature=mixture(snapshot,template)
             if signature then
                 if #targets>=MAX_TARGETS then truncated=true;break end
                 local entry=copy(template)
-                if capture and type(signature)=="table" then entry.pourSignature=signature end
+                if type(signature)=="table" then entry.pourSignature=signature end
+                entry.relation=Pour.relation(source.pourSignature,entry.amount,entry.pourSignature)
                 targets[#targets+1]=entry
-                names[entry.label]=(names[entry.label] or 0)+1
-                if options.pourFillScope ~= "main-only" or entry.scope=="main" then fill[#fill+1]=entry end
             end
         end
     end
-    local indices={}
-    for _, entry in ipairs(targets) do
-        if names[entry.label]>1 then
-            local label=entry.label
-            indices[label]=(indices[label] or 0)+1
-            entry.label=label.." #"..indices[label]
-        end
-        local free=string.format("%.3f",entry.free):gsub("0+$",""):gsub("%.$","")
-        entry.label=entry.label.." | "..free.." L free"
-    end
-    Pour.sortFill(fill,options)
-    return {source=source,targets=targets,fill=truncated and {} or fill,truncated=truncated}
+    return {source=source,targets=targets,fill=truncated and {} or Pour.batch(targets,options),truncated=truncated}
 end
 
-function Pour.plan(snapshot, sourceItem, options, capture)
-    return plan(snapshot,sourceItem,options,nil,capture)
+function Pour.plan(snapshot, sourceItem, options)
+    return plan(snapshot,sourceItem,options)
 end
 
 function Pour.choose(snapshot, items, options, extraTarget)
@@ -311,7 +340,7 @@ function Pour.choose(snapshot, items, options, extraTarget)
     local budget={left=MAX_CHOICE_WORK}
     for _,candidate in ipairs(choices) do
         if mixture(snapshot,candidate) then
-            local chosen,why=plan(snapshot,candidate.item,options,budget,true)
+            local chosen,why=plan(snapshot,candidate.item,options,budget)
             if not chosen then return nil,why end
             if #chosen.targets>0 or (extraTarget and extraTarget(chosen.source)) then return chosen end
         end
@@ -332,19 +361,22 @@ local function member(container, item)
     return false
 end
 
+-- Returns true and the live reading, or false and the check that failed.
 function Pour.accessible(player, world, entry, lootPane, allowFluidRefresh)
-    if not entry or call(entry.item,"getContainer")~=entry.container then return false end
+    if not entry or call(entry.item,"getContainer")~=entry.container then return false,"item-moved" end
     local main, container, child=call(player,"getInventory"), entry.container, entry.item
-    if not main or not member(container, child) then return false end
+    if not main or not member(container, child) then return false,"item-not-in-container" end
     local scope
     if entry.scope=="loot" then
-        if container~=lootPane or not world or world:consumptionSource(child,container)~=true
-            or call(container,"isLockedToCharacter",player)~=false then return false end
+        if container~=lootPane then return false,"loot-pane-changed" end
+        if not world or world:consumptionSource(child,container)~=true then return false,"loot-unreachable" end
+        if call(container,"isLockedToCharacter",player)~=false then return false,"container-locked" end
         scope="loot"
     else
         local seen={}
         for depth=0,MAX_DEPTH do
-            if not container or seen[container] or call(container,"isLockedToCharacter",player)~=false then return false end
+            if not container or seen[container] then return false,"bag-chain-broken" end
+            if call(container,"isLockedToCharacter",player)~=false then return false,"container-locked" end
             if container==main then
                 local gear=equipped(player,child)
                 scope=gear and "equipped" or depth>0 and "carried" or "main"
@@ -352,17 +384,19 @@ function Pour.accessible(player, world, entry, lootPane, allowFluidRefresh)
             end
             seen[container]=true
             child=call(container,"getContainingItem")
-            if not child or call(child,"getInventory")~=container then return false end
+            if not child or call(child,"getInventory")~=container then return false,"bag-chain-broken" end
             container=call(child,"getContainer")
-            if not member(container,child) then return false end
+            if not member(container,child) then return false,"bag-chain-broken" end
         end
     end
-    if scope~=entry.scope then return false end
+    if scope~=entry.scope then return false,"scope-changed: "..tostring(entry.scope).."->"..tostring(scope) end
     local live=entryFor(player,entry.item,entry.container,scope)
-    if not live or live.id~=entry.id or live.fullType~=entry.fullType or (not allowFluidRefresh and live.fluid~=entry.fluid)
-        or live.object~=entry.object or live.groundSquare~=entry.groundSquare then return false end
+    if not live then return false,"vessel-unavailable" end
+    if live.id~=entry.id or live.fullType~=entry.fullType then return false,"vessel-identity" end
+    if not allowFluidRefresh and live.fluid~=entry.fluid then return false,"fluid-component" end
+    if live.object~=entry.object or live.groundSquare~=entry.groundSquare then return false,"ground-object" end
     if (entry.groundAnchor or live.groundAnchor)
-        and not require("LootBox/PourGround").sameAnchor(entry.groundAnchor,live.groundAnchor) then return false end
+        and not require("LootBox/PourGround").sameAnchor(entry.groundAnchor,live.groundAnchor) then return false,"ground-anchor" end
     return true,live
 end
 

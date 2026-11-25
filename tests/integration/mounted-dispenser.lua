@@ -124,7 +124,7 @@ package.loaded["LootBox/PourNative"]={new=function()
             self.pending=nil
             return true,nil,reply
         end}
-end,transferAmount=function(have,free)
+end,TOLERANCE=.005,tolerance=function(amount) return math.min(.005,amount*.25) end,transferAmount=function(have,free)
     local wanted=math.min(have,free)
     local amount=math.min(wanted,FluidUtil.roundTransfer(wanted))
     if amount>0 then return amount end
@@ -196,7 +196,7 @@ local function fixture(mp,contents,name)
         for _,e in ipairs(options) do if not which or e.item==which then target=e;break end end
         if not target then return end
         local sources,byItem={},{}
-        for _,e in ipairs(D.donors(p,world)) do byItem[e.item]=e end
+        for _,e in ipairs(Inventory.snapshot(p,world,nil,nil).entries) do byItem[e.item]=e end
         for index,chosen in ipairs(selected or {self.donor}) do
             local entry=assert(byItem[chosen])
             entry.pourSignature=Inventory.mix(entry)
@@ -425,11 +425,50 @@ function app:refillDispenser(anchor,donor,bottle)
     assert(anchor.object==t.old and donor.item==t.donor and bottle.item==second)
     self.selected=(self.selected or 0)+1;return true
 end
-Menu.add(0,host,{t.old},app,tip)
+assert(Menu.add({playerIndex=0,parent=host,objects={t.old},app=app,tooltip=tip,branded=function()error("not needed")end}))
+assert(#host.options==1 and host.options[1].name=="Refill and fit a bottle")
 local choice=assert(host.options[1].child.options[2])
-assert(choice.itemForTexture==second and parent.options[1]==native)
+assert(choice.itemForTexture==second and choice.name=="Dispenser bottle, 0 / 15 L" and parent.options[1]==native)
 for _,option in ipairs(choice.child.options) do
     if option.itemForTexture==t.donor then option.onSelect(option.target);option.onSelect(option.target) end
 end
 assert(app.selected==1 and #t.enqueued==0)
 print("PASS exact visible menu makes jug and donor explicit, stock menu remains, one selection only")
+
+-- One liquid at a time: milk sources never join a water batch, favorites may pour.
+t=fixture(false,{Water=3})
+local function vessel(name,parts,favorite)
+    local i=item("Base."..name,parts,2,t.main)
+    i.favorite=favorite
+    i.getName=function() return name end
+    i.fluid.getPrimaryFluid=function(self) for k in pairs(self.parts) do return k end end
+    return i
+end
+t.main:Remove(t.donor);t.main:Remove(t.spare)
+t.old.fluid.getPrimaryFluid=function() return "Water" end
+local water1,water2=vessel("Flask",{Water=1},true),vessel("Canteen",{Water=.5})
+local milk1,milk2=vessel("Carton",{Milk=1}),vessel("Jug",{Milk=.5})
+t.world.protected=function(_,i) if i.favorite then return true,"Favorite" end return false end
+host=menu();app={world=t.world}
+function app:refillDispenser(_,donor) self.donor=donor;return true end
+assert(Menu.add({playerIndex=0,parent=host,objects={t.old},app=app,tooltip=tip}))
+local names={}
+for n,o in ipairs(host.options[1].child.options) do names[n]=o.name end
+assert(host.options[1].name=="Refill dispenser" and table.concat(names,"|")=="Fill from all Water (2)|Flask (Water), 1 / 2 L"
+    .."|Canteen (Water), 0.5 / 2 L|Carton (Milk), 1 / 2 L (mixes with Water)|Jug (Milk), 0.5 / 2 L (mixes with Water)",table.concat(names,"|"))
+local all=host.options[1].child.options[1]
+all.onSelect(all.target)
+assert(#app.donor==2 and app.donor[1].item==water1 and app.donor[2].item==water2)
+t.job=assert(D.new(t.player,t.world,t.anchor,app.donor,D.destinations(t.player,t.world,t.anchor)[1],function()return true end))
+t.job:tick();t:perform(true);t.job:tick();t.job:tick()
+assert(t.pours[1][1]==water1,"a favorite source is not moved or deleted by pouring from it")
+-- Real FluidContainers differ by up to .001 L after a pour; milk in the jug does not.
+local moving=assert(t.job.fluid.pending)
+water1.fluid.parts.Water=0.0004;moving.b.fluid.parts.Water=moving.b.fluid.parts.Water+.9989;moving.reply=.9989
+t.job:tick();t.job:tick()
+assert(t.job:isBusy() and #t.pours==2 and t.job.verified==1,t.job.reason)
+moving=assert(t.job.fluid.pending)
+water2.fluid.parts.Water=0;moving.b.fluid.parts.Milk=.5;moving.reply=.5
+t.job:tick()
+assert(t.job.state=="cancelled" and t.job.check:find("mixture",1,true),t.job.check)
+print("PASS dispenser batches keep one liquid, allow favorites, tolerate float litres and still catch another liquid")

@@ -3,6 +3,7 @@
 local Receipt = require "LootBox/CreatedItemReceipt"
 local Inventory = require "LootBox/PourInventory"
 local Actor = require "LootBox/PourActor"
+local Log = require "LootBox/Log"
 local Take = {}
 Take.__index = Take
 local ACTION, BOTTLE = "ISAddTakeDispenserBottle", "Base.WaterDispenserBottle"
@@ -216,6 +217,7 @@ end
 function Take.begin(player,action,selected,policy)
     local ok, observer, reason=pcall(begin,player,action,selected,policy)
     if ok then return observer,reason end
+    Log.fault(nil,"MountedTakeReceipt.begin",observer)
     return nil,"The exact native dispenser take could not be inspected"
 end
 

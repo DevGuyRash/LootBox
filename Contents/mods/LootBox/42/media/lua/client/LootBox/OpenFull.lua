@@ -1,5 +1,6 @@
 -- Identify what the vanilla inventory callback can actually open. A recipe or
 -- mapped script type is never an item receipt; portions use the real result.
+local Log = require "LootBox/Log"
 local OpenFull = {}
 local packaged={
     OpenWaterRationCan={input="Base.WaterRationCan",kind="fluid"},
@@ -15,6 +16,7 @@ local mysteryOutputs={"CannedBologneseOpen","CannedCarrotsOpen","CannedChiliOpen
 local function checked(f, ...)
     local ok, value = pcall(f, ...)
     if ok then return value end
+    Log.fault(nil, "OpenFull", value)
 end
 
 function OpenFull.vesselFluid(item)

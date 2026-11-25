@@ -318,6 +318,7 @@ local Policy=require "LootBox/MountedClientPolicy"
 local D=require "LootBox/MountedDispenser"
 local Menu=require "LootBox/MountedDispenserMenu"
 local Inv=require "LootBox/PourInventory"
+local Log=require "LootBox/Log"
 local function menu()
     return {options={},addOption=function(self,n,target,onSelect)
         local row={name=n,target=target,onSelect=onSelect}
@@ -340,7 +341,7 @@ local function fixture(parts)
     function x:selection(items)
         local destination=D.destinations(self.player,self.world,self.anchor)[1]
         local byItem={}
-        for _,entry in ipairs(D.donors(self.player,self.world)) do byItem[entry.item]=entry end
+        for _,entry in ipairs(Inv.snapshot(self.player,self.world,nil,nil).entries) do byItem[entry.item]=entry end
         local wanted={}
         for index,item in ipairs(items) do
             local entry=byItem[item]
@@ -386,11 +387,13 @@ local function show(x)
     local selected=0
     package.loaded["LootBox/App"]={get=function()return app end}
     function app:refillDispenser(anchor,donor)
-        assert(anchor.object==x.old and donor.item==x.donor);selected=selected+1;return true
+        assert(anchor.object==x.old and anchor.interaction==55 and donor.item==x.donor);selected=selected+1;return true
     end
     local function tip(o,_,text)o.tip=text end
-    Menu.add(0,m,{x.old},app,tip);Menu.add(0,m,{x.old},app,tip)
-    assert(#m.options==2 and m.options[1]==action)
+    local ctx={playerIndex=0,parent=m,objects={x.old},app=app,tooltip=tip,branded=function()error("one copy, at the top level")end,
+        interaction=function()return 55 end}
+    local added,again=Menu.add(ctx),Menu.add(ctx)
+    assert(not again and m.options[1]==action and #m.options==(added and 2 or 1))
     return m.options[2],function()return selected end
 end
 
@@ -405,10 +408,10 @@ test("mounted shortcut uses stock client bindings, independent of server add-on 
         local target=fixture({})
         assert(Policy.enabled() and target:ask() and #target.q.queue==0)
         local option,count=show(target)
-        assert(option.child and not option.notAvailable and option.name=="Top up mounted dispenser")
+        assert(option.child and not option.notAvailable and option.name=="Refill dispenser")
         for _,choice in ipairs(option.child.options) do
             assert(choice.itemForTexture==target.donor)
-            assert(choice.name:find("add 1.000 L (1.000 L available)",1,true))
+            assert(choice.name:find(", 1 / ",1,true) and choice.name:find(" L",1,true),choice.name)
             choice.onSelect(choice.target);choice.onSelect(choice.target)
         end
         assert(count()==1 and #target.q.queue==0)
@@ -423,8 +426,7 @@ test("mounted shortcut uses stock client bindings, independent of server add-on 
     local clock=getTimestampMs
     getTimestampMs=nil
     assert(not Policy.enabled() and not x:ask() and #x.q.queue==0)
-    local blocked=show(x)
-    assert(blocked.notAvailable and not blocked.child and blocked.tip:find("Use stock Take Bottle",1,true))
+    assert(not show(x),"a stand that cannot be refilled here shows nothing")
     getTimestampMs=clock
     assert(Policy.enabled())
 end)
@@ -480,8 +482,15 @@ test("A3 nonempty mix and exact zero carry only the native ID through refit even
         local before=initial[WATER] or 0
         x.control.fluid.parts=copy(initial)
         latchGait(x)
-        local log,savedPrint={},print
-        print=function(line)log[#log+1]=line end
+        local log,saved={},{}
+        for _,level in ipairs({"trace","info","warn"}) do
+            saved[level]=Log[level]
+            Log[level]=function(id,event,...)
+                local line={id=id,event=event}
+                for n=1,select("#",...),2 do line[(select(n,...))]=(select(n+1,...)) end
+                if event=="RECEIPT" or event=="END" and line.op=="dispenser-refill" then log[#log+1]=line end
+            end
+        end
         local ok,err=pcall(function()
             local jug=detach(x)
             assert(jug~=x.control and x.control.fluid:getAmount()==before)
@@ -504,23 +513,21 @@ test("A3 nonempty mix and exact zero carry only the native ID through refit even
                 and close(mounted.fluid:getAmount(),before+1) and x.donor.fluid:getAmount()==0 and x.sends==3,
                 x.job.reason)
             assert(#log==5)
-            local serial=assert(log[1]:match("receipt=take%-start job=(%d+) schema=2"))
-            assert(log[1]:find(string.format("mountedLitres=%.6f locked=true donorLitres=1.000000",before),1,true))
-            assert(log[2]:find("receipt=take job="..serial.." schema=2 stand=bare exactJug=true",1,true))
-            assert(log[3]:find("receipt=pour job="..serial.." schema=2 exactJug=true sourceOrdinal=1",1,true))
-            assert(log[3]:find("donorFrom=1.000000 donorTo=0.000000 transferred=1.000000",1,true))
-            assert(log[4]:find("receipt=refit job="..serial.." schema=2 stand=mounted exactJug=true retired=true",1,true))
-            assert(log[4]:find(string.format("mountedLitres=%.6f locked=true donorLitres=0.000000",before+1),1,true))
-            assert(log[5]:find("event=terminal state=finished phase=refit mode=MP reason=refit-confirmed job="..serial,1,true))
-            assert(log[5]:find("donorsConfirmed=1 mountedConfirmed=true confirmedLitres=1.000",1,true))
-            for i,line in ipairs(log) do
-                assert(not line:find("xyz=",1,true) and not line:find("facing=",1,true)
-                    and not line:find("donor=",1,true) and not line:find(tostring(jug.id),1,true)
-                    and not line:find(tostring(x.control.id),1,true))
-                if i<5 then assert(line:find("sparesObserved=1 sameVolumeSpares=1 sparesChanged=0",1,true)) end
+            local id=x.job.interaction
+            for _,line in ipairs(log) do assert(line.id==id) end
+            for n,phase in ipairs({"take-start","take","pour","refit"}) do
+                assert(log[n].phase==phase and log[n].seen:find("sparesObserved=1 sameVolumeSpares=1 sparesChanged=0",1,true),log[n].seen)
             end
+            assert(log[1].seen:find(string.format("mountedLitres=%.6f locked=true donorLitres=1.000000",before),1,true))
+            assert(log[2].stand=="bare" and log[2].seen:find("exactJug=true",1,true))
+            assert(log[3].seen:find("sourceOrdinal=1",1,true) and log[3].seen:find("donorFrom=1.000000 donorTo=0.000000 transferred=1.000000",1,true))
+            assert(log[4].seen:find("stand=mounted exactJug=true retired=true",1,true)
+                and log[4].seen:find(string.format("mountedLitres=%.6f locked=true donorLitres=0.000000",before+1),1,true))
+            local finish=log[5]
+            assert(finish.state=="finished" and finish.phase=="refit" and finish.check=="refit-confirmed" and finish.sources==1
+                and finish.refitted==true and finish.litres==1)
         end)
-        print=savedPrint
+        for level,write in pairs(saved) do Log[level]=write end
         assert(ok,err)
     end
 end)
@@ -717,7 +724,7 @@ test("a stock MP pour uses an exact donor in a nested pocket of an equipped bag"
     assert(#Menu.targets({{anchor=x.anchor,bottle=destination}},donor,x.world)==1)
     local option,count=show(x)
     local row=assert(option.child.options[1])
-    assert(row.itemForTexture==x.donor and row.name:find("add 1.000 L",1,true))
+    assert(row.itemForTexture==x.donor and row.name:find(", 1 / ",1,true))
     row.onSelect(row.target)
     assert(count()==1 and idle(x))
     local jug=detach(x)
@@ -842,18 +849,12 @@ test("a foreign action, changed or ambiguous jug, or incomplete second leg canno
     end
 end)
 
-test("batch rejects duplicate snapshot IDs and hides loot-denied mounts; donor truncation propagates",function()
+test("batch rejects duplicate snapshot IDs and hides loot-denied mounts",function()
     local x=fixture({})
     local spec,destination=x:selection({x.donor})
     assert(not D.new(x.player,x.world,x.anchor,{spec[1],spec[1]},destination,function()return true end))
     x.deniedLoot=true
     assert(#D.destinations(x.player,x.world,x.anchor)==0 and not x:ask({x.donor}) and x.sends==0)
-    local original=Inv.snapshot
-    local entries={spec[1]}
-    Inv.snapshot=function()return {entries=entries,truncated=true}end
-    local donors,truncated=D.donors(x.player,x.world)
-    Inv.snapshot=original
-    assert(donors==entries and truncated==true)
 end)
 
 print("PASS "..tests.." client-side mounted multiplayer and batch contracts; Lua/Java/transport boundaries are explicit doubles")

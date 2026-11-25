@@ -44,11 +44,18 @@ luautils={getCorrectSquareForWall=function(_,s)return s end,haveToBeTransfered=f
 local menuMethods={}
 local function menu()return setmetatable({options={}}, {__index=menuMethods}) end
 function menuMethods:addOption(n,t,f)local o={name=n,target=t,onSelect=f};self.options[#self.options+1]=o;return o end
+function menuMethods:insertOptionAfter(after,n,t,f)
+    local o={name=n,target=t,onSelect=f}
+    for at,v in ipairs(self.options) do if v.name==after then table.insert(self.options,at+1,o);return o end end
+    self.options[#self.options+1]=o;return o
+end
 function menuMethods:addSubMenu(o,c)o.child=c end
 ISContextMenu={getNew=function()return menu()end}
 local function tip(o,t,d)o.description=d end
 local function opt(m,name,maybe)for _,o in ipairs(m.options)do if o.name==name then return o end end;if not maybe then error('missing menu: '..name) end end
 local function click(row)return row.onSelect(row.target) end
+local function close(a,b)return math.abs(a-b)<1e-6 end
+IsoFlagType={solidfloor="solidfloor",water="water"}
 local function itemclass(p)return {classes={InventoryItem=true},holder=p} end
 local id=0
 local function holder(owner)
@@ -112,6 +119,7 @@ local function square(x,y,z)
     function s:getX()return self.x end;function s:getY()return self.y end;function s:getZ()return self.z end
     function s:getBuilding()return self.building end
     function s:getObjects()return list(self.rows)end
+    function s:getProperties()return {has=function(_,k)return k=="water" and self.water==true end}end
     function s:canReachTo(dst)return not dst.blocked and math.abs(self.x-dst.x)<=1 and math.abs(self.y-dst.y)<=1 and self.z==dst.z end
     return s
 end
@@ -129,7 +137,7 @@ local function object(s,name,cap,have,kind,mode)
     function o:isTaintedWater()return self.amount>0 and self.kind==Fluid.TaintedWater end
     function o:getPrimaryFluid()return self.amount>0 and self.kind or nil end
     function o:getFluidUiName()return self.kind end
-    function o:getSprite()return {getProperties=function()return {has=function(_,k)return k=="CustomName" and self.name~=nil end,
+    function o:getSprite()return {getProperties=function()return {has=function(_,k)return k=="CustomName" and self.name~=nil or k=="solidfloor" and self.floor==true end,
         get=function()return self.name end}end}end
     function o:getFluidContainer()return self.mode=="collector" and self or nil end
     function o:getUsesExternalWaterSource()return self.mode=="plumbed" end
@@ -190,12 +198,20 @@ local PM=require "LootBox/PourMenu"
 local I=require "LootBox/PourInventory"
 local J=require "LootBox/WorldFluidJob"
 local options={pourFillScope="main-first",pourFillOrder="smallest-first",pourLootToLoot=false}
+local branded
+local function open(items,parent)
+    parent=parent or menu();branded=nil
+    local added=PM.add({playerIndex=0,parent=parent,items=items,app=app,preferences={},tooltip=tip,
+        branded=function() branded=branded or menu();return branded end,interaction=function(origin,label) app.asked={origin,label};return 900 end})
+    return parent,added
+end
 local function snapshot()return I.snapshot(P,world,nil,nil)end
 local function entry(i)
     for _,e in ipairs(snapshot().entries)do if e.item==i then assert(W.signature(e));return e end end
     error("not in snapshot: "..i.name)
 end
-local function anchor(o)return assert(W.objects(P,{o})[1],"missing world anchor")end
+local function maybeAnchor(o)for _,a in ipairs(W.objects(P))do if a.object==o then return a end end end
+local function anchor(o)return assert(maybeAnchor(o),"missing world anchor")end
 local function check(title,fn)reset();fn();print("PASS "..title)end
 
 if WORLD_FLUID_STOCK then
@@ -221,44 +237,122 @@ check("directional eligibility: empty/full/locked collectors, plumbed, ordinary 
     src.waterStore=true;src.protect=true;assert(not W.permits(P,world,anchor(pipe),entry(src),false))
     P.limit=0;assert(not W.permits(P,world,anchor(pipe),entry(dst),true))
 end)
-check("inventory Pour Into and Fill From, root + brand, no fake water destination, singleton world-only source, no fake unlimited litre labels",function()
+check("one Pour Into and one Fill From directly after the stock Fluid entry; no row that only explains itself",function()
     local src=item(P.main,"Bucket",2,1,"Milk")
     local c=object(P.square,"Rain collector",40,5,Fluid.Water,"collector")
     local w=object(square(1,0,0),nil,9999,9999,Fluid.TaintedWater,"wild")
-    local parent,brand=menu(),menu();PM.add(0,parent,brand,{src},app,{},tip)
-    for _,m in ipairs({parent,brand})do
-        local out=opt(m,"Pour Into").child
-        assert(opt(out,"Rain collector") and not opt(out,"Natural water source",true))
-        local fill=opt(m,"Fill From").child;local row=opt(fill,"Natural water source")
-        assert(row.description:find("Tooltip_WaterUnlimited",1,true) and not row.description:find("9999",1,true))
-    end
-    click(opt(opt(parent,"Pour Into").child,"Rain collector"));assert(app.dispatch.a.object==c and not app.dispatch.take)
-    local old=app.dispatch;click(opt(opt(brand,"Fill From").child,"Natural water source"));assert(app.dispatch==old)
+    local parent=menu()
+    parent:addOption("Drink");parent:addOption("ContextMenu_Fluid");parent:addOption("Drop")
+    local _,added=open({src},parent)
+    local names={};for n,o in ipairs(parent.options)do names[n]=o.name end
+    assert(added and not branded and table.concat(names,"|")=="Drink|ContextMenu_Fluid|Pour Into|Fill From|Drop")
+    open({src},parent);assert(#parent.options==5,"a repeated fill event adds nothing")
+    local out=opt(parent,"Pour Into").child
+    assert(#out.options==1)
+    click(opt(out,"Rain collector, 5 / 40 L (mixes with clean)"))
+    assert(app.dispatch.a.object==c and not app.dispatch.take and app.dispatch.opts and app.dispatch.a.interaction==900)
+    assert(app.asked[1]=="menu.item" and app.asked[2]=="Pour Into > Rain collector, 5 / 40 L (mixes with clean)")
+    local fill=opt(parent,"Fill From").child
+    local row=opt(fill,"Natural water source (mixes with Milk)")
+    assert(row.description:find("Tooltip_WaterUnlimited",1,true) and not row.description:find("9999",1,true))
+    local old=app.dispatch;click(row);assert(app.dispatch==old,"one click per open menu")
     src.fluid.amount=0
-    parent,brand=menu(),menu();PM.add(0,parent,brand,{src},app,{},tip)
-    assert(not opt(parent,"Pour Into",true));click(opt(opt(parent,"Fill From").child,"Natural water source"));assert(app.dispatch.a.object==w and app.dispatch.take)
+    parent=open({src});assert(not opt(parent,"Pour Into",true))
+    click(opt(opt(parent,"Fill From").child,"Natural water source (tainted)"));assert(app.dispatch.a.object==w and app.dispatch.take)
+    parent,added=open({item(P.main,"Nails")});assert(not added and #parent.options==0)
+    local full=item(P.main,"Full",1,1,"Petrol");c.lock=true;w.square.blocked=true;src.fluid.amount=src.fluid.cap;src.fluid.kind="Milk"
+    parent,added=open({full});assert(not added and #parent.options==0,"no destination and no room means no entry at all")
 end)
-check("direct world click exact object; separately bound same-name fixtures; preference order; full donors in bags not offered",function()
-    local small=item(P.main,"Small",1,0);local large=item(P.main,"Large",3,0)
-    local bag=item(P.main,"Bag");bag.bag=holder(bag);local carried=item(bag.bag,"DonorInBag",2,1)
-    local c=object(P.square,"Collector",40,8,Fluid.Water,"collector");local other=object(P.square,"Collector",40,8,Fluid.Water,"collector")
-    local m=menu();WM.world(0,m,{other},app,options,tip)
-    local r=opt(m,"Fill from Collector").child;click(opt(r,"Fill All"))
-    local e=app.dispatch.e;assert(#e==3 and e[1].item==small and e[2].item==large and e[3].item==carried and app.dispatch.a.object==other)
-    assert(not opt(m,"Pour into Collector",true))
-    local m2=menu();WM.world(0,m2,{c,other},app,options,tip)
-    assert(opt(m2,"Fill from Collector (0,0 z0 #1)") and opt(m2,"Fill from Collector (0,0 z0 #2)"))
-    options.pourFillScope="main-only";m=menu();WM.world(0,m,{c},app,options,tip);click(opt(opt(m,"Fill from Collector").child,"Fill All"))
-    assert(#app.dispatch.e==2);options.pourFillScope="main-first"
+check("puddles are not a source, natural water appears once, same-named fixtures are told apart by direction only",function()
+    local v=item(P.main,"Bottle",1,0)
+    local puddle=object(P.square,nil,3,3,Fluid.TaintedWater,"wild");puddle.floor=true
+    for x=-1,1 do object(square(x,-1,0),nil,9999,9999,Fluid.TaintedWater,"wild") end
+    object(square(-1,0,0),"Sink",10000,10000,Fluid.Water,"mains")
+    object(square(1,0,0),"Sink",10000,10000,Fluid.Water,"mains")
+    object(square(1,1,0),"Sink",10,4,Fluid.Water,"plumbed")
+    local rows=opt(open({v}),"Fill From").child.options
+    local names={};for n,o in ipairs(rows)do names[n]=o.name end
+    table.sort(names)
+    assert(table.concat(names,"|")=="Natural water source (tainted)|Sink, east (clean)|Sink, south-east (clean), 4 / 10 L|Sink, west (clean)",table.concat(names,"|"))
+    for _,o in ipairs(rows) do assert(not o.name:find("#",1,true) and not (o.description or ""):find("z0",1,true)) end
+    P.square.water=true;puddle.cap,puddle.amount=9999,9999
+    assert(opt(opt(open({v}),"Fill From").child,"Natural water source (tainted)"),"open water underfoot still is one")
 end)
-check("stock access boundaries: safehouse/loot, adjacent walls, unloaded/replaced, another building or floor, world clicks may path from farther away",function()
+check("a carried empty bottle fills from a carried bucket; a stack fills all or one and never mixes",function()
+    local bucket=item(P.main,"Bucket",10,8)
+    local bottle=item(P.main,"Bottle",1,0)
+    local rows=opt(open({bottle}),"Fill From").child
+    app.startPour=function(_,source,targets,opts,receiver) app.pour={source=source,targets=targets,opts=opts,receiver=receiver};return true end
+    click(opt(rows,"Bucket (clean), 8 / 10 L"))
+    assert(app.pour.source.item==bucket and #app.pour.targets==1 and app.pour.targets[1].item==bottle and not app.pour.receiver
+        and app.pour.opts.interaction==900 and app.pour.opts.pourRoute=="carried-fill-from")
+    local second,milk=item(P.main,"Bottle",1,.5),item(P.main,"Bottle",1,.5,"Milk")
+    local row={name="Bottle",items={bottle,bottle,second,milk}}
+    local pane={inventory=P.main,itemindex={Bottle=row},itemslist={row},items={row},collapsed={Bottle=true},player=0,getIsVisible=yes}
+    row.invPanel=pane;pane.inventoryPage={inventoryPane=pane}
+    function getPlayerInventory()return {inventoryPane=pane,getIsVisible=yes} end
+    function getPlayerLoot()end
+    local parent=open({row})
+    local source=opt(opt(parent,"Fill From").child,"Bucket (clean), 8 / 10 L").child
+    assert(#source.options==2 and opt(source,"Fill one"))
+    click(opt(source,"Fill all (2)"))
+    assert(#app.pour.targets==2 and app.pour.targets[1].item==second and app.pour.targets[2].item==bottle)
+    getPlayerInventory,getPlayerLoot=nil,nil
+end)
+check("destinations name contents and litres, own liquid and empty first; batches only those, two or more",function()
+    local src=item(P.main,"Bucket",10,8)
+    item(P.main,"Jar",1,.25,"Milk");item(P.main,"Jar",1,0);item(P.main,"Jar",1,.6)
+    local pack=item(P.main,"Pack");pack.bag=holder(pack);item(pack.bag,"Jar",1,.6)
+    local rows=opt(open({src}),"Pour Into").child.options
+    local names={};for n,o in ipairs(rows)do names[n]=o.name end
+    assert(table.concat(names,"|")=="Pour into all (3)|Jar (clean), 0.6 / 1 L - Main inventory|Jar (clean), 0.6 / 1 L - Pack|"
+        .."Jar, 0 / 1 L|Jar, 0.25 / 1 L (mixes with Milk)",table.concat(names,"|"))
+    app.startPour=function(_,_,targets) app.pour=targets;return true end
+    click(rows[1]);assert(#app.pour==3)
+    for _,e in ipairs(app.pour) do assert(e.fluid.kind~="Milk") end
+    reset();src=item(P.main,"Bucket",10,8);item(P.main,"Jar",1,0);item(P.main,"Jar",1,.25,"Milk")
+    rows=opt(open({src}),"Pour Into").child.options
+    assert(#rows==2 and rows[1].name=="Jar, 0 / 1 L","one fillable destination is not a batch")
+end)
+check("more than eight rows become groups by type, and identical vessels are one row",function()
+    local src=item(P.main,"Bucket",30,30)
+    for _=1,12 do item(P.main,"Empty Bottle",1,0) end
+    for n=1,5 do item(P.main,"Jar",1,n/10) end
+    for n=1,4 do item(P.main,"Soup"..n,1,.2,"Soup") end
+    local child=opt(open({src}),"Pour Into").child
+    local function count(m) for _,o in ipairs(m.options) do if o.child then count(o.child) end end;assert(#m.options<=8,"too many rows") end
+    count(child)
+    local empty=opt(child,"Empty Bottle, 0 / 1 L (12)").child
+    assert(#empty.options==2 and opt(empty,"All (12)") and opt(empty,"One"))
+    local jars=opt(child,"Jar (clean) (5)").child
+    assert(#jars.options==6 and opt(jars,"All (5)") and opt(jars,"Jar (clean), 0.3 / 1 L"))
+    assert(opt(child,"Soup1, 0.2 / 1 L (mixes with Soup)"))
+    reset();src=item(P.main,"Bucket",30,30)
+    for n=1,23 do item(P.main,"Jar",1,n/100) end
+    child=opt(open({src}),"Pour Into").child
+    count(child)
+    local total=0
+    local function leaves(m) for _,o in ipairs(m.options) do
+        if o.child then leaves(o.child) elseif o.name:find("^Jar") then total=total+1 end end end
+    leaves(child);assert(total==23,"every vessel stays reachable: "..total)
+end)
+check("another mod's Pour Into keeps its place; ours moves into LootBox",function()
+    local src=item(P.main,"Bucket",2,1);item(P.main,"Jar",1,0)
+    local parent=menu();local foreign=parent:addOption("Pour into ...",nil,function()end)
+    open({src},parent)
+    assert(parent.options[1]==foreign and not opt(parent,"Pour Into",true) and opt(branded,"Pour Into").child)
+    getActivatedMods=function()return {contains=function(_,m)return m=="PourIntoContainer" end} end
+    parent=open({src});assert(not opt(parent,"Pour Into",true) and opt(branded,"Pour Into"))
+    getActivatedMods=nil
+end)
+check("stock access boundaries: safehouse/loot, adjacent walls, unloaded/replaced, another building, floor or distance",function()
     local s=square(1,0,0);local c=object(s,"Collector",40,4,Fluid.Water,"collector")
-    assert(#W.objects(P,nil)==1);s.blocked=true;assert(#W.objects(P,nil)==0 and #W.objects(P,{c})==1);s.blocked=false
-    s.deny=true;assert(#W.objects(P,{c})==0);s.deny=false;s.lootDenied=true;assert(#W.objects(P,{c})==0);s.lootDenied=false
-    s.building={};assert(#W.objects(P,{c})==0);s.building=nil
+    assert(maybeAnchor(c));s.blocked=true;assert(not maybeAnchor(c));s.blocked=false
+    s.deny=true;assert(not maybeAnchor(c));s.deny=false;s.lootDenied=true;assert(not maybeAnchor(c));s.lootDenied=false
+    s.building={};assert(not maybeAnchor(c));s.building=nil
     local a=anchor(c);s.rows={object(s,"Replacement",40,4,Fluid.Water,"collector")};assert(not W.live(P,a))
-    local far=object(square(4,0,0),"Other",40,4,Fluid.Water,"collector");assert(#W.objects(P,{far})==1)
-    local up=object(square(0,0,1),"Upstairs",40,4,Fluid.Water,"collector");assert(#W.objects(P,{up})==0)
+    assert(not maybeAnchor(object(square(4,0,0),"Other",40,4,Fluid.Water,"collector")))
+    assert(not maybeAnchor(object(square(0,0,1),"Upstairs",40,4,Fluid.Water,"collector")))
 end)
 -- A reachable open Shelf, not a fictitious second player inventory.
 local function shelfFixture()
@@ -271,32 +365,26 @@ local function shelfFixture()
     world.pourShelfReachable=function(_,holder,anchor)return holder==shelf and anchor==marker and not shelf.locked end
     return shelf
 end
-local function inverseFor(v)
-    local p,b=menu(),menu()
-    PM.add(0,p,b,{v},app,{},tip)
-    return opt(p,"Fill From"),opt(b,"Fill From")
-end
-check("one inverse menu combines fixtures + permitted portable donors; closes stale entrances and offers fixture-only loot fills",function()
+local function inverseFor(v) return opt(open({v}),"Fill From",true) end
+check("one Fill From combines fixtures and permitted portable donors and drops what is no longer usable",function()
     local shelf=shelfFixture();local v=item(shelf,"Jug",2,0)
     local sink=object(P.square,"Sink",10000,10000,Fluid.Water,"mains")
     local toilet=object(square(1,0,0),"Toilet",10,3,Fluid.Water,"plumbed")
     local wild=object(square(0,1,0),nil,9999,9999,Fluid.TaintedWater,"wild")
     object(square(1,1,0),"Dry",40,0,Fluid.Water,"collector")
     local tank=object(P.square,"Big tank",15000,15000,"Milk","collector")
-    local a,b=inverseFor(v)
-    for _,root in ipairs({a,b})do
-        local m=root.child;assert(not root.notAvailable and #m.options==4 and opt(m,"Sink") and opt(m,"Toilet")
-            and opt(m,"Natural water source") and opt(m,"Big tank").description:find("15000.000",1,true))
-    end
-    click(opt(a.child,"Toilet"));local t=app.dispatch
+    local m=inverseFor(v).child
+    assert(#m.options==4 and opt(m,"Sink (clean)") and opt(m,"Toilet (clean), 3 / 10 L")
+        and opt(m,"Natural water source (tainted)") and opt(m,"Big tank (Milk), 15000 / 15000 L"))
+    click(opt(m,"Toilet (clean), 3 / 10 L"));local t=app.dispatch
     assert(t.a.object==toilet and t.loan.lease.entry.item==v and #t.e==1 and t.take)
-    click(opt(b.child,"Sink"));assert(app.dispatch==t and v.holder==shelf and v.fluid.amount==0 and toilet.amount==3)
+    click(opt(m,"Sink (clean)"));assert(app.dispatch==t and v.holder==shelf and v.fluid.amount==0 and toilet.amount==3)
     local donor=item(P.main,"Portable",2,1);item(shelf,"UnselectedDonor",1,1)
-    a,b=inverseFor(v);assert(#a.child.options==5 and #b.child.options==5)
-    assert(a.child.options[5].itemForTexture==donor)
+    m=inverseFor(v).child;assert(#m.options==5)
+    assert(opt(m,"Portable (clean), 1 / 2 L").itemForTexture==donor)
     toilet.square.deny=true;wild.square.blocked=true;tank.kind="forbidden";v.fluid.forbid="forbidden"
-    a=inverseFor(v);assert(#a.child.options==2 and opt(a.child,"Sink"))
-    P.limit=.2;a=inverseFor(v);assert(#a.child.options==1 and a.child.options[1].itemForTexture==donor)
+    m=inverseFor(v).child;assert(#m.options==2 and opt(m,"Sink (clean)"))
+    P.limit=.2;m=inverseFor(v).child;assert(#m.options==1 and m.options[1].itemForTexture==donor)
     assert(not W.live(P,t.a) and sink.amount==10000)
 end)
 
@@ -333,18 +421,7 @@ check("equipped fixture receivers include loaded hydration storage and ordinary 
     for _,v in ipairs(entries)do
         local e=entry(v)
         assert(e.scope=="equipped" and W.permits(P,world,a,e,true))
-        local m=menu();WM.world(0,m,{o},app,options,tip)
-        local found=false
-        for _,row in ipairs(opt(m,"Fill from Rain collector").child.options)do
-            if row.itemForTexture==v then
-                assert(row.target.entries[1].item==v)
-                found=true
-            end
-        end
-        assert(found)
-        local parent,brand=menu(),menu()
-        PM.add(0,parent,brand,{v},app,{},tip)
-        assert(opt(opt(parent,"Fill From").child,"Rain collector"))
+        assert(opt(opt(open({v}),"Fill From").child,"Rain collector (clean), 3 / 40 L"))
     end
     local pack=entries[3];local e=entry(pack)
     assert(world:protected(pack) and world:protected(pack,{allowEquippedConsumption=true}))
@@ -354,43 +431,67 @@ check("equipped fixture receivers include loaded hydration storage and ordinary 
     pack.fluid.amount=0;pack.fluid.inputLocked=true;assert(not W.permits(P,world,a,e,true))
     pack.fluid.inputLocked=false;pack.fluid.forbid=Fluid.Water;assert(not W.permits(P,world,a,e,true))
     pack.fluid.forbid=nil
-    world.state.keep[tostring(pack.id)]=true;assert(not W.permits(P,world,a,e,true))
+    -- Filling in place neither moves nor deletes, so Keep and Favorite allow it.
+    world.state.keep[tostring(pack.id)]=true;assert(W.permits(P,world,a,e,true))
     world.state.keep={}
-    pack.isFavorite=yes;assert(not W.permits(P,world,a,e,true))
+    pack.isFavorite=yes;assert(W.permits(P,world,a,e,true) and W.inPlaceReceiver(P,world,e))
     pack.isFavorite=no
+    local bag=item(P.main,"Pack");bag.bag=holder(bag)
+    local inside=item(bag.bag,"Flask",1,0);assert(W.permits(P,world,a,entry(inside),true))
+    inside.isFavorite=yes;assert(not W.permits(P,world,a,entry(inside),true),"from a bag the game carries it out and back")
     world.recovery={isProtected=function(_,i)return i==pack end};assert(not W.permits(P,world,a,e,true))
     world.recovery=nil
     local saved=entry(custom);P.attached[custom]=nil
     assert(not W.allowedEntry(P,world,a,saved,true))
 end)
 
-check("world job diagnostics distinguish rejection and binding failure without exposing names or exception text",function()
-    local savedPrint,savedQueue,log=print,ISTimedActionQueue,{}
+local Log=require "LootBox/Log"
+local function traced(fn)
+    local lines,saved={},{}
+    for _,level in ipairs({"trace","info","warn","error"}) do
+        saved[level]=Log[level]
+        Log[level]=function(id,event,...)
+            local line={id=id,event=event,level=level}
+            for n=1,select("#",...),2 do line[(select(n,...))]=(select(n+1,...)) end
+            lines[#lines+1]=line
+        end
+    end
+    local ok,err=pcall(fn,lines)
+    for level,write in pairs(saved) do Log[level]=write end
+    assert(ok,err)
+end
+local function find(lines,event) for n=#lines,1,-1 do if lines[n].event==event then return lines[n] end end end
+check("the world job trace tells a refusal from a Lua error and names vessel, fixture and player",function()
+    local savedQueue=ISTimedActionQueue
     if not WORLD_FLUID_STOCK then
         local queue={queue={}}
         ISTimedActionQueue={getTimedActionQueue=function()return queue end}
     end
-    print=function(line)log[#log+1]=line end
-    local ok,err=pcall(function()
+    traced(function(lines)
         mp=true
-        local o=object(P.square,"PrivateCollectorName",40,6,Fluid.Water,"collector")
-        local vessel=item(P.main,"PrivateBottleName",1,0)
+        local o=object(P.square,"Collector",40,6,Fluid.Water,"collector")
+        local vessel=item(P.main,"Bottle",1,0)
         local a,e=anchor(o),entry(vessel)
+        a.interaction=31
         P.hasTimedActions=yes
         local busy,msg=J.new(P,world,a,true,{e},yes)
         assert(not busy and msg=="Finish the current action and select an available vessel.")
+        local refused=find(lines,"REFUSED")
+        assert(refused.id==31 and refused.check=="queue-busy" and refused.fixture:find("Collector",1,true) and refused.player)
         P.hasTimedActions=no
-        local j=assert(J.new(P,world,a,true,{e},function()error("PrivateStackTrace")end))
+        local j=assert(J.new(P,world,a,true,{e},function()error("binding gone")end))
+        assert(j.interaction==31 and find(lines,"START").fixture:find("litres=6.00000/40.00000",1,true))
+        assert(find(lines,"TARGET").vessel:find("Base.Bottle#"..vessel.id,1,true))
+        local fault
+        local saved=Log.fault;Log.fault=function(id,site,err)fault={id=id,site=site,err=tostring(err)}end
         for _=1,5 do j:tick()end
-        assert(j.state=="cancelled" and j.reason=="The game did not expose this world fluid action.")
-        assert(#log==2)
-        assert(log[1]:find("action=world-fill event=rejected state=not-started phase=prepare mode=MP reason=queue-busy",1,true))
-        assert(log[2]:find("action=world-fill event=terminal state=cancelled phase=prepare mode=MP reason=action-binding-error",1,true))
-        assert(log[2]:find("nativeQueued=false completed=0 total=1 confirmedLitres=0.000",1,true))
-        for _,line in ipairs(log)do assert(not line:find("Private",1,true))end
+        Log.fault=saved
+        assert(fault.id==31 and fault.site=="WorldFluidJob.step" and fault.err~="nil")
+        local finish=find(lines,"END")
+        assert(j.state=="cancelled" and finish.check=="action-binding-error" and finish.phase=="prepare" and finish.submitted==false
+            and finish.vessels==0 and finish.of==1 and finish.litres==0)
     end)
-    print,ISTimedActionQueue=savedPrint,savedQueue
-    assert(ok,err)
+    ISTimedActionQueue=savedQueue
 end)
 
 if not WORLD_FLUID_STOCK then print("World-fluid portable contract passed; installed game actions require tools/check-world-fluid-stock.py");return end
@@ -490,7 +591,7 @@ check("weighted stock fill preserves the receiver's original ingredients and add
     local a=untilAction(j,"ISTakeWaterAction");assert(not a:waitToStart() and a.waterUnit==1.5)
     finishStock("ISTakeWaterAction");armMove(j,v,P.main,s):perform();j:tick()
     assert(j.state=="finished" and v.fluid.amount==2 and v.fluid.kind==Fluid.Water)
-    assert(W.near(v.fluid.mix[Fluid.Water],.5875) and W.near(v.fluid.mix.Milk,.4125))
+    assert(close(v.fluid.mix[Fluid.Water],.5875) and close(v.fluid.mix.Milk,.4125))
 end)
 check("a finite plumbed tap converts only tainted water; missing native feed is not advertised",function()
     local initial={amount=.75,kind=Fluid.Water}
@@ -500,9 +601,9 @@ check("a finite plumbed tap converts only tainted water; missing native feed is 
     local a=untilAction(j,"ISTakeWaterAction");assert(not a:waitToStart() and a.waterUnit==1)
     finishStock("ISTakeWaterAction");armMove(j,v,P.main,s):perform();j:tick()
     assert(j.state=="finished" and v.fluid.amount==1.75 and v.fluid.mix[Fluid.TaintedWater]==nil)
-    assert(W.near(v.fluid.mix.Milk,.2/1.75) and W.near(v.fluid.mix[Fluid.Water],1.55/1.75))
+    assert(close(v.fluid.mix.Milk,.2/1.75) and close(v.fluid.mix[Fluid.Water],1.55/1.75))
     o.amount=.5;o.upstream.removed=true
-    assert(inverseFor(v).notAvailable)
+    assert(not inverseFor(v))
 end)
 for _,corrects in ipairs({false,true}) do
     check("MP wrong same-volume/primary mixture never certifies; corrected mirror allowed="..tostring(corrects),function()
@@ -521,8 +622,13 @@ for _,corrects in ipairs({false,true}) do
         j:tick();ms=ms+125;j:tick()
         assert(j.liters==0 and j.count==0 and not q().current and v.holder==P.main)
         if not corrects then
+            -- Not certified as the selected liquid, but still the player's own
+            -- vessel, and it goes back where it came from.
             ms=ms+5500;for _=1,3 do j:tick() end
-            assert(j.state=="cancelled" and j.liters==0 and not q().current and v.holder==P.main)
+            armMove(j,v,P.main,s):perform();put(v,s)
+            for _=1,3 do ms=ms+125;j:tick() end
+            assert(j.state=="cancelled" and j.restored and j.liters==0 and j.count==0 and j.check=="vessel-mixture")
+            assert(not q().current and v.holder==s)
         else
             v.fluid.mix={[Fluid.Water]=.5875,Milk=.4125}
             armMove(j,v,P.main,s):perform();put(v,s);ms=ms+125;j:tick()
@@ -590,8 +696,8 @@ check("ordinary placed stock component: exact Ground pickup -> stock natural fil
     function s:AddWorldInventoryItem(it,x,y,z,flag)assert(not mp and it==v and not flag);place(it,x,y,z);return it end
     local o=object(s,nil,9999,9999,Fluid.TaintedWater,"wild")
     old.extended=true
-    local r=inverseFor(v);assert(r.notAvailable and not r.child and not q().current and old.fluid.amount==0)
-    old.extended=false;r=inverseFor(v);click(opt(r.child,"Natural water source"))
+    local r=inverseFor(v);assert(not r and not q().current and old.fluid.amount==0)
+    old.extended=false;r=inverseFor(v);click(opt(r.child,"Natural water source (tainted)"))
     local pick=app.dispatch.loan;assert(pick.lease.ground.worldFluid and pick.lease.ground.world==old)
     local j,why=Loan.new(P,world,pick,yes);assert(j,why)
     local tak=untilAction(j,"ISInventoryTransferAction")
@@ -626,8 +732,8 @@ check("between receipt and start, changed taint, denied fixture, or new manual w
     local a=untilAction(j,"ISTakeWaterAction")
     o.kind=Fluid.TaintedWater
     assert(a:waitToStart() and not q().current)
-    for _=1,5 do j:tick()end
-    assert(j.state=="cancelled" and v.holder==P.main and v.fluid.amount==0 and o.amount==3 and not j.restored)
+    armMove(j,v,P.main,s):perform();j:tick()
+    assert(j.state=="cancelled" and j.restored and v.holder==s and v.fluid.amount==0 and o.amount==3 and j.liters==0)
     local k,w,orig,fc=loanStart("Toilet","plumbed",3,Fluid.Water)
     armMove(k,w,orig,P.main):perform()
     a=untilAction(k,"ISTakeWaterAction")
@@ -636,6 +742,49 @@ check("between receipt and start, changed taint, denied fixture, or new manual w
     assert(a:waitToStart() and q().current==foreign and #q().queue==1)
     for _=1,5 do k:tick()end
     assert(k.state=="cancelled" and k.liters==0 and w.fluid.amount==0 and q().current==foreign)
+end)
+check("rain before and during a collector fill: measured from the vessel, for a shelf loan and for carried vessels",function()
+    local j,v,s,o=loanStart("Rain collector","collector",3,Fluid.TaintedWater)
+    o.amount=3.4 -- between the menu and the click
+    armMove(j,v,s,P.main):perform()
+    o.amount=3.7
+    local a=untilAction(j,"ISTakeWaterAction");assert(not a:waitToStart())
+    a:updateUse(.5);o.amount=o.amount+.6;finishStock("ISTakeWaterAction");o.amount=o.amount+.3
+    armMove(j,v,P.main,s):perform();j:tick()
+    assert(j.state=="finished" and j.count==1 and close(j.liters,2) and close(v.fluid.amount,2) and v.holder==s)
+    local one,two=item(P.main,"One",1,0),item(P.main,"Two",1,0)
+    local n=start(o,true,{one,two})
+    o.amount=o.amount+.5;finishStock("ISTakeWaterAction");o.amount=o.amount+.5;n:tick();n:tick()
+    finishStock("ISTakeWaterAction");n:tick()
+    assert(n.state=="finished" and n.count==2 and n.liters==2)
+end)
+check("a finite fixture's float32 bookkeeping cannot fail a correct fill",function()
+    local function f32(x)
+        if x<=0 then return 0 end
+        local scale=1
+        while x*scale>=16777216 do scale=scale/2 end
+        while x*scale<8388608 do scale=scale*2 end
+        return math.floor(x*scale+.5)/scale
+    end
+    local seed=11
+    local function random() seed=(seed*16807)%2147483647;return seed/2147483647 end
+    for _=1,40 do
+        local have,size=f32(1+30*random()),f32(.3+4*random())
+        local o=object(P.square,"Barrel",40,have,Fluid.Water,"collector")
+        local v=item(P.main,"Jug",size,f32(size*random()*.5))
+        function o:transferFluidTo(f,n)
+            n=f32(math.max(0,math.min(n,self.amount,f:getFreeCapacity())))
+            f.amount=f32(f.amount+n);self.amount=f32(self.amount-n);f.kind=self.kind
+        end
+        local before=v.fluid.amount
+        local j=start(o,true,{v})
+        local want=q().current.waterUnit
+        for frame=1,90 do q().current:updateUse(f32(frame/91)) end
+        finishStock("ISTakeWaterAction");j:tick()
+        assert(j.state=="finished" and j.count==1,string.format("%.4f L from %.4f L",want,have))
+        assert(math.abs(v.fluid.amount-before-want)<.001)
+        P.square.rows={};put(v,holder())
+    end
 end)
 check("changed return permissions never place in a sibling shelf or report complete",function()
     local j,v,s,o=loanStart("Rain","collector",3,Fluid.Water)
@@ -658,8 +807,8 @@ check("MP receiver identity requires accepted transactions + reciprocal shelf mi
     put(v,holder());ms=ms+200
     local water=untilAction(j,"ISTakeWaterAction");assert(water.item==clone and not water:waitToStart())
     finishStock("ISTakeWaterAction");j:tick();assert(not q().current and j.liters==0)
-    clone.fluid.amount=2;clone.fluid.kind=Fluid.TaintedWater;j:tick();assert(not q().current and j.liters==0)
-    o.amount=3;local back=armMove(j,clone,P.main,s);back:perform()
+    o.amount=3;j:tick();assert(not q().current and j.liters==0)
+    clone.fluid.amount=2;clone.fluid.kind=Fluid.TaintedWater;local back=armMove(j,clone,P.main,s);back:perform()
     local returned=item(s,"Jug",2,2,Fluid.TaintedWater);returned.id=oldid
     ms=ms+200;j:tick();assert(j.state=="running")
     put(clone,holder());ms=ms+200;j:tick()
@@ -691,8 +840,8 @@ check("real natural-water yield is not inferred from source loss; free carry wei
     assert(j.state=="finished" and j.liters==1.25 and b.fluid.kind==Fluid.TaintedWater and o.amount==9999)
     local tap=object(P.square,"Sink",8,.4,Fluid.Water,"plumbed")
     P.limit=5;local n=start(tap,true,{b})
-    assert(W.near(q().current.waterUnit,.4));finishStock("ISTakeWaterAction");n:tick()
-    assert(n.state=="finished" and W.near(n.liters,.4))
+    assert(close(q().current.waterUnit,.4));finishStock("ISTakeWaterAction");n:tick()
+    assert(n.state=="finished" and close(n.liters,.4))
 end)
 check("stock object deposit respects destination free space, transfers milk, preserves both hands; volume unchanged on stale/locked target or no legal walk",function()
     local o=object(P.square,"Rain collector",5,4,"Milk","collector");local donor=item(P.main,"MilkBottle",3,2,"Milk")
@@ -735,21 +884,23 @@ check("foreign queued work is never force-stopped or removed; controller does no
     finishStock("ISTakeWaterAction");j:tick()
     assert(q().current==foreign and j.state=="cancelled" and b.fluid.amount==0 and j.count==0)
 end)
-check("MP perform is not success: wait for correct item AND finite world mirror; no repeat on timeout; distinct replacement never accepted",function()
+check("MP perform is not success: wait for the correct item; no repeat on timeout; distinct replacement never accepted",function()
     local o=object(P.square,"Rain",40,4,Fluid.Water,"collector");local a=item(P.main,"A",1,0);local b=item(P.main,"B",1,0)
     mp=true;local j=start(o,true,{a,b});finishStock("ISTakeWaterAction");j:tick()
     assert(j.count==0 and j.state=="running" and not q().current)
-    a.fluid.amount=1;j:tick();assert(j.count==0)
-    o.amount=3;j:tick();assert(j.count==1 and not q().current)
+    o.amount=3;j:tick();assert(j.count==0,"the fixture alone proves nothing")
+    a.fluid.amount=1;j:tick();assert(j.count==1 and not q().current)
     j:tick();finishStock("ISTakeWaterAction");j:tick()
     local impostor=item(P.main,"B",1,1);o.amount=2
-    local savedPrint,log=print,{}
-    print=function(line)log[#log+1]=line end
-    ms=5100;j:tick();j:tick()
-    print=savedPrint
+    traced(function(lines)
+        ms=5100;j:tick();j:tick()
+        local op,finish=find(lines,"OP-END"),find(lines,"END")
+        assert(op.ok==false and op.check=="vessel-litres" and op.expectedLitres=="1.00000" and op.vesselBefore=="0.00000"
+            and op.vesselNow=="0.00000" and op.fixtureBefore=="3.00000" and op.fixtureNow=="2.00000")
+        assert(finish.state=="cancelled" and finish.phase=="receipt" and finish.check=="vessel-litres"
+            and finish.submitted==true and finish.vessels==1 and finish.of==2 and finish.litres==1)
+    end)
     assert(j.state=="cancelled" and j.count==1 and j.liters==1 and impostor.id~=b.id and #moves==2)
-    assert(#log==1 and log[1]:find("event=terminal state=cancelled phase=receipt mode=MP reason=receipt-unconfirmed",1,true))
-    assert(log[1]:find("nativeQueued=true completed=1 total=2 confirmedLitres=1.000",1,true))
 end)
 check("part-filled stock worn recipients use one native fill, preserve exact gear and bag contents on success and cancellation",function()
     realProtection()
@@ -767,15 +918,15 @@ check("part-filled stock worn recipients use one native fill, preserve exact gea
         q().current:stop()
         P.limit=.15
         local j=start(o,true,{v})
-        assert(#q().queue==1 and q().current.item==v and W.near(q().current.waterUnit,.5))
+        assert(#q().queue==1 and q().current.item==v and close(q().current.waterUnit,.5))
         local before=o.amount
         finishStock("ISTakeWaterAction");j:tick()
-        assert(j.state=="finished" and j.count==1 and W.near(before-o.amount,.5) and W.near(v.fluid.amount,d[2]))
+        assert(j.state=="finished" and j.count==1 and close(before-o.amount,.5) and close(v.fluid.amount,d[2]))
         assert(v.id==id and v.holder==P.main and P.worn[v]==d[3] and P.primary==shovel)
         assert(spare.fluid.amount==d[2]-.5 and (not contents or v.bag.rows[1]==contents and contents.holder==v.bag))
         v.fluid.amount=d[2]-.5
         local n=start(o,true,{v});q().current:updateUse(.5);n:cancel();n:tick()
-        assert(n.state=="cancelled" and n.count==0 and #q().queue==0 and W.near(v.fluid.amount,d[2]-.25))
+        assert(n.state=="cancelled" and n.count==0 and #q().queue==0 and close(v.fluid.amount,d[2]-.25))
         assert(v.id==id and v.holder==P.main and P.worn[v]==d[3] and P.primary==shovel)
         assert(not contents or v.bag.rows[1]==contents and contents.holder==v.bag)
     end
@@ -786,16 +937,16 @@ check("exact held and attached roles: native capacity applies naturally, stale s
     local held=wearable("Held",2,0,"held");local attached=wearable("Attached",2,0,0)
     P.limit=.15
     local j=start(o,true,{held})
-    assert(W.near(q().current.waterUnit,.5))
+    assert(close(q().current.waterUnit,.5))
     finishStock("ISTakeWaterAction");j:tick()
-    assert(j.state=="finished" and W.near(held.fluid.amount,.5) and P.secondary==held)
+    assert(j.state=="finished" and close(held.fluid.amount,.5) and P.secondary==held)
     local n=start(o,true,{attached})
     -- Attachment alone is not native isEquipped/isEquippedClothing.
-    assert(W.near(q().current.waterUnit,.15) and P.attached[attached]==0)
+    assert(close(q().current.waterUnit,.15) and P.attached[attached]==0)
     finishStock("ISTakeWaterAction");n:tick()
-    assert(n.state=="finished" and W.near(attached.fluid.amount,.15) and P.attached[attached]==0)
+    assert(n.state=="finished" and close(attached.fluid.amount,.15) and P.attached[attached]==0)
     local stale=start(o,true,{attached});P.attached[attached]=nil;stale:tick();stale:tick()
-    assert(stale.state=="cancelled" and W.near(attached.fluid.amount,.15) and #q().queue==0)
+    assert(stale.state=="cancelled" and close(attached.fluid.amount,.15) and #q().queue==0)
     P.attached[attached]=0
     mp=true
     local swap=start(o,true,{attached});finishStock("ISTakeWaterAction")
