@@ -389,3 +389,20 @@ Played on a disposable dedicated 42.22.2 server as an ordinary non-admin player.
 Single player: open and eat, canned milk, sardines, refill (a ration was opened and the game auto-drank it; reporting that as done came afterwards). A paused game no longer uses up a step's time. After the review fixes to queue handling, opening, refilling and draining bottles were replayed on the server.
 
 Not exercised live: controller, split screen, masks, automatic intake, vehicles, gear staging, huge buildings, other modded menus. A refitted dispenser may show a stale amount on a lagging client until the area reloads; the server's amount is right, and the stock actions do the same.
+
+## Storage from start to finish (November 25, 2026)
+
+`python3 tools/verify.py --game ...` passes every suite in Lua 5.1 and in the installed 42.22.2 Kahlua. New suites: `auto-put-away` (what counts as brought home, what stops it, vehicles, a new character, turning it off), `storage-view` (titles, icons, item tooltips with and without NeatUI and another tooltip mod, Show me), `storage-page` (the Storage page with the real picker). `job-engine` drives the ranking through whole jobs: kinds over where things lie, one item's own place, anything else, first and last, full places, carried bags, keys, kept kinds in rooms, bags and cans, `only` and `near`.
+
+Played in isolated 42.22.2 clients, stock and NeatUI Inventory, single player and a disposable dedicated server as an ordinary player through a relay adding 60-90 ms each way:
+
+| Path | Observed |
+| --- | --- |
+| Item menu: Belongs in Crate | One click labelled the crate for nails; the title read "Crate: Nails", the icon took the mark, the tooltip said "Goes to Crate" |
+| Container icon menu: Label with the categories inside | Labelled for its two categories; the title and NeatUI's section header followed |
+| Storage page | Typing a name and clicking the picker kept both; the name became the game's container name, also on the server; First, Last and Anything else saved |
+| Show me | Homing arrow and outline; the outline stayed a moment on arrival |
+| Put Away | 9 of 9 on the server into Drawer, Cupboard and Tool table; a kept hammer, the key ring and a key stayed |
+| Automatic put-away | Walking 30 tiles away and back with new loot: after three still seconds only the new things went (canned beans, a saw, eight sheets to the catch-all filled last); moving stopped it |
+
+Not exercised live: controller, split screen, a vehicle trip, crafting windows open during an automatic start, other tooltip mods.

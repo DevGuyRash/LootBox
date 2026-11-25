@@ -228,7 +228,9 @@ function Storage:placesFor(item, pass, destination, mine)
         local own, loose = entry.storage.carried and mine, entry.storage.carried and entry.closeness > 1
         -- Loot waiting in a carried bag goes on to storage that stays put, not to another bag.
         local waiting = placed and placed % 1 ~= 0 and entry.storage.key:sub(1, 4) == "bag:"
-        if (not placed or entry.closeness < placed) and not (loose and (mine or placed)) and not waiting then
+        -- A key opens something; only storage labelled for keys takes one.
+        local key = entry.closeness == 3 and instanceof(item, "Key")
+        if (not placed or entry.closeness < placed) and not (loose and (mine or placed)) and not waiting and not key then
             result[#result + 1] = entry
             if own then break end
         end

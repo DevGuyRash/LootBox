@@ -204,3 +204,13 @@ Asked of Claude later in November 2026:
 "so something really hard to get right too specifically for this was the client-side logic of locating when you hit, like, for example, open and eat till full, or open and drink till full, or when you try to refill a jug that's already connected to a water dispenser. When the single action, because I guess that it spawns a new item technically, and I needed single source of truth reusable logic that can locate that item in client side. I wanted to reuse that same logic for multiple things, such as all of those."
 
 "Also, if you can make the clean option, which, searches for trash cans or remembers them and all that, if you can do the same passes over those, as well as the overall sorting and the compact and whatnot, and all, basically the entire thing. This is a code sweep as well as an abstract logic sweep, questioning why things were even done like that if there's a better way to do it."
+
+## Storage from start to finish
+
+Asked of Claude after the result-finding sweep:
+
+"okay and we have revamped the UX too with using lootbox, labeling containers and items, auto dispensing to them, everything overall and not just some parts?"
+
+Claude answered that it had not, listed what was missing and proposed six parts: showing what belongs on titles, icons and tooltips; one-click labelling by kind, category or contents, with copy and paste; one item menu for where it goes, picking up and keeping, for one or every one; manageable storage with names, order, overflow, a catch-all and "show me"; a Put Away button with a preview; and automatic put-away, off by default. The user answered:
+
+"Yes, all of it"

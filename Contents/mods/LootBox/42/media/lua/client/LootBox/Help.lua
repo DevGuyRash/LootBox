@@ -29,7 +29,7 @@ Help.topics = {
         request = request("room", "inventory") },
     { id = "sort", title = "Put things away", summary = "Tell LootBox once where things go. One button does the rest.",
         steps = {
-            "Open a container, right-click something in it and tick Belongs here. Every one of that kind now goes there. For many at once, right-click the container and use Belongs here, Label as what's inside.",
+            "Open a container, right-click something in it and tick Belongs here. Every one of that kind now goes there. For many at once, right-click the container and use Belongs here, Label with the categories inside.",
             "The container's title and icon say what belongs in it. Hover any item to see where it goes.",
             "Carry your loot home and press Put Away in the inventory window. Hover the button first to see what goes where.",
             "Right-click an item and open Where it goes to choose among all your storage, for its whole category, or for this one item only.",
