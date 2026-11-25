@@ -3,11 +3,12 @@ local Pour = {}
 local MAX_ITEMS, MAX_CONTAINERS, MAX_DEPTH = 4096, 48, 8
 local MAX_TARGETS, MAX_CHOICE_WORK = 512, 8192
 
+local function index(object, key) return object[key] end
 local function call(object, method, arg, second)
     if not object then return nil end
-    local fn = object[method]
-    if not fn then return nil end
-    local ok, value
+    local ok, fn = pcall(index, object, method)
+    if not ok or not fn then return nil end
+    local value
     if arg == nil then ok, value = pcall(fn, object)
     elseif second == nil then ok, value = pcall(fn, object, arg)
     else ok, value = pcall(fn, object, arg, second) end
