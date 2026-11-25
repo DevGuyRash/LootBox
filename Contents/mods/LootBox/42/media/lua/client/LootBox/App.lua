@@ -7,6 +7,8 @@ local Setups = require "LootBox/Setups"
 local Recovery = require "LootBox/Recovery"
 local TillFull = require "LootBox/TillFull"
 local AutoNeeds = require "LootBox/AutoNeeds"
+local Describe = require "LootBox/Describe"
+local Log = require "LootBox/Log"
 require "LootBox/CompletionHUD"
 
 local App = {}
@@ -27,9 +29,12 @@ end
 local function currentPreferences()
     if not preferences then
         local data, err = Store.load("LootBox/preferences")
-        preferences, preferencesError = Setups.preferences(data or {})
-        preferencesError = err or preferencesError
-        if not preferences then preferences = copy(Setups.defaults) end
+        local repaired
+        preferences, repaired = Setups.preferences(data or {})
+        preferencesError = err
+        if err then Log.warn(nil, "preferences-unreadable", "error", err) end
+        if #repaired > 0 then Log.trace(nil, "preferences-repaired", "keys", table.concat(repaired, ",")) end
+        Log.detailed = preferences.detailedLog
     end
     return preferences, preferencesError
 end
@@ -39,6 +44,9 @@ function App.getPreferences()
     return copy(options), err
 end
 
+-- One value without copying the table; safe to call every frame.
+function App.preference(key) return (currentPreferences())[key] end
+
 function App.reviewPreference(request, binReview)
     local key = binReview and "confirmBinReviews"
         or (request and request.destination and request.destination.kind == "trash" and "confirmQuickCleanup" or "confirmQuickMoves")
@@ -47,8 +55,8 @@ function App.reviewPreference(request, binReview)
 end
 
 function App.setPreferences(patch)
-    local candidate, err = App.getPreferences()
-    if err then return nil, err end
+    local candidate = App.getPreferences()
+    local err
     if type(patch) ~= "table" then return nil, "Choose interface preferences to change" end
     for key, value in pairs(patch) do
         if Setups.defaults[key] == nil or type(value) ~= "boolean" then
@@ -65,7 +73,9 @@ function App.setPreferences(patch)
                 if instance.autoNeeds then instance.autoNeeds.stock, instance.autoNeeds.nativeAttempt, instance.autoNeeds.blocked = nil, nil, {} end
             end
         end
-        preferences = candidate
+        preferences, preferencesError = candidate, nil
+        Log.detailed = candidate.detailedLog
+        for key, value in pairs(patch) do Log.info(nil, "preference", key, value) end
     end
     return ok, err
 end
@@ -73,33 +83,45 @@ end
 local function initialize()
     if definitions then return end
     local data, err = Store.load("LootBox/categories")
-    if err then loadError = err end
-    if data ~= nil and (type(data) ~= "table" or type(data.categories) ~= "table"
-        or (data.nextId ~= nil and (type(data.nextId) ~= "number" or data.nextId < 1 or data.nextId % 1 ~= 0))) then
-        loadError = "Invalid saved category document"
-        data = nil
-    end
-    definitions = data and data.categories or {}
-    nextCategoryId = data and data.nextId or 1
+    if err then loadError = err; Log.warn(nil, "categories-unreadable", "error", err) end
+    if type(data) ~= "table" then data = {} end
+    local dropped
+    graph, dropped = Categories.salvage(type(data.categories) == "table" and data.categories or {})
+    definitions = graph:list()
+    for _, note in ipairs(dropped or {}) do Log.warn(nil, "category-repaired", "note", note) end
+    nextCategoryId = type(data.nextId) == "number" and data.nextId >= 1 and data.nextId % 1 == 0 and data.nextId or 1
     for _, definition in ipairs(definitions) do
-        local suffix = type(definition.id) == "string" and tonumber(definition.id:match("^custom:(%d+)$"))
+        local suffix = tonumber(definition.id:match("^custom:(%d+)$"))
         if suffix and suffix >= nextCategoryId then nextCategoryId = suffix + 1 end
     end
-    graph, err = Categories.new(definitions)
-    if not graph then loadError = err; definitions = {}; graph = Categories.new({}) end
 end
 
+local nativeCatalog
+local merged
+-- The game's own items never change within a session; custom categories do.
 function App.catalog()
     initialize()
-    local catalog, err = Catalog.read()
-    if not catalog then return nil, err end
+    if merged then return merged end
+    if not nativeCatalog then
+        local err
+        nativeCatalog, err = Catalog.read()
+        if not nativeCatalog then return nil, err end
+    end
+    merged = { items = nativeCatalog.items, categories = {}, error = loadError }
+    for index, category in ipairs(nativeCatalog.categories) do merged.categories[index] = category end
     for _, definition in ipairs(graph:list()) do
         definition.kind = "custom"
-        catalog.categories[#catalog.categories + 1] = definition
+        merged.categories[#merged.categories + 1] = definition
     end
-    catalog.error = loadError
-    return catalog
+    return merged
 end
+
+function App.customCategories()
+    initialize()
+    return graph:list()
+end
+
+function App.categoryName(id) return Describe.category(id, App.category(id)) end
 
 function App.category(id)
     initialize()
@@ -109,18 +131,14 @@ function App.category(id)
 end
 
 local function saveDefinitions(nextDefinitions)
-    if loadError then return nil, "Category storage needs repair: " .. loadError end
-    for _, instance in pairs(sessions) do
-        local state = instance:status().state
-        if state == "running" or state == "cancelling" or state == "pausing" or state == "needs_review" or state == "paused" then return nil, "Finish or cancel the current job before editing categories" end
-    end
     local nextGraph, err = Categories.new(nextDefinitions)
     if not nextGraph then return nil, err end
     local ok
     ok, err = Store.save("LootBox/categories", { categories = nextDefinitions, nextId = nextCategoryId })
     if not ok then return nil, err end
-    definitions, graph = copy(nextDefinitions), nextGraph
+    definitions, graph, merged, loadError = copy(nextDefinitions), nextGraph, nil, nil
     for _, instance in pairs(sessions) do instance.world.graph = graph end
+    Log.info(nil, "categories", "count", #definitions)
     return true
 end
 
@@ -144,27 +162,29 @@ function App.saveCategory(definition)
     return candidate.id
 end
 
+local function without(list, id)
+    local result = {}
+    for _, value in ipairs(list or {}) do if value ~= id then result[#result + 1] = value end end
+    return result
+end
+
+-- Deleting a category also removes it wherever this session can see it used.
 function App.deleteCategory(id)
     initialize()
-    for _, entry in ipairs(definitions) do
-        for _, included in ipairs(entry.includes) do
-            if included == id then return nil, "Used by " .. entry.name .. "; remove that inclusion first" end
-        end
-    end
-    for _, instance in pairs(sessions) do
-        for _, ids in pairs(instance.state.containerLabels) do
-            for _, label in ipairs(ids) do if label == id then return nil, "Still used by a container label" end end
-        end
-        for _, ids in pairs(instance.state.itemLabels) do
-            for _, label in ipairs(ids) do if label == id then return nil, "Still used by an item label" end end
-        end
-    end
     local nextDefinitions, found = {}, false
     for _, entry in ipairs(definitions) do
-        if entry.id ~= id then nextDefinitions[#nextDefinitions + 1] = copy(entry) else found = true end
+        if entry.id == id then found = true
+        else
+            local kept = copy(entry)
+            kept.includes = without(kept.includes, id)
+            nextDefinitions[#nextDefinitions + 1] = kept
+        end
     end
     if not found then return nil, "Unknown custom category" end
-    return saveDefinitions(nextDefinitions)
+    local ok, err = saveDefinitions(nextDefinitions)
+    if not ok then return nil, err end
+    for _, instance in pairs(sessions) do instance:forgetCategory(id) end
+    return true
 end
 
 local function escaped(text)
@@ -175,93 +195,128 @@ local function escaped(text)
     return hex:gsub(string.rep(".", 96), "%0/"):gsub("/$", "")
 end
 
-local function scope(player)
-    local world = getWorld():getWorld()
-    local identity = tostring(world) .. ":" .. tostring(player:getUsername()) .. ":" .. player:getPlayerNum()
-    return "LootBox/world/" .. escaped(identity)
+local function identityOf(player)
+    return tostring(getWorld():getWorld()) .. ":" .. tostring(player:getUsername()) .. ":" .. player:getPlayerNum()
 end
 
-local function stateError(state)
-    if type(state) ~= "table" then return "Invalid saved world document" end
+-- Keep every readable entry. One damaged value must not cost the player the rest.
+local function repairState(state)
+    local notes = {}
+    local function note(text) notes[#notes + 1] = text end
+    if type(state) ~= "table" then return {}, { "unreadable document" } end
     for _, name in ipairs({ "containerLabels", "itemLabels" }) do
-        if state[name] ~= nil and type(state[name]) ~= "table" then return "Invalid saved " .. name end
-        for key, labels in pairs(state[name] or {}) do
-            if type(key) ~= "string" or type(labels) ~= "table" then return "Invalid saved " .. name end
-            local count = 0
-            for index, id in pairs(labels) do
-                if type(index) ~= "number" or index < 1 or index % 1 ~= 0 or index > #labels
-                    or type(id) ~= "string" or not (id:match("^native:.+") or id:match("^custom:.+")) then return "Invalid saved label list" end
-                count = count + 1
+        local clean = {}
+        if state[name] ~= nil and type(state[name]) ~= "table" then note(name .. " unreadable") end
+        for key, labels in pairs(type(state[name]) == "table" and state[name] or {}) do
+            local list = {}
+            if type(labels) == "table" then
+                for _, id in ipairs(labels) do
+                    if type(id) == "string" and (id:match("^native:.+") or (id:match("^custom:.+") and App.category(id))) then list[#list + 1] = id
+                    else note(name .. " dropped " .. tostring(id)) end
+                end
             end
-            if count ~= #labels then return "Invalid saved label list" end
+            if type(key) == "string" and #list > 0 then clean[key] = list end
         end
+        state[name] = clean
     end
-    if state.keep ~= nil and type(state.keep) ~= "table" then return "Invalid saved Keep flags" end
-    for key, flag in pairs(state.keep or {}) do
-        if type(key) ~= "string" or type(flag) ~= "boolean" then return "Invalid saved Keep flag" end
+    local keep = {}
+    for key, flag in pairs(type(state.keep) == "table" and state.keep or {}) do
+        if type(key) == "string" and flag == true then keep[key] = true end
     end
-    if state.trash ~= nil and type(state.trash) ~= "table" then return "Invalid saved trash memory" end
-    for key, bin in pairs(state.trash or {}) do
-        if type(key) ~= "string" or type(bin) ~= "table" then return "Invalid saved trash can" end
-        for _, coordinate in ipairs({ "x", "y", "z" }) do
-            if type(bin[coordinate]) ~= "number" then return "Invalid saved trash coordinates" end
+    state.keep = keep
+    local trash = {}
+    for key, bin in pairs(type(state.trash) == "table" and state.trash or {}) do
+        if type(key) == "string" and type(bin) == "table" and type(bin.x) == "number" and type(bin.y) == "number" and type(bin.z) == "number" then trash[key] = bin
+        else note("trash can dropped") end
+    end
+    state.trash = trash
+    local vehicle = state.vehicle
+    if vehicle ~= nil then
+        local valid = type(vehicle) == "table" and type(vehicle.script) == "string"
+        for _, key in ipairs({ "id", "x", "y", "z" }) do valid = valid and type(vehicle[key]) == "number" end
+        if not valid then state.vehicle = nil; note("vehicle dropped") end
+    end
+    local list = state.checklist
+    if list ~= nil then
+        local clean = { ids = {}, types = {}, all = false }
+        if type(list) == "table" then
+            for _, id in ipairs(type(list.ids) == "table" and list.ids or {}) do
+                if type(id) == "string" and (id:match("^native:.+") or App.category(id)) then clean.ids[#clean.ids + 1] = id end
+            end
+            for _, fullType in ipairs(type(list.types) == "table" and list.types or {}) do
+                if type(fullType) == "string" and fullType ~= "" then clean.types[#clean.types + 1] = fullType end
+            end
         end
+        state.checklist = clean
     end
-    if state.vehicle ~= nil then
-        if type(state.vehicle) ~= "table" then return "Invalid saved vehicle" end
-        for _, key in ipairs({ "id", "x", "y", "z" }) do
-            if type(state.vehicle[key]) ~= "number" then return "Invalid saved vehicle " .. key end
-        end
-        if type(state.vehicle.script) ~= "string" then return "Invalid saved vehicle script" end
-    end
-    if state.checklist ~= nil then
-        if type(state.checklist) ~= "table" or type(state.checklist.ids) ~= "table" or type(state.checklist.types) ~= "table" then return "Invalid saved checklist" end
-        for _, id in ipairs(state.checklist.ids) do if type(id) ~= "string" then return "Invalid saved checklist category" end end
-        for _, fullType in ipairs(state.checklist.types) do if type(fullType) ~= "string" then return "Invalid saved checklist item" end end
-    end
+    return state, notes
+end
+
+-- A username can settle after the player object exists, so the identity is
+-- checked each time and only its encoding is remembered.
+local paths = {}
+local function pathOf(player)
+    local identity = identityOf(player)
+    if not paths[identity] then paths[identity] = "LootBox/world/" .. escaped(identity) end
+    return paths[identity]
 end
 
 function App.get(playerIndex, passiveNeeds)
     initialize()
     local player = getSpecificPlayer(playerIndex or 0)
     if not player then return nil, "Enter a game to move or label items" end
-    local path = scope(player)
+    local path = pathOf(player)
     local existing = sessions[playerIndex or 0]
     if existing and existing.player == player and existing.path == path then
         if not passiveNeeds then existing.needsOnly = false end
         return existing
     end
     if existing then existing:cancel(true) end
-    local state, err = Store.load(path)
-    if state ~= nil then
-        local invalid = stateError(state)
-        if invalid then state, err = nil, invalid end
+    local loaded, err = Store.load(path)
+    local state, notes = {}, {}
+    if loaded ~= nil then state, notes = repairState(loaded) else state = repairState({}) end
+    local instance = setmetatable({ player = player, state = state, path = path, needsOnly = passiveNeeds == true }, Instance)
+    if err then
+        instance.warning = err
+        Log.warn(nil, "world-data-unreadable", "path", path, "error", err)
     end
-    if not state then state = {} end
-    for _, key in ipairs({ "containerLabels", "itemLabels", "keep", "trash" }) do
-        if type(state[key]) ~= "table" then
-            if state[key] ~= nil then err = "Invalid saved " .. key end
-            state[key] = {}
-        end
-    end
-    local instance = setmetatable({ player = player, state = state, path = path, error = err, needsOnly = passiveNeeds == true }, Instance)
+    for _, text in ipairs(notes) do Log.warn(nil, "world-data-repaired", "note", text) end
     instance.world = World.new(player, state)
     instance.world.graph = graph
-    instance.jobs = Jobs.new(player, instance.world, graph)
     instance.recovery = Recovery.new(player, instance.world, path)
-    instance.world.recovery, instance.jobs.recovery = instance.recovery, instance.recovery
+    instance.world.recovery = instance.recovery
+    instance.jobs = instance:newRunner()
     sessions[playerIndex or 0] = instance
+    Log.info(nil, "session", "player", Log.player(player), "storageLabels", instance:labelCount(), "categories", #definitions,
+        "knownBins", instance.world.hasKnownBins and instance.world:hasKnownBins(), "vehicle", state.vehicle and state.vehicle.script)
     return instance
 end
 
 function App.peek(playerIndex)
     local instance = sessions[playerIndex or 0]
-    if instance and instance.player == getSpecificPlayer(playerIndex or 0) and instance.path == scope(instance.player) then return instance end
+    if instance and instance.player == getSpecificPlayer(playerIndex or 0) and instance.path == pathOf(instance.player) then return instance end
 end
 
+function Instance:newRunner()
+    local runner = Jobs.new(self.player, self.world, graph)
+    runner.recovery = self.recovery
+    return runner
+end
+
+function Instance:labelCount()
+    local count = 0
+    for _ in pairs(self.state.containerLabels) do count = count + 1 end
+    return count
+end
+
+-- A failed write is reported and retried with the next change. It never blocks work.
 function Instance:persist()
-    if self.error then return nil, self.error end
-    return Store.save(self.path, self.state)
+    local ok, err = Store.save(self.path, self.state)
+    if not ok then
+        self.warning = "Could not save LootBox data: " .. tostring(err)
+        Log.warn(nil, "save-failed", "path", self.path, "error", err)
+    else self.warning = nil end
+    return ok, err
 end
 
 function Instance:labels(container)
@@ -273,9 +328,8 @@ local function validLabels(ids)
     if type(ids) ~= "table" then return nil, "Labels must be a list" end
     local result, seen = {}, {}
     for _, id in ipairs(ids) do
-        if type(id) ~= "string" or (not id:match("^native:.+") and not App.category(id)) then
-            return nil, "Unknown category label" end
-        if not seen[id] then result[#result + 1] = id; seen[id] = true end
+        local known = type(id) == "string" and (id:match("^native:.+") or App.category(id))
+        if known and not seen[id] then result[#result + 1] = id; seen[id] = true end
     end
     return result
 end
@@ -286,12 +340,10 @@ function Instance:setLabels(container, ids)
     local labels
     labels, err = validLabels(ids)
     if not labels then return nil, err end
-    local old = self.state.containerLabels[key]
-    self.state.containerLabels[key] = labels
-    local ok
-    ok, err = self:persist()
-    if not ok then self.state.containerLabels[key] = old else self.world:discover() end
-    return ok, err
+    self.state.containerLabels[key] = #labels > 0 and labels or nil
+    self.world:discover()
+    Log.info(nil, "storage-label", "container", Log.container(container, self.player), "labels", table.concat(labels, "+"))
+    return self:persist()
 end
 
 function Instance:itemLabels(item)
@@ -302,21 +354,16 @@ function Instance:setItemLabels(item, ids)
     local labels, err = validLabels(ids)
     if not labels then return nil, err end
     local key = self.world:itemId(item)
-    local old = self.state.itemLabels[key]
-    self.state.itemLabels[key] = labels
-    local ok
-    ok, err = self:persist()
-    if not ok then self.state.itemLabels[key] = old end
-    return ok, err
+    self.state.itemLabels[key] = #labels > 0 and labels or nil
+    Log.info(nil, "item-label", "item", Log.item(item, self.player), "labels", table.concat(labels, "+"))
+    return self:persist()
 end
 
 function Instance:protect(item, value)
     local key = self.world:itemId(item)
-    local old = self.state.keep[key]
     self.state.keep[key] = value == true or nil
-    local ok, err = self:persist()
-    if not ok then self.state.keep[key] = old end
-    return ok, err
+    Log.info(nil, "keep", "item", Log.item(item, self.player), "on", value == true)
+    return self:persist()
 end
 
 function Instance:isProtected(item) return self.world:protected(item) end
@@ -331,30 +378,60 @@ function Instance:getChecklist()
 end
 function Instance:setChecklist(filter)
     if type(filter) ~= "table" or type(filter.ids) ~= "table" or type(filter.types) ~= "table" then
-        return nil, "Choose categories or item types for the checklist" end
+        return nil, "Choose categories or item types for the loot list" end
     local labels, err = validLabels(filter.ids)
     if not labels then return nil, err end
     local types, seen = {}, {}
     for _, fullType in ipairs(filter.types) do
-        if type(fullType) ~= "string" or fullType == "" then return nil, "Invalid item type in checklist" end
-        if not seen[fullType] then types[#types + 1] = fullType; seen[fullType] = true end
+        if type(fullType) == "string" and fullType ~= "" and not seen[fullType] then types[#types + 1] = fullType; seen[fullType] = true end
     end
-    local old = self.state.checklist
-    self.state.checklist = { ids = labels, types = types, all = filter.all == true }
-    local ok
-    ok, err = self:persist()
-    if not ok then self.state.checklist = old end
-    return ok, err
+    self.state.checklist = { ids = labels, types = types, all = false }
+    Log.info(nil, "loot-list", "categories", table.concat(labels, "+"), "types", #types)
+    return self:persist()
+end
+function Instance:onChecklist(kind, key)
+    for _, value in ipairs((self.state.checklist or {})[kind] or {}) do if value == key then return true end end
+    return false
+end
+function Instance:toggleChecklist(kind, key)
+    local list = self:getChecklist()
+    local kept = without(list[kind], key)
+    if #kept == #list[kind] then kept[#kept + 1] = key end
+    list[kind] = kept
+    return self:setChecklist(list)
+end
+function Instance:forgetCategory(id)
+    for _, field in ipairs({ "containerLabels", "itemLabels" }) do
+        for key, labels in pairs(self.state[field]) do
+            local kept = without(labels, id)
+            self.state[field][key] = #kept > 0 and kept or nil
+        end
+    end
+    if self.state.checklist then self.state.checklist.ids = without(self.state.checklist.ids, id) end
+    local data = self:getSetups()
+    local document = self.setups
+    if document and data then
+        local function clean(request)
+            request.filter.ids = without(request.filter.ids, id)
+            request.sourceLabels = without(request.sourceLabels, id)
+            if request.destination.labels then request.destination.labels = without(request.destination.labels, id) end
+        end
+        for _, preset in ipairs(document.presets) do clean(preset.setup) end
+        if document.lastSetup then clean(document.lastSetup) end
+        Store.save(self.path .. "/setups", document)
+    end
+    return self:persist()
 end
 
 local function setupDocument(instance)
     if not instance.setups then
         local data, err = Store.load(instance.path .. "/setups")
-        instance.setups, instance.setupsError = Setups.document(data or {})
-        instance.setupsError = err or instance.setupsError
-        if not instance.setups then instance.setups = { nextId = 1, presets = {} } end
+        local dropped
+        instance.setups, dropped = Setups.document(data or {})
+        if err then Log.warn(nil, "presets-unreadable", "error", err) end
+        for _, note in ipairs(dropped) do Log.warn(nil, "preset-repaired", "note", note) end
     end
-    return instance.setups, instance.setupsError
+    return instance.setups
 end
 
 local function saveSetups(instance, candidate)
@@ -370,7 +447,6 @@ end
 
 function Instance:saveSetup(name, request, id)
     local data, err = setupDocument(self)
-    if err then return nil, err end
     local candidate = copy(data)
     id, err = Setups.add(candidate, name, request, id)
     if not id then return nil, err end
@@ -381,22 +457,19 @@ end
 
 function Instance:deleteSetup(id)
     local data, err = setupDocument(self)
-    if err then return nil, err end
     local candidate, found = copy(data), false
     for index, preset in ipairs(candidate.presets) do
         if preset.id == id then table.remove(candidate.presets, index); found = true; break end
     end
-    if not found then return nil, "Saved setup is no longer available" end
+    if not found then return nil, "That preset no longer exists" end
     return saveSetups(self, candidate)
 end
 
 function Instance:rememberSetup(request)
     local options, err = App.getPreferences()
-    if err then return nil, err end
     if not options.rememberLastSetup then return true end
     local data
-    data, err = setupDocument(self)
-    if err then return nil, err end
+    data = setupDocument(self)
     local setup
     setup, err = Setups.request(request)
     if not setup then return nil, err end
@@ -408,14 +481,9 @@ end
 function Instance:resolveSetup(setup, context)
     local request, err = Setups.request(setup)
     if not request then return nil, err end
-    local catalog
-    catalog, err = App.catalog()
-    if not catalog then return nil, err end
-    local available = {}
-    for _, category in ipairs(catalog.categories) do available[category.id] = true end
     for _, ids in ipairs({ request.filter.ids, request.sourceLabels, request.destination.labels }) do
         for _, id in ipairs(ids) do
-            if not available[id] then return nil, "Saved setup category is unavailable: " .. id end
+            if id:match("^custom:") and not App.category(id) then return nil, "This preset uses a category that no longer exists" end
         end
     end
     context = context or {}
@@ -440,20 +508,17 @@ end
 
 function Instance:loadSetup(id, context)
     local data, err = setupDocument(self)
-    if err then return nil, err end
     for _, preset in ipairs(data.presets) do
         if preset.id == id then return self:resolveSetup(preset.setup, context) end
     end
-    return nil, "Saved setup is no longer available"
+    return nil, "That preset no longer exists"
 end
 
 function Instance:lastSetup(context)
     local options, err = App.getPreferences()
-    if err then return nil, err end
     if not options.rememberLastSetup then return nil end
     local data
-    data, err = setupDocument(self)
-    if err then return nil, err end
+    data = setupDocument(self)
     if not data.lastSetup then return nil end
     return self:resolveSetup(data.lastSetup, context)
 end
@@ -463,220 +528,298 @@ function Instance:currentContainer()
     local loot = getPlayerLoot(self.player:getPlayerNum())
     return loot and loot.inventoryPane and loot.inventoryPane.inventory or nil
 end
+-- Planning never disturbs the job in progress. When one exists a second
+-- runner plans, and takes over only once the player starts that plan.
+function Instance:planner()
+    local status = self.jobs:status()
+    if not status.hasJob and status.canPreview ~= false then return self.jobs end
+    self.spare = self.spare or self:newRunner()
+    return self.spare
+end
+
 function Instance:preview(request)
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job" end
-    if self.error or loadError then return nil, self.error or loadError end
-    local recovery = self.recovery:status()
-    if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
-    self.jobs.graph = graph
-    return self.jobs:preview(request)
+    local runner = self:planner()
+    runner.graph = graph
+    local plan, err = runner:preview(request)
+    if plan then plan.owner, plan.label = runner, Describe.title(request, App.category)
+    else Log.info(request.interaction, "PLAN-REFUSED", "reason", err, "request", Log.request(request)) end
+    return plan, err
 end
+
 function Instance:previewCondense()
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job" end
-    if self.error or loadError then return nil, self.error or loadError end
-    local recovery = self.recovery:status()
-    if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before condensing" end
-    local preferences, err = App.getPreferences()
-    if err then return nil, err end
-    self.jobs.graph = graph
-    return self.jobs:previewCondense({rebalance = preferences.condenseRebalance,
-        useUnequipped = preferences.condenseUseUnequipped, nested = preferences.condenseNested})
+    local options = App.getPreferences()
+    local runner = self:planner()
+    if runner ~= self.jobs and self.jobs:status().canPause then return nil, "Pause or finish the current job before condensing" end
+    runner.graph = graph
+    local plan, err = runner:previewCondense({ rebalance = options.condenseRebalance,
+        useUnequipped = options.condenseUseUnequipped, nested = options.condenseNested })
+    if plan then plan.owner, plan.label = runner, "Condense bags" end
+    return plan, err
 end
-function Instance:start(plan, options)
-    self.replacement, self.replacementProblem = nil, nil
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job" end
-    local recovery = self.recovery:status()
-    if recovery.pending then return nil, recovery.reason or "Recover staged personal gear before starting another job" end
-    local ok, err = self:persist()
-    if not ok then return nil, err end
-    local chosen = {}
-    for key, value in pairs(options or {}) do chosen[key] = value end
-    if chosen.reviewBins == nil then chosen.reviewBins = App.reviewPreference(nil, true) end
-    local started, problem = self.jobs:start(plan, chosen)
-    if started then self.consumption = nil end
-    return started, problem
-end
-function Instance:startPour(source,targets,options,clickedReceiver)
-    if self.error or loadError or self.replacement or self.recovery:status().pending then return nil,"Finish or recover the current job before pouring." end
-    local job=self.jobs:status()
-    if job.hasJob or not job.canPreview or self.consumption and self.consumption:isBusy() then return nil,"Finish the current action before pouring." end
-    local Pour=require "LootBox/Pour"
-    local function context(shelf)
-        local p,err=currentPreferences()
-        if err or not p.contextMenus or not p.inventoryShortcuts or self.error or self.replacement
-            or self.recovery:status().pending then return nil end
-        return Pour.options(p),Pour.displayed(self.player:getPlayerNum(),shelf)
-    end
-    local controller,why=Pour.new(self.player,self.world,source,targets,options,context,clickedReceiver)
-    if not controller then return nil,why end
-    self.consumption=controller
-    controller:tick()
-    if not controller:isBusy() and controller.state~="finished" then return nil,controller.reason end
-    return true
-end
-function Instance:worldPour(anchor,take,entries,origin,options,loan)
-    local job=self.jobs:status()
-    if self.error or loadError or self.replacement or self.recovery:status().pending or job.hasJob
-        or not job.canPreview or self.consumption and self.consumption:isBusy() then return nil,"Finish or recover the current action first." end
-    local function enabled()
-        local prefs,why=currentPreferences()
-        if why or not prefs or not prefs.contextMenus or not prefs[origin] or self.replacement or self.error or self.recovery:status().pending then return false end
-        local now=require("LootBox/Pour").options(prefs)
-        return now.pourFillOrder==options.pourFillOrder and now.pourFillScope==options.pourFillScope
-    end
-    if not enabled() then return nil,"World fluid shortcuts or fill preferences changed." end
-    local controller,why
-    if loan then
-        if not take or origin~="inventoryShortcuts" or #entries~=1 or loan.a~=anchor or loan.lease.entry~=entries[1] then
-            return nil,"The selected fixture or receiver changed."
-        end
-        controller,why=require("LootBox/WorldLootFill").new(self.player,self.world,loan,enabled)
-    else
-        controller,why=require("LootBox/WorldFluidJob").new(self.player,self.world,anchor,take,entries,enabled)
-    end
-    if not controller then return nil,why end
-    self.consumption=controller
-    controller:tick()
-    if controller.state~="running" and controller.state~="finished" then return nil,controller.reason end
-    return true
-end
-function Instance:refillDispenser(anchor, donor, bottle, origin)
-    origin=origin=="inventoryShortcuts" and origin or "worldShortcuts"
-    if self.error or loadError or self.replacement or self.recovery:status().pending then
-        return nil,"Finish or recover the current job before refilling."
-    end
-    local job=self.jobs:status()
-    if job.hasJob or not job.canPreview or self.consumption and self.consumption:isBusy() then
-        return nil,"Finish the current action before refilling."
-    end
-    local function allowed()
-        local prefs,problem=currentPreferences()
-        return not problem and prefs and prefs.contextMenus==true and prefs[origin]==true
-            and not self.error and not self.replacement and not self.recovery:status().pending
-    end
-    if not allowed() then return nil,"Dispenser shortcuts are disabled." end
-    local feature=require "LootBox/MountedDispenser"
-    local ok,controller,why=pcall(feature.new,self.player,self.world,anchor,donor,bottle,allowed)
-    if not ok then return nil,"The game did not expose the selected dispenser." end
-    if not controller then return nil,why end
-    self.consumption=controller
-    controller:tick()
-    if not controller:isBusy() and controller.state~="finished" then return nil,controller.reason end
+
+local function quiet(controller) return controller and controller.automatic == true end
+
+-- Background sips yield to anything the player asks for.
+local function clearConsumption(self)
+    local current = self.consumption
+    if not current or not current:isBusy() then return true end
+    if quiet(current) then current:cancel(true) end
+    if current:isBusy() then return nil, (current.name or "Til Full") .. " is still finishing" end
     return true
 end
 
-function Instance:tillFull(items, kind, openingRecipe, menuSource)
-    if self.error or loadError then return nil, self.error or loadError end
-    local options, err = App.getPreferences()
-    if err then return nil, err end
-    if not options.tillFullEnabled then return nil, "Til Full is disabled in settings" end
-    if self.recovery:status().pending then return nil, "Recover personal gear before consuming" end
-    if self.consumption and self.consumption:isBusy() then return nil, (self.consumption.name or "Til Full") .. " is already active; use Current job to cancel" end
-    local controller
-    controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds, openingRecipe, menuSource)
-    if not controller then return nil, err end
-    -- A full player choosing this convenience action must not even cancel
-    -- unrelated work. Both-needs preference retains its explicit meaning.
-    local ok, satisfied = pcall(controller.alreadySatisfied, controller)
-    if not ok then return nil, "Current fullness is unavailable" end
-    if satisfied then return true end
-    self.replacement, self.replacementProblem = nil, nil
-    if self.jobs:status().hasJob then self.jobs:cancel() end
-    if not self.jobs:status().canPreview then return nil, "Wait for native job cleanup, then try Til Full again" end
+local function retireConsumption(self)
+    if self.consumption and not self.consumption:isBusy() then self.consumption = nil end
+end
+
+function Instance:start(plan, options)
+    local ok, err = clearConsumption(self)
+    if not ok then return nil, err end
+    if self.borrowed and self.borrowed.begin then
+        Log.info(options and options.interaction, "PENDING-DROPPED", "reason", "a newer job was started before it began")
+        self.borrowed = nil
+    end
+    retireConsumption(self)
+    local chosen = {}
+    for key, value in pairs(options or {}) do chosen[key] = value end
+    if chosen.reviewBins == nil then chosen.reviewBins = App.reviewPreference(nil, true) end
+    self.problem = nil
+    local runner = plan.owner or self.jobs
+    if runner == self.jobs then
+        self:persist()
+        local started
+        started, err = runner:start(plan, chosen)
+        if started then runner.label, self.consumption = plan.label, nil end
+        return started, err
+    end
+    self.takeover = { runner = runner, plan = plan, options = chosen }
+    Log.info(chosen.interaction, "TAKEOVER", "replaces", self.jobs.label, "state", self.jobs:status().state)
+    if self.jobs:status().canPause then
+        ok, err = self.jobs:pause("new job")
+        if not ok then self.takeover = nil; return nil, err end
+    end
+    return self:advance()
+end
+
+-- The job that gave way stays resumable as the previous job.
+function Instance:advance()
+    local pending = self.takeover
+    if not pending then return true end
+    local status = self.jobs:status()
+    if status.canPause or (status.hasJob and not status.canResume) then return true end
+    self.takeover = nil
+    local previous = self.jobs
+    if status.canResume then
+        if self.parked then Log.info(nil, "PREVIOUS-DROPPED", "job", self.parked.label); self.parked:cancel(true) end
+        self.parked = previous
+    end
+    self.jobs, self.spare = pending.runner, nil
+    retireConsumption(self)
+    self:persist()
+    local started, err = self.jobs:start(pending.plan, pending.options)
+    if started then self.jobs.label = pending.plan.label; return true end
+    self.jobs = previous
+    if self.parked == previous then self.parked = nil end
+    self.problem = err
+    return nil, err
+end
+
+function Instance:resumePrevious()
+    local previous = self.parked
+    if not previous then return nil, "There is no previous job" end
+    local ok, err = clearConsumption(self)
+    if not ok then return nil, err end
+    local status = self.jobs:status()
+    if status.canPause or (status.hasJob and not status.canResume) then return nil, "Pause or finish the current job first" end
+    self.parked = status.canResume and self.jobs or nil
+    self.jobs = previous
+    retireConsumption(self)
+    return self.jobs:resume()
+end
+
+function Instance:discardPrevious()
+    if not self.parked then return end
+    Log.info(nil, "PREVIOUS-DROPPED", "job", self.parked.label)
+    self.parked:cancel(true)
+    self.parked = nil
+end
+
+-- Eating, drinking and pouring borrow the player: the job pauses, then carries on.
+function Instance:borrow(begin)
+    local ok, err = clearConsumption(self)
+    if not ok then return nil, err end
+    if self.borrowed then return nil, "Another action is about to start" end
+    if not self.jobs:status().canPause then return begin() end
+    ok, err = self.jobs:pause("eating, drinking or pouring")
+    if not ok then return nil, err end
+    self.borrowed = { begin = begin }
+    return self:lend()
+end
+
+function Instance:lend()
+    local borrowed = self.borrowed
+    if not borrowed then return true end
+    if borrowed.begin then
+        local status = self.jobs:status()
+        if status.canPause or (status.hasJob and not status.canResume) then return true end
+        local begin = borrowed.begin
+        borrowed.begin = nil
+        local ok, err = begin()
+        if not ok then self.problem = err; self.borrowed = nil; self.jobs:resume(); return nil, err end
+        return true
+    end
+    if self.consumption and self.consumption:isBusy() then return true end
+    self.borrowed = nil
+    retireConsumption(self)
+    Log.info(self.jobs.interaction, "JOB-CONTINUES", "job", self.jobs.label)
+    return self.jobs:resume()
+end
+
+function Instance:adopt(controller)
     self.consumption = controller
     controller:tick()
     if not controller:isBusy() and controller.state ~= "finished" then return nil, controller.reason end
     return true
 end
--- A shortcut is a new request, not an implicit Resume. Hold only the latest
--- request until owned native cleanup releases the previous job.
-function Instance:replaceJob(callback)
-    if type(callback) ~= "function" then return nil, "A new job needs a request" end
-    if self.error or loadError then return nil, self.error or loadError end
-    if self.recovery:status().pending then return nil, "Recover personal gear before starting another job" end
-    if self.consumption and self.consumption:isBusy() then
-        return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job"
-    end
-    self.replacementProblem = nil
-    local status = self.jobs:status()
-    if not status.hasJob and status.canPreview ~= false then
-        self.replacement = nil
-        return callback()
-    end
-    local ok, err = self.jobs:cancel()
-    if not ok then return nil, err end
-    self.replacement = callback
-    return true
+
+function Instance:startPour(source, targets, options, clickedReceiver)
+    return self:borrow(function()
+        local Pour = require "LootBox/Pour"
+        local function context(shelf)
+            local p = currentPreferences()
+            if not p.contextMenus or not p.inventoryShortcuts then return nil end
+            return Pour.options(p), Pour.displayed(self.player:getPlayerNum(), shelf)
+        end
+        local controller, why = Pour.new(self.player, self.world, source, targets, options, context, clickedReceiver)
+        if not controller then return nil, why end
+        return self:adopt(controller)
+    end)
 end
 
-function Instance:runReplacement()
-    if not self.replacement then return end
-    if self.consumption and self.consumption:isBusy() then
-        self.replacement = nil
-        self.replacementProblem = "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before starting another job"
-        return
+function Instance:worldPour(anchor, take, entries, origin, options, loan)
+    local function enabled()
+        local prefs = currentPreferences()
+        if not prefs.contextMenus or not prefs[origin] then return false end
+        local now = require("LootBox/Pour").options(prefs)
+        return now.pourFillOrder == options.pourFillOrder and now.pourFillScope == options.pourFillScope
     end
-    local status = self.jobs:status()
-    if status.hasJob or status.canPreview == false then return end
-    local callback = self.replacement
-    self.replacement = nil
-    local recovery = self.recovery:status()
-    if self.error or loadError or recovery.pending then
-        self.replacementProblem = self.error or loadError or "Recover personal gear before starting another job"
-        return
+    return self:borrow(function()
+        local controller, why
+        if loan then
+            if not take or origin ~= "inventoryShortcuts" or #entries ~= 1 or loan.a ~= anchor or loan.lease.entry ~= entries[1] then
+                return nil, "The selected fixture or vessel changed."
+            end
+            controller, why = require("LootBox/WorldLootFill").new(self.player, self.world, loan, enabled)
+        else
+            controller, why = require("LootBox/WorldFluidJob").new(self.player, self.world, anchor, take, entries, enabled)
+        end
+        if not controller then return nil, why end
+        return self:adopt(controller)
+    end)
+end
+
+function Instance:refillDispenser(anchor, donor, bottle, origin)
+    origin = origin == "inventoryShortcuts" and origin or "worldShortcuts"
+    local function allowed()
+        local prefs = currentPreferences()
+        return prefs.contextMenus == true and prefs[origin] == true
     end
-    local ok, result, problem = pcall(callback)
-    if not ok then self.replacementProblem = "The new request could not start: " .. tostring(result)
-    elseif not result and problem then self.replacementProblem = tostring(problem) end
+    return self:borrow(function()
+        local ok, controller, why = pcall(require("LootBox/MountedDispenser").new, self.player, self.world, anchor, donor, bottle, allowed)
+        if not ok then Log.fault(nil, "MountedDispenser.new", controller); return nil, "The selected dispenser could not be read." end
+        if not controller then return nil, why end
+        return self:adopt(controller)
+    end)
+end
+
+function Instance:tillFull(items, kind, openingRecipe, menuSource)
+    local options = App.getPreferences()
+    if not options.tillFullEnabled then return nil, "Til Full is disabled in settings" end
+    local ok, err = clearConsumption(self)
+    if not ok then return nil, err end
+    local controller
+    controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds, openingRecipe, menuSource)
+    if not controller then return nil, err end
+    if Log.guard("TillFull.alreadySatisfied", controller.alreadySatisfied, controller) then return true end
+    return self:borrow(function() return self:adopt(controller) end)
 end
 
 function Instance:cancel(silent)
-    self.replacement = nil
+    self.takeover, self.borrowed = nil, nil
     if self.consumption and self.consumption:isBusy() then return self.consumption:cancel(silent) end
     return self.jobs:cancel(silent)
 end
-function Instance:pause()
-    self.replacement = nil
+function Instance:pause(trigger)
+    self.takeover = nil
     if self.consumption and self.consumption:isBusy() then return nil, (self.consumption.name or "Til Full") .. " cannot be paused; cancel it instead" end
-    return self.jobs:pause()
+    return self.jobs:pause(trigger or "player")
 end
 function Instance:resume()
-    self.replacement, self.replacementProblem = nil, nil
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before resuming another job" end
-    local ok, err = self.jobs:resume()
+    self.problem = nil
+    local ok, err = clearConsumption(self)
+    if not ok then return nil, err end
+    ok, err = self.jobs:resume()
     if ok then self.consumption = nil end
     return ok, err
 end
 function Instance:status()
-    local status = self.consumption and self.consumption:status() or self.jobs:status()
-    if self.replacementProblem then status.reason = self.replacementProblem end
+    local controller = self.consumption
+    local job = self.jobs:status()
+    if controller and not controller:isBusy() and (quiet(controller) or job.hasJob) then controller = nil end
+    local status = controller and controller:status() or job
+    status.label = controller and (controller.label or controller.name) or self.jobs.label
+    status.consuming = controller ~= nil and controller:isBusy()
+    if self.problem and self.problemState ~= job.state then
+        if self.problemState then self.problem = nil end
+        self.problemState = self.problem and job.state or nil
+    end
+    if self.problem then status.reason = self.problem end
+    if self.parked then status.previous = { label = self.parked.label, done = self.parked:status().done, total = self.parked:status().total } end
+    status.warning = self.warning
     status.recovery = self:recoveryStatus()
     return status
 end
+function Instance:active()
+    local status = self.jobs:status()
+    return status.hasJob == true or (self.consumption ~= nil and self.consumption:isBusy() and not quiet(self.consumption))
+end
 function Instance:recoveryStatus() return self.recovery:status() end
 function Instance:recoverPersonalGear()
-    if self.consumption and self.consumption:isBusy() then return nil, "Finish or cancel " .. (self.consumption.name or "Til Full") .. " before recovering personal gear" end
-    local ok, err = self.jobs:recoverPersonalGear()
+    local ok, err = clearConsumption(self)
+    if not ok then return nil, err end
+    ok, err = self.jobs:recoverPersonalGear()
     if ok then self.consumption = nil end
     return ok, err
+end
+function Instance:forgetPersonalGear()
+    Log.warn(nil, "gear-forgotten", "player", Log.player(self.player))
+    return self.recovery:forget()
 end
 function Instance:reviewBin() return self.jobs:reviewBin() end
 function Instance:approveBin(review, options) return self.jobs:approveBin(review, options) end
 function Instance:rejectBin(review) return self.jobs:rejectBin(review) end
 
+-- Escape stops automatic work, unless the same press is closing something.
+function App.escapeCloses(playerIndex)
+    if getCore and getCore().isDoingTextEntry and getCore():isDoingTextEntry() then return true end
+    local menu = getPlayerContextMenu and getPlayerContextMenu(playerIndex)
+    if menu and menu.isAnyVisible and menu:isAnyVisible() then return true end
+    return App.escapeGuard ~= nil and App.escapeGuard(playerIndex) == true
+end
+
 function App.onKeyStartPressed(key)
     if not Keyboard or key ~= Keyboard.KEY_ESCAPE then return end
     local instance = sessions[0]
-    if not instance then return end
+    if not instance or App.escapeCloses(0) then return end
     if instance.consumption and instance.consumption:isBusy() then instance:cancel()
-    else instance:pause() end
+    else instance:pause("escape") end
 end
 
 -- OnPlayerUpdate also fires when the manager has never been opened. Defaults
 -- cost no inventory reads or session creation; each local player has its own clock.
 function App.onNeedsUpdate(player)
-    local options, err = currentPreferences()
-    if err or not (options.autoDrinkEquipped or options.autoConsumeCarried) or not player or not player:isLocalPlayer() then return end
+    local options = currentPreferences()
+    if not (options.autoDrinkEquipped or options.autoConsumeCarried) or not player or not player:isLocalPlayer() then return end
     local index, now = player:getPlayerNum(), getTimestampMs()
     AutoNeeds.interruptObservation(sessions[index])
     local activity = lastNeedsUpdate[index]
@@ -693,7 +836,7 @@ function App.onNeedsUpdate(player)
     activity.checked = now
     if player ~= getSpecificPlayer(index) or not player:getCurrentSquare() then return end
     local instance = App.get(index, true)
-    if not instance or instance.error or loadError then return end
+    if not instance or instance.takeover or instance.borrowed then return end
     AutoNeeds.step(instance, options, currentPreferences, now)
 end
 
@@ -715,20 +858,18 @@ function App.tick()
             end
         end
         instance.jobs:tick()
-        instance:runReplacement()
+        if instance.takeover then instance:advance() end
+        if instance.borrowed then instance:lend() end
         if not instance.needsOnly and (not instance.lastObserve or stamp - instance.lastObserve >= 1000) then
             instance.lastObserve = stamp
-            if instance.world:observeNearby() and not instance.error then
-                local ok, err = instance:persist()
-                if not ok then instance.error = err end
-            end
+            if instance.world:observeNearby() then instance:persist() end
         end
     end
 end
 
 function App.reset()
     for _, instance in pairs(sessions) do instance:cancel(true) end
-    sessions, definitions, graph, loadError = {}, nil, nil, nil
+    sessions, definitions, graph, loadError, merged, nativeCatalog = {}, nil, nil, nil, nil, nil
     preferences, preferencesError = nil, nil
     App.escapeDown, lastNeedsUpdate = false, {}
 end

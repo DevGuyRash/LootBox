@@ -1,3 +1,4 @@
+local Log = require "LootBox/Log"
 local Loan = {}
 Loan.__index = Loan
 local SIP_TIMEOUT, MP_SIP_TIMEOUT, MOVE_TIMEOUT = 3000, 7000, 30000
@@ -96,27 +97,32 @@ local function drinkable(self)
 end
 
 function Loan.canOffer(player, item)
-    local ok, eligible = pcall(function()
+    return Log.guard("StockWaterLoan.canOffer", function()
         if not stockOn(player) or declined(player,item) or not item:isWaterOnlySource() then return false end
         local main = player:getInventory()
         if not main:isItemAllowed(item) or not main:hasRoomFor(player, item) then return false end
         local one = ArrayList.new()
         one:add(item)
         return player:getWaterSource(one) == item
-    end)
-    return ok and eligible == true
+    end) == true
 end
 
 function Loan:transfer(from, to, phase)
     local queue = queueFor(self.player)
-    if not self:valid(phase, from) or not idle(self.player, queue)
-        or not to:isItemAllowed(self.item) or not to:hasRoomFor(self.player, self.item) then return false end
+    local function refuse(check)
+        Log.warn(self.interaction, "REFUSED", "op", "water-" .. phase, "check", check, "item", Log.item(self.item, self.player),
+            "from", Log.container(from, self.player), "to", Log.container(to, self.player), "queue", Log.queue(self.player))
+        return false
+    end
+    if not self:valid(phase, from) then return refuse("vessel-changed") end
+    if not idle(self.player, queue) then return refuse("queue-busy") end
+    if not to:isItemAllowed(self.item) or not to:hasRoomFor(self.player, self.item) then return refuse("no-room") end
     if self.multiplayer then
         local origin, target, exact = self:replicas(phase, from, to)
-        if not exact or origin ~= self.item or target then return false end
+        if not exact or origin ~= self.item or target then return refuse("ambiguous-identity") end
     end
     if phase == "outbound" and (not stockOn(self.player) or stockSource(self, self.main:getItems())
-            or stockSource(self, self.candidate) ~= self.item or not drinkable(self)) then return false end
+            or stockSource(self, self.candidate) ~= self.item or not drinkable(self)) then return refuse("game-would-not-drink-it") end
     require "TimedActions/ISInventoryTransferUtil"
     local action = ISInventoryTransferUtil.newInventoryTransferAction(self.player, self.item, from, to)
     if not action or not action.forceStop or not action.forceCancel then return false end
@@ -141,8 +147,7 @@ function Loan:transfer(from, to, phase)
                 and stockSource(self, self.candidate) == item and drinkable(self))
     end
     local function checked(native, item, committing)
-        local ok, can = pcall(allowed, native, item, committing)
-        if not ok or not can then self.interrupted = true; return false end
+        if not Log.guard("StockWaterLoan.allowed", allowed, native, item, committing) then self.interrupted = true; return false end
         return true
     end
     action.isValid = function(native, ...)
@@ -197,6 +202,9 @@ function Loan:transfer(from, to, phase)
         if not ok then error(err, 0) end
     end
     self.action, self.deadline = action, getTimestampMs() + MOVE_TIMEOUT
+    self.opAt = getTimestampMs()
+    Log.trace(self.interaction, "OP", "op", "water-" .. phase, "item", Log.item(self.item, self.player),
+        "from", Log.container(from, self.player), "to", Log.container(to, self.player))
     self.sent, self.acked, self.stopRequested, self.nextReplicaCheck, self.nextArrivalCheck = nil, false, false, nil, nil
     ISTimedActionQueue.add(action)
     return queue.current == action or (self.item:getContainer() == to and to:contains(self.item))
@@ -223,6 +231,11 @@ function Loan:finish(state, reason)
         blocked[self.player][self.id] = true
     end
     self.state, self.reason, self.action = state, reason, nil
+    local emit = state == "finished" and Log.info or Log.warn
+    emit(self.interaction, "END", "op", "water-loan", "state", state, "phase", self.phase, "reason", reason, "drank", self.count == 1,
+        "litresBefore", self.beforeAmount, "litresNow", Log.guard("StockWaterLoan.amount", amount, self.fluid),
+        "thirstBefore", self.beforeThirst, "thirst", thirst(self.player), "interrupted", self.interrupted == true,
+        "elapsedMs", getTimestampMs() - (self.opAt or 0), "item", Log.item(self.item, self.player), "player", Log.player(self.player))
 end
 
 function Loan:isBusy() return self.state == "running" end
@@ -277,6 +290,8 @@ function Loan:step()
                 self.count == 1 and "Vanilla auto-drank water; bottle returned." or "Vanilla did not drink; bottle returned.")
             return
         end
+        Log.trace(self.interaction, "OP-END", "op", "water-" .. phase, "ok", true, "item", Log.item(self.item, self.player),
+            "elapsedMs", now - (self.opAt or now))
         self.action, self.phase, self.deadline = nil, "observe", now + (self.multiplayer and MP_SIP_TIMEOUT or SIP_TIMEOUT)
         phase = self.phase
     end
@@ -305,8 +320,11 @@ end
 
 function Loan:tick()
     if self:isBusy() then
-        local ok = pcall(self.step, self)
-        if not ok then self:cancel() end
+        local ok, err = pcall(self.step, self)
+        if not ok then
+            Log.fault(self.interaction, "StockWaterLoan.step", err, "phase", self.phase)
+            self:cancel()
+        end
     end
 end
 
@@ -315,13 +333,13 @@ function Loan:status()
         hasJob=self:isBusy(), canPreview=not self:isBusy(), canResume=false, canPause=false, action="consume", intent="consume:fluid"}
 end
 
-local function new(player, item, guard)
+local function new(player, item, guard, interaction)
     if not stockOn(player) or declined(player,item) or type(guard) ~= "function" then return nil end
     local main, source = player:getInventory(), item:getContainer()
     if not source or source == main then return nil end
     local path = pathFrom(source, main)
     if not path then return nil end
-    local loan = setmetatable({player=player, item=item, id=item:getID(), fullType=item:getFullType(), fluid=item:getFluidContainer(),
+    local loan = setmetatable({player=player, interaction=interaction, item=item, id=item:getID(), fullType=item:getFullType(), fluid=item:getFluidContainer(),
         main=main, source=source, path=path, guard=guard, multiplayer=isClient(), state="running", phase="outbound", count=0,
         deadline=getTimestampMs() + MOVE_TIMEOUT}, Loan)
     if not loan.fluid or not loan:valid("admit", source) or not drinkable(loan) then return nil end
@@ -329,12 +347,13 @@ local function new(player, item, guard)
     loan.candidate:add(item)
     loan.beforeAmount, loan.beforeThirst = amount(loan.fluid), thirst(player)
     if type(loan.beforeAmount) ~= "number" or type(loan.beforeThirst) ~= "number" or loan.beforeThirst <= 0.1 then return nil end
+    Log.info(interaction, "START", "op", "water-loan", "item", Log.item(item, player), "from", Log.container(source, player),
+        "litres", loan.beforeAmount, "thirst", loan.beforeThirst, "player", Log.player(player))
     if loan:transfer(source, main, "outbound") then return loan end
 end
 
-function Loan.new(player, item, guard)
-    local ok, result = pcall(new, player, item, guard)
-    if ok then return result end
+function Loan.new(player, item, guard, interaction)
+    return Log.guard("StockWaterLoan.new", new, player, item, guard, interaction)
 end
 
 return Loan

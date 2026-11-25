@@ -1,3 +1,5 @@
+local call = require "LootBox/Safe"
+
 local Survey = {}
 Survey.__index = Survey
 
@@ -5,13 +7,6 @@ local SECTION_SIZE, STEPS_PER_CALL = 8, 8
 
 local function integer(value)
     return type(value) == "number" and value == value and math.abs(value) <= 2147483647 and value == math.floor(value)
-end
-
-local function call(object, method, ...)
-    if not object then return nil end
-    local arguments = { ... }
-    local ok, result = pcall(function() return object[method](object, unpack(arguments)) end)
-    if ok then return result end
 end
 
 local function size(list)

@@ -351,3 +351,22 @@ The latter exercises installed vanilla input, selector, selection, options and w
 The exact distributed package was verified on Project Zomboid 42.22.2 with an ordinary player and a stock dedicated host that advertised the same LootBox build and kept native checksums enabled. Two plain-water top-ups added 250 mL each, first into an empty dispenser and then into that partially filled dispenser. A same-server reconnect independently confirmed 500 mL remained mounted. No undeclared host, other fluid, larger pour, or server restart was qualified.
 
 The exact 54 distribution files contain 50 client Lua scripts and no executable server/shared Lua. Its deterministic ZIP SHA-256 is `3e4ab62296b60b96f9e6b0ddd82b131b74b28f4c0d40c28e107d91bfff073952`. The 74 portable and installed-interpreter checks are separate from the private gameplay evidence.
+
+## Interface rebuild, trace and engine repair (November 25, 2026)
+
+`python3 tools/verify.py --game ...` passed 84 checks: 41 suites in Lua 5.1 and again in the installed 42.22.2 Kahlua, plus native store files. Suites for the replaced windows, menus and container bridge were replaced by `menus`, `object-menu`, `ui-actions`, `job-engine`, `pour-menu`, `consume-menu` and `log`.
+
+Played in isolated 42.22.2 clients with mouse input:
+
+| Path | Observed |
+| --- | --- |
+| Container icon and NeatUI title | Baseline threw `NullPointerException` in `ISContextMenuWrapper.getContextFromOption` and kept only global rows. Now: Rename, the appliance's Turn on and Settings, Disassemble of that object, then LootBox. Same in vanilla UI and on a multiplayer fridge. |
+| Contextual menus | Item, stack, bag, loot item, floor, vehicle and trash can show only applicable rows; trash rows appear after a can is seen. |
+| Room loot, takeover, set aside and resume | 39 items; a second job set the first aside and the strip resumed it. |
+| Drink during a job | Job paused, Til Full restored thirst, the job continued by itself. |
+| Single-player pour | 0.8 L moved exactly, one operation. |
+| Room cleanup with reviews | 46 of 46, and 19 of 19 with plan and can reviews. |
+| Multiplayer, ordinary player, no debug | Building loot, 22 of 22; no LootBox server code. |
+| Windows | Every page in game and in the main menu; 1280x720, 1600x900 and 1920x1080 with small, 3x and 4x fonts; Escape closes. |
+
+Not exercised: controller, split screen, real modded menus other than NeatUI, vehicle relocking and gear recovery in live multiplayer.

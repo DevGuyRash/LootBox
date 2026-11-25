@@ -1,4 +1,5 @@
 local CreatedItemReceipt = require "LootBox/CreatedItemReceipt"
+local Log = require "LootBox/Log"
 local Opening = {}
 local safeName, sharpName = "OpenCannedFood", "OpenCannedFoodWithKnifeOrSharpStoneFlake"
 local prepared = setmetatable({}, {__mode = "k"})
@@ -86,8 +87,7 @@ local function plan(player, opts, kind, item, callbacks)
 end
 
 function Opening.plan(player, opts, kind, _, item, callbacks)
-    local ok, value = pcall(plan, player, opts, kind, item, callbacks)
-    if ok then return value end
+    return Log.guard("NeedsOpening.plan", plan, player, opts, kind, item, callbacks)
 end
 
 function Opening.validate(player, opts, kind, _, item, selected, callbacks)
@@ -198,8 +198,7 @@ local function action(player, selected, guard)
 end
 
 function Opening.action(player, selected, guard)
-    local ok, native = pcall(action, player, selected, guard)
-    if ok then return native end
+    return Log.guard("NeedsOpening.action", action, player, selected, guard)
 end
 
 -- Last client-side check in waitToStart, before stock builds the request.
@@ -259,8 +258,7 @@ end
 function Opening.markStarted(player, selected, native)
     local receipt = multiplayerReceipt(player, selected, native)
     if not receipt or not Opening.ready(player, selected, native) then return false end
-    local ok, unique = pcall(uniqueInputs, selected.source, selected)
-    if not ok or not unique then return false end
+    if not Log.guard("NeedsOpening.inputs", uniqueInputs, selected.source, selected) then return false end
     receipt.started = true
     return true
 end

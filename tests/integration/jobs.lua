@@ -82,6 +82,8 @@ end
 function Native:isBusy() return self.active ~= nil end
 function Native:isPlayerBusy() return active.playerBusy == true end
 function Native:takeoverReason() return active.takeover, active.takeoverKind end
+function Native:extend(milliseconds) active.extended = (active.extended or 0) + milliseconds end
+function Native:reachable(container) return active.reachable and active.reachable[container] == true end
 function Native:transferResult(op, id, fullType)
     if op.sourcePoint then
         for _, value in ipairs(active.ground) do
@@ -181,7 +183,7 @@ function Native:poll()
             target = target or coordinateKey(choices[1])
         end
         active.approaches[target] = (active.approaches[target] or 0) + 1
-        if active.blockedPositions[target] then self.active = nil; return false, "No path to the destination" end
+        if active.blockedPositions[target] then self.active = nil; return false, "No path to the destination", "unreachable" end
         if op.container and active.unloaded[target] then self.active = nil; return false, "Container chunk is unloaded" end
         local from = active.world:point()
         local withinReach = op.square and not op.exact and active.nearby[active.position] and active.nearby[active.position][target]
@@ -285,11 +287,20 @@ local function fixture(capacity)
     f.source = container("source", 100)
     f.destination = container("destination", 100)
     f.floor = container("floor", 1000); f.floor.kind = "floor"
-    f.sources, f.bins, f.groundSquares = { f.source }, {}, {}
+    f.sources, f.bins = { f.source }, {}
     f.player = { getPlayerNum = function() return 0 end,
         getInventory = function() return f.inventory end,
+        getVehicle = function() return f.seatedIn end,
         isDead = function() return f.dead == true end, isAsleep = function() return f.asleep == true end,
         getCurrentSquare = function() return f:ensureSquare(f.position) end }
+    function f:groundRecords(values)
+        local result = {}
+        for _, value in ipairs(values or {}) do
+            result[#result + 1] = {item = value, source = self.floor, descriptor = self.world:describe(value),
+                groundSquare = value.world:getSquare(), itemName = value.fullType, from = "Floor"}
+        end
+        return result
+    end
     local world = {}
     function world:point()
         local current = f:ensureSquare(f.position)
@@ -347,6 +358,9 @@ local function fixture(capacity)
     function world:protected(value) return value.protected == true end
     function world:name(value) return value.name end
     function world:valid() return true end
+    function world:filledBag(value) return value.inside and #value.inside.items > 0 and value.inside or nil end
+    function world:alreadySorted() return false end
+    function world:destinationPass() return {} end
     function world:gearRecords() return {} end
     function world:safeStagingContainers() return f.safeCandidates or {} end
     function world:isTrash(value) return value.trash == true end
@@ -396,7 +410,7 @@ local function fixture(capacity)
     function world:scan(request)
         f.scannedRequest = request
         if request.scope == "building" and f.survey then
-            return {items = {}, sources = {}, groundSquares = {}, warnings = {}, survey = f.survey}
+            return {items = {}, sources = {}, warnings = {}, survey = f.survey}
         end
         local records, endpoints = {}, {}
         if not f.onlyGround then
@@ -413,13 +427,14 @@ local function fixture(capacity)
                 end
             end
         end
-        return { items = records, sources = endpoints, groundSquares = f.groundSquares, warnings = {} }
+        for _, record in ipairs(f:groundRecords(f.groundItems)) do records[#records + 1] = record end
+        return { items = records, sources = endpoints, warnings = {} }
     end
     function world:sectionTarget(section)
         return {x = section.target.x, y = section.target.y, z = section.target.z}
     end
     function world:scanSection(section)
-        local result = {items = {}, sources = {}, groundSquares = {}, warnings = {}}
+        local result = {items = {}, sources = {}, warnings = {}}
         local missing = f.unloaded[section.target.name] and 1 or section.missing or 0
         if missing == 0 or section.inspectLoadedPart then
             for _, source in ipairs(section.sources or {}) do
@@ -428,7 +443,7 @@ local function fixture(capacity)
                     for _, record in ipairs(self:records(source)) do result.items[#result.items + 1] = record end
                 end
             end
-            result.groundSquares = section.groundSquares or {}
+            for _, record in ipairs(f:groundRecords(section.groundItems)) do result.items[#result.items + 1] = record end
         end
         return result, missing, section.denied or 0
     end
@@ -439,7 +454,12 @@ local function fixture(capacity)
         return { f.destination }
     end
     f.loot = {}
-    function f.loot:checkExplored(source) source.explored = true; if source.reply then source.reply() end end
+    -- The game's loot window: multiplayer asks the server once, single player rolls loot at once.
+    function f.loot:checkExplored(source)
+        if source.explored then return end
+        if f.client then source:requestServerItemsForContainer() elseif source.reply then source.reply() end
+        source.explored = true
+    end
     function f.loot:refreshBackpacks()
         f.floor.items = {}
         for _, value in ipairs(f.ground) do
@@ -710,7 +730,7 @@ end)
 
 test("observe nonempty MP replies without a Lua update event", function()
     local f = fixture(3); f.client = true; f.source.explored = false
-    f.onApproach = function(op) if op.container == f.source then f.source.explored = true end end
+    f.onApproach = function(op) if op.container == f.source then f.loot:checkExplored(f.source) end end
     f.source.reply = function() item(f.source); item(f.source) end
     start(f, request("inventory"))
     local status = finish(f)
@@ -729,12 +749,12 @@ end)
 test("floor inspection excludes adjacent unselected squares", function()
     local f = fixture(3); f.onlyGround = true; f.sources = {}
     local selectedSquare, adjacent = f:addSquare(square("selected floor", 20, 0)), f:addSquare(square("adjacent floor", 21, 0))
-    f.groundSquares = { selectedSquare }
     local selected = item(f.floor, "Base.Selected")
     local other = item(f.floor, "Base.Adjacent")
     selected.world = { getSquare = function() return selectedSquare end }
     other.world = { getSquare = function() return adjacent end }
     f.ground = { selected, other }
+    f.groundItems = { selected }
     start(f, request("inventory"))
     local status = finish(f)
     assert(status.done == 1 and f.inventory:contains(selected) and #f.ground == 1 and f.ground[1] == other)
@@ -811,13 +831,30 @@ test("cancel waits for native restoration before ending", function()
     assert(finish(f).state == "cancelled" and f.restored and not f.adapter:isBusy())
 end)
 
-test("exception waits for native restoration and stays failed", function()
+test("one thrown error skips its item after native restoration and the job goes on", function()
     local f = fixture(3); f.sources = { f.inventory }; f.throwPoll = true
-    item(f.inventory)
+    local first, second = item(f.inventory), item(f.inventory)
     start(f, request("vehicle", {}))
     local status = finish(f)
-    assert(status.state == "failed" and f.restored and not f.adapter:isBusy())
-    assert(f.thrown and status.reason:find("Job execution failed", 1, true))
+    assert(f.thrown and f.restored and not f.adapter:isBusy())
+    assert(status.state == "finished_with_skips" and status.skipped == 1 and status.done == 1)
+    assert(f.inventory:contains(first) and f.destination:contains(second))
+    assert(status.reasons[1].reason:find("internal error", 1, true))
+end)
+
+test("repeated errors pause the job so it can be resumed past the bad items", function()
+    local f = fixture(9)
+    for _ = 1, 5 do item(f.source) end
+    start(f)
+    awaitOperation(f, function(op) return op.kind == "transfer" end)
+    local advance = f.jobs.advance
+    function f.jobs:advance() error("Simulated defect") end
+    local stopped = finish(f)
+    assert(stopped.state == "paused" and stopped.canResume and stopped.skipped == 3)
+    f.jobs.advance = advance
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 2 and #f.destination.items == 2)
 end)
 
 test("building jobs search both floors and finish all selected transfers", function()
@@ -892,7 +929,7 @@ test("upstairs building cleanup returns between an outside bin and the selected 
         f.ground[#f.ground + 1] = selected
     end
     local input = building(f, {
-        {roomId = "upper", roomName = "Upper bedroom", z = 1, target = upper, groundSquares = {upper}},
+        {roomId = "upper", roomName = "Upper bedroom", z = 1, target = upper, groundItems = f.ground},
         {roomId = "lower", roomName = "Ground hall", z = 0, target = square("lower room", 1, 0, 0)},
     })
     input.destination = {kind = "trash"}
@@ -994,7 +1031,7 @@ end)
 test("floor hauling reacquires the selected XYZ after its chunk is recreated", function()
     local f = fixture(1); f.onlyGround, f.sources = true, {}
     local oldSquare = f:addSquare(square("upstairs floor", 20, 0, 1))
-    f.groundSquares = {oldSquare}
+    f.groundItems = f.ground
     for _ = 1, 3 do
         local selected = item(f.floor)
         selected.world = {getSquare = function() return oldSquare end}
@@ -1386,11 +1423,12 @@ test("waiting for an empty multiplayer inspection never substitutes for explicit
     local selected = item(f.source)
     start(f, request("trash"))
     for _ = 1, 30 do tick(f); if bin.requested then break end end
-    assert(bin.requested == 1 and not bin.explored and f.jobs:status().state == "running")
-    for _ = 1, 10 do tick(f) end
+    assert(bin.requested == 1 and f.jobs:status().state == "running")
+    for _ = 1, 8 do tick(f) end
     assert(f.jobs:status().state == "running" and #f.transfers == 0)
     awaitState(f, "needs_review")
-    assert(f.now - bin.lastRequestAt >= 3000 and not bin.explored)
+    local waited = f.now - bin.lastRequestAt
+    assert(waited >= 1000 and waited < 3000, "A reply gets about a second, not three")
     local review = assert(f.jobs:reviewBin())
     local uncertainty = false
     for _, warning in ipairs(review.warnings) do
@@ -1772,10 +1810,10 @@ end)
 
 test("resuming a floor pickup returns before refreshing its shared floor view", function()
     local f = fixture(3)
-    f.onlyGround, f.floorOnlyHere, f.groundSquares = true, true, {f.squares.source}
+    f.onlyGround, f.floorOnlyHere = true, true
     local selected = item(f.floor)
     selected.world = {getSquare = function() return f.squares.source end}
-    f.ground = {selected}
+    f.ground, f.groundItems = {selected}, {selected}
     start(f, request("inventory"))
     awaitOperation(f, function(op) return op.kind == "transfer" end)
     stopJob(f)
@@ -2249,7 +2287,7 @@ test("failed manual recovery keeps the original checkpoint and prevents prematur
     assert(f.jobs:recoverPersonalGear())
     local failed = finish(f)
     assert(failed.state == "failed" and recovery.pending and not failed.canResume and not f.jobs:resume())
-    assert(failed.hasJob == true and not failed.canPreview)
+    assert(failed.hasJob == true and failed.canStart, "Staged gear must not keep other jobs from starting")
     recovery.failRestore = false
     assert(f.jobs:recoverPersonalGear())
     local recovered = finish(f)
@@ -2339,9 +2377,9 @@ test("loot-pane previews own their captured source list rather than a mutable ca
     local plan = assert(f.jobs:preview(input))
     assert(plan.request.sourceContainers ~= input.sourceContainers)
     input.sourceContainers[1] = f.destination
-    assert(f.jobs.reviewed.request.sourceContainers[1] == f.source)
+    assert(f.jobs.reviews[plan].request.sourceContainers[1] == f.source)
     plan.request.sourceContainers[1] = f.destination
-    assert(f.jobs.reviewed.request.sourceContainers[1] == f.source)
+    assert(f.jobs.reviews[plan].request.sourceContainers[1] == f.source)
     assert(f.jobs:start(plan))
     assert(finish(f).done == 1 and f.inventory:contains(selected))
 end)
@@ -2980,10 +3018,8 @@ test("Cancel drops recovery continuation but preserves the personal gear receipt
     assert(f.jobs:cancel())
     local cancelled = finish(f)
     assert(not cancelled.canResume and not cancelled.hasJob and recovery.pending and f.jobs.recovery == recovery)
-    assert(cancelled.recoveryRequired and not cancelled.canPreview)
-    local preview, problem = f.jobs:preview(request("inventory"))
-    assert(not preview and problem:find("Recover personal gear", 1, true))
-    assert(not f.jobs:previewCondense() and not f.jobs:start({}))
+    assert(cancelled.recoveryRequired and cancelled.canStart)
+    assert(f.jobs:preview(request("inventory")) and not f.jobs:start({}))
     assert(f.jobs:recoverPersonalGear())
     local recovered = finish(f)
     assert(recovered.state == "finished" and not recovered.canResume and not recovered.hasJob)
@@ -3057,60 +3093,257 @@ test("cancelling a paused job shows one stopped card and no planned moves", func
     PZActionCompletionHUD = nil
 end)
 
-local function withJobLog(body)
-    local output, savedPrint = {}, print
-    print = function(line) output[#output + 1] = line end
-    local ok, err = pcall(body, output)
-    print = savedPrint
-    assert(ok, err)
-end
-
-test("job diagnostics deduplicate failures and never serialize identifiers or native text", function()
-    withJobLog(function(log)
-        local f = fixture(3)
-        f.client = true
-        local first = item(f.source, "Private.NamedCopy", 1)
-        item(f.source, "Private.OtherCopy", 1)
-        local denials = 0
-        function f.adapter:begin(op)
-            if op.kind == "transfer" then
-                denials = denials + 1
-                return nil, "Private native explanation\nevent=spoof name=PrivateUser id=" .. op.item:getID()
-            end
-            return Native.begin(self, op)
-        end
-        start(f)
-        local outcome = finish(f)
-        for _ = 1, 5 do tick(f) end
-        assert(outcome.state == "finished_with_skips" and outcome.skipped == 2 and denials == 2)
-        assert(outcome.reasons[1].reason:find("Private native explanation", 1, true), "UI should keep actionable details")
-        assert(f.source:contains(first) and #log == 4)
-        assert(log[1]:find("action=transfer event=start state=running", 1, true))
-        assert(log[2]:find("event=operation-failure", 1, true) and log[2]:find("mode=MP reason=native-refused operation=transfer stage=dispatch", 1, true))
-        assert(log[3]:find("event=left-in-place", 1, true))
-        assert(log[4]:find("event=terminal state=finished_with_skips", 1, true) and log[4]:find("skipped=2", 1, true))
-        for _, line in ipairs(log) do
-            assert(not line:find("Private", 1, true) and not line:find("id=", 1, true) and not line:find("\n", 1, true))
-        end
-    end)
+test("a seated player is told once, at the start, unless nothing needs walking", function()
+    local f = fixture(9)
+    item(f.source); item(f.source)
+    f.seatedIn = {}
+    local plan = assert(f.jobs:preview(request("inventory")))
+    local started, problem = f.jobs:start(plan)
+    assert(not started and problem:find("Get out of the vehicle", 1, true) and f.jobs:status().state == "idle")
+    f.seatedIn = nil
+    assert(f.jobs:start(plan) and finish(f).done == 2, "The same plan starts after getting out")
+    local g = fixture(9)
+    item(g.source)
+    g.seatedIn, g.reachable = {}, {[g.source] = true}
+    start(g, request("inventory"))
+    assert(finish(g).done == 1, "Storage within reach of the seat needs no walk")
 end)
 
-test("terminal diagnostics survive the decision cap; raw exceptions stay in the UI", function()
-    withJobLog(function(log)
-        local f = fixture(3)
-        item(f.source)
-        local started, problem = f.jobs:start({})
-        assert(not started and problem == "Preview this job again before starting")
-        start(f)
-        f.jobs.diagnostics.count = 48
-        function f.jobs:advance() error("Private path or object details") end
-        local outcome = finish(f)
-        assert(outcome.state == "failed" and outcome.reason:find("Private path or object details", 1, true))
-        tick(f); tick(f)
-        assert(#log == 3 and log[1]:find("event=rejected state=not-started phase=prepare mode=SP reason=stale-preview", 1, true))
-        assert(log[3]:find("event=terminal state=failed", 1, true)
-            and log[3]:find("reason=job-binding-error", 1, true) and not log[3]:find("Private", 1, true))
+test("sitting down during a job pauses it once and Resume repeats the same step", function()
+    local f = fixture(9)
+    item(f.source); item(f.source)
+    start(f)
+    local seated = true
+    function f.adapter:begin(op)
+        if op.kind == "approach" and seated then return nil, "Get out of the vehicle to continue", "seated" end
+        return Native.begin(self, op)
+    end
+    local stopped = finish(f)
+    assert(stopped.state == "paused" and stopped.skipped == 0 and stopped.reason:find("Get out of the vehicle", 1, true))
+    seated = false
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 2 and status.skipped == 0)
+end)
+
+test("time without ticks extends deadlines, ordinary frames do not", function()
+    local f = fixture(3)
+    item(f.source)
+    start(f)
+    for _ = 1, 5 do tick(f) end
+    assert(f.extended == nil)
+    f.now = f.now + 90000
+    tick(f)
+    assert(f.extended and f.extended >= 90000 and f.extended <= 90200)
+    assert(finish(f).done == 1)
+    local g = fixture(3); g.client = true; g.source.explored = false
+    start(g, request("inventory"))
+    for _ = 1, 50 do tick(g); if g.source.requested then break end end
+    g.now = g.now + 60000
+    g.source.reply = function() item(g.source) end
+    g.scheduled[1] = {at = g.now + 400, run = g.source.reply}
+    local status = finish(g)
+    assert(status.done == 1, "A paused game must not use up the wait for a server reply")
+end)
+
+test("leaving a bin during its multiplayer inspection goes back to it", function()
+    local f = fixture(2); f.client = true
+    local bin = container("inspected bin", 4)
+    bin.trash, bin.uninspected, bin.explored, f.bins = true, true, false, {bin}
+    item(f.source)
+    start(f, request("trash"))
+    for _ = 1, 50 do tick(f); if bin.requested then break end end
+    f.position = "source"
+    local status = awaitState(f, "needs_review")
+    assert(f.position == bin.position and status.skipped == 0 and f.approaches[bin.position] >= 2)
+    assert(f.jobs:cancel()); finish(f)
+end)
+
+test("an empty multiplayer container costs about a second", function()
+    local f = fixture(3); f.client = true; f.source.explored = false
+    start(f, request("inventory"))
+    for _ = 1, 50 do tick(f); if f.source.requested then break end end
+    local asked = f.now
+    finish(f)
+    assert(f.now - asked >= 1000 and f.now - asked <= 2000, "Waited " .. (f.now - asked))
+end)
+
+test("a vehicle the job unlocked is locked again after the last delivery", function()
+    local f = fixture(9); f.sources = {f.source}
+    local car = {}
+    item(f.source)
+    function f.adapter:begin(op)
+        if op.kind == "vehicle" and not op.relock then
+            op.unlocked = {{vehicle = car, partId = "TrunkDoor"}, {vehicle = car, partId = "DoorFrontLeft"}, {vehicle = car, partId = "TrunkDoor"}}
+        end
+        return Native.begin(self, op)
+    end
+    start(f, request("vehicle", car))
+    assert(finish(f).state == "finished")
+    local last = f.operations[#f.operations]
+    assert(last.kind == "vehicle" and last.vehicle == car and table.concat(last.relock, ",") == "TrunkDoor,DoorFrontLeft")
+    assert(f.transfers[#f.transfers].destination == f.destination)
+end)
+
+test("a vehicle that cannot be locked again is reported", function()
+    local f = fixture(9)
+    item(f.source)
+    function f.adapter:begin(op)
+        if op.relock then return nil, "The driver seat is occupied" end
+        if op.kind == "vehicle" then op.unlocked = {{vehicle = op.vehicle, partId = "TrunkDoor"}} end
+        return Native.begin(self, op)
+    end
+    start(f, request("vehicle", {}))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 1)
+    assert(status.reasons[1].reason:find("left unlocked", 1, true) and status.reasons[1].reason:find("seat is occupied", 1, true))
+end)
+
+test("staged personal gear does not keep ordinary jobs from running", function()
+    local f = fixture(3)
+    local personal, selected = item(f.inventory, "Base.Personal", 1), item(f.source)
+    local recovery, safe = recoveryFixture(f, personal)
+    assert(remove(f.inventory.items, personal)); safe.items[#safe.items + 1], personal.container = personal, safe
+    recovery.pending, recovery.failRestore = true, true
+    assert(f.jobs:recoverPersonalGear())
+    assert(finish(f).state == "failed" and recovery.pending)
+    start(f)
+    assert(finish(f).done == 1 and f.destination:contains(selected) and safe:contains(personal))
+end)
+
+-- The file trace, as the game writes it.
+local Log = originalRequire("LootBox/Log")
+local function trace(body)
+    local lines, savedPrint = {}, print
+    local reader, writer = getFileReader, getFileWriter
+    Log.flush()
+    getFileReader = function() return nil end
+    getFileWriter = function() return {write = function(_, text) lines[#lines + 1] = text end, close = function() end} end
+    print = function() end
+    local ok, err = pcall(body)
+    Log.flush()
+    getFileReader, getFileWriter, print = reader, writer, savedPrint
+    assert(ok, err)
+    return table.concat(lines)
+end
+
+local function events(text, id)
+    local result = {}
+    for line in text:gmatch("[^\n]+") do
+        local found, name = line:match("#(%S+) (%u[%u%-]+)")
+        if found == tostring(id) then result[#result + 1] = {name = name, line = line} end
+    end
+    return result
+end
+
+local function first(list, name)
+    for _, entry in ipairs(list) do if entry.name == name then return entry.line end end
+    error("No " .. name .. " line was written")
+end
+
+test("one interaction number tells what was asked, what happened and why it ended", function()
+    local id, f
+    local text = trace(function()
+        f = fixture(3)
+        item(f.source, "Base.Hammer")
+        local kept = item(f.source, "Base.Kept"); kept.protected = true
+        local denied = item(f.source, "Base.Denied")
+        id = Log.intent("menu.container", "Take all", f.player)
+        local plan = assert(f.jobs:preview(request("container", f.destination), {interaction = id}))
+        assert(f.jobs:start(plan, {interaction = id}) and f.jobs:status().interaction == id)
+        function f.adapter:begin(op)
+            if op.kind == "transfer" and op.item == denied then return nil, "Simulated native refusal" end
+            return Native.begin(self, op)
+        end
+        assert(finish(f).done == 1)
     end)
+    local lines = events(text, id)
+    assert(first(lines, "INTENT"):find("menu.container", 1, true))
+    local plan = first(lines, "PLAN")
+    assert(plan:find("everything", 1, true) and plan:find("records=2", 1, true) and plan:find("skipped=1", 1, true))
+    local skipped = first(lines, "PLAN-SKIP")
+    assert(skipped:find("count=1", 1, true) and skipped:find("Base.Kept", 1, true))
+    assert(first(lines, "PLAN-FROM") and first(lines, "PLAN-TO") and first(lines, "START"))
+    local begun, ended, failed = 0, 0, nil
+    for _, entry in ipairs(lines) do
+        if entry.name == "OP" then begun = begun + 1 end
+        if entry.name == "OP-END" then ended = ended + 1; if entry.line:find("result=failed", 1, true) then failed = entry.line end end
+    end
+    assert(begun > 0 and begun == ended, "Every native operation has a beginning and an end")
+    assert(failed and failed:find("WARN", 1, true) and failed:find("Simulated native refusal", 1, true) and failed:find("Base.Denied", 1, true))
+    assert(first(lines, "PHASE") and first(lines, "TASK") and first(lines, "SKIP"):find("Simulated native refusal", 1, true))
+    local ending = first(lines, "END")
+    assert(ending:find("state=finished_with_skips", 1, true) and ending:find("done=1", 1, true) and ending:find("skipped=2", 1, true))
+end)
+
+test("a pause names its real trigger and Resume keeps the same number", function()
+    local id, f
+    local text = trace(function()
+        f = fixture(3)
+        item(f.source)
+        start(f)
+        id = f.jobs:status().interaction
+        assert(type(id) == "number", "A job without a caller's number opens its own")
+        awaitOperation(f, function(op) return op.kind == "transfer" end)
+        function f.adapter:takeoverReason() return active.takeover, "combat", active.takeover and "aim" end
+        f.takeover = "Aiming paused the job"
+        assert(finish(f).state == "paused")
+        f.takeover = nil
+        assert(f.jobs:resume() and f.jobs:status().interaction == id)
+        assert(f.jobs:pause("escape") and finish(f).state == "paused")
+        assert(f.jobs:cancel())
+    end)
+    local lines, pauses = events(text, id), {}
+    for _, entry in ipairs(lines) do if entry.name == "PAUSE" then pauses[#pauses + 1] = entry.line end end
+    assert(#pauses == 2 and pauses[1]:find("trigger=aim", 1, true) and pauses[2]:find("trigger=escape", 1, true))
+    assert(pauses[1]:find("player={", 1, true) and first(lines, "RESUME") and first(lines, "END"):find("state=cancelled", 1, true))
+end)
+
+test("a thrown error reaches the log with its item and phase", function()
+    local text = trace(function()
+        local f = fixture(3)
+        item(f.source, "Base.Cursed")
+        start(f)
+        for _ = 1, 100 do tick(f); if f.adapter.active and f.adapter.active.op.kind == "transfer" then break end end
+        f.jobs.advance = function() error("Simulated defect 4711") end
+        finish(f)
+    end)
+    local fault = text:match("[^\n]*FAULT[^\n]*")
+    assert(fault and fault:find("Simulated defect 4711", 1, true) and fault:find("Base.Cursed", 1, true) and fault:find("Jobs:source", 1, true))
+end)
+
+test("a skipped refusal to start is explained under the caller's number", function()
+    local id
+    local text = trace(function()
+        local f = fixture(3)
+        id = Log.intent("window.plan", "Start", f.player)
+        local started, problem = f.jobs:start({}, {interaction = id})
+        assert(not started and problem == "Preview this job again before starting")
+        local plan = f.jobs:preview({scope = "nowhere", filter = {all = true}, destination = {kind = "inventory"}}, {interaction = id})
+        assert(plan == nil)
+    end)
+    local lines = events(text, id)
+    assert(first(lines, "START-REFUSED"):find("Preview this job again", 1, true))
+    assert(first(lines, "PLAN-REFUSED"):find("Choose a source scope", 1, true))
+end)
+
+test("detailed logging off writes no descriptions", function()
+    local f
+    local described = 0
+    local item_, container_ = Log.item, Log.container
+    Log.item = function(...) described = described + 1; return item_(...) end
+    Log.container = function(...) described = described + 1; return container_(...) end
+    Log.detailed = false
+    local ok, err = pcall(function()
+        f = fixture(3)
+        local kept = item(f.source); kept.protected = true
+        item(f.source)
+        start(f)
+        assert(finish(f).done == 1)
+    end)
+    Log.detailed, Log.item, Log.container = true, item_, container_
+    assert(ok, err)
+    assert(described == 0, "Descriptions are built only when they will be written")
 end)
 
 print("PASS " .. tests .. " Jobs integration scenarios")

@@ -31,7 +31,7 @@ Events = nil
 package.loaded["LootBox/World"] = { new = function(_, state)
     return { key = function(_, container) return container.id end, itemId = function(_, item) return item.id end,
         discover = function() end, observeNearby = function() return false end,
-        protected = function(_, item) return state.keep[item.id] == true end,
+        protected = function(_, item) return state.keep[item.id] == true end, hasKnownBins = function() return false end,
         rememberVehicle = function(_, vehicle)
             if not vehicle then return nil, "Vehicle unavailable" end
             state.vehicle = { id = 1, x = 1, y = 2, z = 0, script = "Base.Car" }
@@ -40,7 +40,8 @@ package.loaded["LootBox/World"] = { new = function(_, state)
 end }
 package.loaded["LootBox/Jobs"] = { new = function()
     calls.created = calls.created + 1
-    return { status = function() return { state = jobState } end, cancel = function() return true end,
+    return { status = function() return { state = jobState, hasJob = jobState ~= "idle" and jobState ~= "cancelled", canPause = jobState == "running",
+            canResume = jobState == "paused", canPreview = true } end, cancel = function() return true end,
         tick = function() end,
         preview = function(_, request) calls.previews = calls.previews + 1; calls.request = request; return {request = request} end,
         start = function(_, plan, options) calls.starts = calls.starts + 1; calls.plan, calls.options = plan, options; return true end,
@@ -159,34 +160,12 @@ test("a native player whose username settles later binds the final account prefe
     assert(settled.state.vehicle.id == 1)
 end)
 
-test("failed native writes leave active labels and Keep unchanged", function()
-    local app = assert(App.get(0))
-    denied = true
-    assert(not app:setLabels(crate, { "native:Tool" }))
-    same(app:labels(crate), { supplies, "native:Food" })
-    assert(not app:protect(item, false))
-    assert(app:isKept(item))
-    denied = false
-end)
-
 test("deleting a category never reuses its identity for a different category", function()
     local obsolete = assert(App.saveCategory({ name = "Old", types = {}, includes = {} }))
     assert(App.deleteCategory(obsolete))
     App.reset()
     local replacement = assert(App.saveCategory({ name = "New", types = {}, includes = {} }))
     assert(replacement ~= obsolete)
-end)
-
-test("a job paused for bin review keeps its category selection stable", function()
-    assert(App.get(0))
-    local before = #assert(App.catalog()).categories
-    jobState = "needs_review"
-    local id, reason = App.saveCategory({ name = "Wait for cleanup", types = {}, includes = {} })
-    assert(id == nil and reason:find("current job", 1, true))
-    assert(#assert(App.catalog()).categories == before)
-    jobState = "idle"
-    id = assert(App.saveCategory({ name = "Cleanup finished", types = {}, includes = {} }))
-    assert(App.category(id).name == "Cleanup finished")
 end)
 
 test("Resume forwards success and a current native refusal to the existing job", function()
@@ -217,34 +196,6 @@ test("Pause and bin review mode choices reach only the existing job", function()
     jobState = "idle"
 end)
 
-test("paused and pausing jobs retain their category meanings until explicitly cancelled", function()
-    local before = #assert(App.catalog()).categories
-    for _, state in ipairs({"paused", "pausing"}) do
-        jobState = state
-        local id, reason = App.saveCategory({name = "Cannot change a paused job", types = {}, includes = {}})
-        assert(id == nil and reason and #assert(App.catalog()).categories == before)
-    end
-    jobState = "idle"
-end)
-
-test("pending gear recovery blocks both new previews and previously reviewed starts", function()
-    local app = assert(App.get(0))
-    local recovery = app.recovery
-    app.recovery = {status = function() return {pending = true, count = 1, reason = "Recover the backpack in the porch cabinet"} end}
-    local previews, starts, recoveries = calls.previews, calls.starts, calls.recoveries
-    local plan, reason = app:preview({scope = "room"})
-    assert(not plan and reason:find("backpack", 1, true) and calls.previews == previews)
-    local started
-    started, reason = app:start({})
-    assert(not started and reason:find("backpack", 1, true) and calls.starts == starts)
-    local status = app:status()
-    assert(status.recovery.pending and status.recovery.count == 1)
-    assert(app:recoverPersonalGear() and calls.recoveries == recoveries + 1)
-    app.recovery = recovery
-    local request = {scope = "room"}
-    assert(app:preview(request) and calls.previews == previews + 1 and calls.request == request)
-end)
-
 test("review scopes are independent and use explicit preference values", function()
     assert(App.setPreferences({confirmQuickMoves = false, confirmQuickCleanup = true, confirmBinReviews = false}))
     local ordinary, ordinaryKey = App.reviewPreference({destination = {kind = "matching"}})
@@ -267,176 +218,191 @@ test("new jobs use the current bin preference while explicit one-job options win
     assert(App.getPreferences().confirmBinReviews == true)
 end)
 
-test("unreadable preferences require reviews until a current explicit choice is supplied", function()
-    local prior = App.getPreferences()
-    assert(Store.save("LootBox/preferences", {unknownSetting = true}))
-    App.reset()
-    for _, query in ipairs({{destination = {kind = "inventory"}}, {destination = {kind = "trash"}}}) do
-        local required, _, err = App.reviewPreference(query)
-        assert(required and err)
-    end
-    local required, _, err = App.reviewPreference(nil, true)
-    assert(required and err and not App.setPreferences({confirmBinReviews = false}))
+test("a failed write keeps protection in effect, reports it, and never blocks later work", function()
     local app = assert(App.get(0))
-    assert(app:start({}) and calls.options.reviewBins == true)
-    assert(app:start({}, {reviewBins = false}) and calls.options.reviewBins == false)
-    assert(Store.load("LootBox/preferences").unknownSetting == true)
-    assert(Store.save("LootBox/preferences", prior))
-    App.reset()
+    denied = true
+    local fresh = {id = "item:fresh"}
+    local ok, err = app:protect(fresh, true)
+    assert(not ok and err and app:isKept(fresh) and app:status().warning)
+    assert(app:preview({scope = "room"}), "A disk problem is not a reason to refuse a job")
+    denied = false
+    assert(app:protect(fresh, true) and app:status().warning == nil)
 end)
 
-test("Til Full owns the App action boundary until cancellation settles", function()
+test("categories can be edited while a job runs, pauses or waits", function()
+    assert(App.get(0))
+    for _, state in ipairs({"running", "paused", "needs_review"}) do
+        jobState = state
+        assert(App.saveCategory({name = "While " .. state, types = {}, includes = {}}))
+    end
+    jobState = "idle"
+end)
+
+test("deleting a category clears it from storage, tags, loot list and other categories", function()
     local app = assert(App.get(0))
-    local controller = {busy = true, state = "running"}
+    local doomed = assert(App.saveCategory({name = "Doomed", types = {"Base.Nails"}, includes = {}}))
+    local holder = assert(App.saveCategory({name = "Holder", types = {}, includes = {doomed, "native:Food"}}))
+    assert(app:setLabels(crate, {doomed, "native:Food"}) and app:setItemLabels(item, {doomed}))
+    assert(app:setChecklist({ids = {doomed}, types = {"Base.Nails"}}))
+    assert(App.deleteCategory(doomed))
+    same(app:labels(crate), {"native:Food"}); same(app:itemLabels(item), {})
+    same(app:getChecklist().ids, {}); same(App.category(holder).includes, {"native:Food"})
+end)
+
+test("one damaged saved value costs only itself", function()
+    App.reset()
+    local app = assert(App.get(0))
+    local path = app.path
+    local data = assert(Store.load(path))
+    data.trash = {good = {x = 1, y = 2, z = 0}, bad = {x = "east"}}
+    data.containerLabels = {["crate:ok"] = {"native:Food", "custom:99999"}, ["crate:bad"] = "Food"}
+    data.vehicle = {id = "broken"}
+    assert(Store.save(path, data))
+    assert(Store.save("LootBox/preferences", {contextMenus = false, retiredOption = true, jobBar = "sometimes"}))
+    App.reset()
+    app = assert(App.get(0))
+    assert(app.state.trash.good and not app.state.trash.bad and app.state.vehicle == nil)
+    same(app:labels({id = "crate:ok"}), {"native:Food"}); same(app:labels({id = "crate:bad"}), {})
+    local preferences = App.getPreferences()
+    assert(preferences.contextMenus == false and preferences.jobBar == true and preferences.retiredOption == nil)
+    assert(App.setPreferences({contextMenus = true}), "Preferences stay editable")
+end)
+
+-- Job ownership: the engine is a double with real pause/resume states.
+local Runner = {}
+Runner.__index = Runner
+local function runner(state) return setmetatable({state = state or "idle", log = {}}, Runner) end
+function Runner:status() return {state = self.state, hasJob = self.state ~= "idle", canPause = self.state == "running", canResume = self.state == "paused",
+    canPreview = self.state == "idle", done = 3, total = 9} end
+function Runner:pause(trigger) self.log[#self.log + 1] = "pause"; self.trigger = trigger; self.state = self.settles == false and "pausing" or "paused"; return true end
+function Runner:resume() self.log[#self.log + 1] = "resume"; self.state = "running"; return true end
+function Runner:cancel() self.log[#self.log + 1] = "cancel"; self.state = "idle"; return true end
+function Runner:preview(request) self.log[#self.log + 1] = "preview"; return {request = request, moves = {{}}} end
+function Runner:start() self.log[#self.log + 1] = "start"; self.state = "running"; return true end
+function Runner:tick() end
+local function working(state)
+    App.reset()
+    local app = assert(App.get(0))
+    app.jobs = runner(state)
+    app.jobs.label = "Clean kitchen"
+    app.newRunner = function() return runner("idle") end
+    return app
+end
+local want = {scope = "room", destination = {kind = "inventory"}, filter = {all = true}}
+
+test("planning and nothing-to-do leave a running job alone", function()
+    local app = working("running")
+    local old = app.jobs
+    assert(app:preview(want) and old.state == "running" and #old.log == 0)
+end)
+
+test("a new job sets the running one aside, and it can be resumed afterwards", function()
+    local app = working("running")
+    local old = app.jobs
+    local plan = assert(app:preview(want))
+    assert(app:start(plan))
+    assert(old.state == "paused" and app.jobs ~= old and app.jobs.state == "running" and app.parked == old)
+    assert(app:status().previous.label == "Clean kitchen")
+    app.jobs.state = "idle"
+    assert(app:resumePrevious() and app.jobs == old and old.state == "running" and app.parked == nil)
+end)
+
+test("takeover waits for the old job's native action to settle", function()
+    local app = working("running")
+    local old = app.jobs
+    old.settles = false
+    assert(app:start(assert(app:preview(want))))
+    assert(app.jobs == old and app.takeover, "Still settling")
+    App.tick(); assert(app.jobs == old)
+    old.state = "paused"
+    App.tick()
+    assert(app.jobs ~= old and app.jobs.state == "running" and not app.takeover)
+end)
+
+test("drinking pauses the running job and carries on with it afterwards", function()
+    local app = working("running")
+    local controller = {busy = true, state = "running", name = "Til Full", ticks = 0}
     function controller:isBusy() return self.busy end
-    function controller:alreadySatisfied() return self.full end
-    function controller:status() return {state = self.state, hasJob = self.busy, canPreview = not self.busy} end
-    function controller:tick() self.ticks = (self.ticks or 0) + 1 end
-    function controller:cancel() self.cancelled = true; self.state = "cancelling"; return true end
+    function controller:alreadySatisfied() return false end
+    function controller:tick() self.ticks = self.ticks + 1 end
+    function controller:status() return {state = self.state} end
+    function controller:cancel() self.busy = false; return true end
     local module = package.loaded["LootBox/TillFull"]
-    local oldNew, oldStatus, oldCancel = module.new, app.jobs.status, app.jobs.cancel
-    local canRecipe, expectedRecipe, expectedSource = {}, nil, nil
-    module.new = function(_, _, items, kind, both, recipe, source)
-        assert(items[1] == item and kind == "food" and both == false)
-        assert(recipe == expectedRecipe and source == expectedSource)
-        return controller
-    end
-    local pending = true
-    app.jobs.status = function() return {hasJob = pending, canPreview = not pending, state = "paused"} end
-    app.jobs.cancel = function() calls.consumeJobCancel = true; return true end
-    controller.full = true
-    assert(app:tillFull({item}, "food") and not calls.consumeJobCancel and not controller.ticks)
-    expectedRecipe, expectedSource = canRecipe, {}
-    assert(app:tillFull({item}, "food",canRecipe,expectedSource) and not calls.consumeJobCancel and not controller.ticks)
-    expectedRecipe, expectedSource = nil, nil
-    controller.full = false
-    assert(not app:tillFull({item}, "food") and calls.consumeJobCancel)
-    pending = false
-    assert(app:tillFull({item}, "food") and controller.ticks == 1)
-    local previews, starts, recoveries, resumes = calls.previews, calls.starts, calls.recoveries, resumeCalls
-    assert(not app:preview({}) and not app:previewCondense() and not app:start({}))
-    assert(not app:pause() and not app:resume() and not app:recoverPersonalGear())
-    assert(calls.previews == previews and calls.starts == starts and calls.recoveries == recoveries and resumeCalls == resumes)
-    assert(not app:tillFull({item}, "food"))
-    assert(app:cancel() and controller.cancelled and app:status().state == "cancelling")
-    assert(not app:start({}), "Cancellation still owns pending cleanup")
-    controller.busy, controller.state = false, "cancelled"
-    assert(app:start({}) and app.consumption == nil)
-    app.consumption = controller
-    assert(app:recoverPersonalGear() and app.consumption == nil)
-    app.consumption = controller
-    assert(app:resume() and app.consumption == nil)
-    app.jobs.status, app.jobs.cancel, module.new = oldStatus, oldCancel, oldNew
+    local before = module.new
+    module.new = function() return controller end
+    assert(app:tillFull({item}, "fluid"))
+    assert(app.jobs.state == "paused" and app.consumption == controller and controller.ticks > 0)
+    App.tick(); assert(app.jobs.state == "paused", "Not while still drinking")
+    controller.busy = false
+    App.tick(); assert(app.jobs.state == "running")
+    local status = app:status()
+    assert(status.state == "running" and status.canPause and status.label == "Clean kitchen" and not status.consuming, "The job is shown, not the finished drink")
+    module.new = before
 end)
 
-test("new requests replace active or paused jobs only after cleanup; latest request wins", function()
-    local app = assert(App.get(0))
-    local oldStatus, oldCancel = app.jobs.status, app.jobs.cancel
-    local status = {hasJob = true, canPreview = false, state = "running"}
-    local cancels, first, second = 0, 0, 0
-    app.jobs.status = function() return status end
-    app.jobs.cancel = function() cancels = cancels + 1; return true end
-    assert(app:replaceJob(function() first = first + 1 end))
-    assert(app:replaceJob(function() second = second + 1; return true end))
-    app:runReplacement()
-    assert(cancels == 2 and first == 0 and second == 0)
-    status = {hasJob = false, canPreview = true, state = "cancelled"}
-    app:runReplacement(); app:runReplacement()
-    assert(first == 0 and second == 1)
-    assert(app:replaceJob(function() second = second + 1; return true end))
-    assert(second == 2, "Idle request executes immediately")
-    status = {hasJob = true, canPreview = true, state = "paused"}
-    assert(app:replaceJob(function() first = first + 1 end))
-    assert(first == 0, "Paused checkpoint must be cancelled, never implicitly resumed")
-    app:cancel()
-    status = {hasJob = false, canPreview = true}
-    app:runReplacement()
-    assert(first == 0 and app.replacement == nil)
-    app.jobs.status, app.jobs.cancel = oldStatus, oldCancel
+test("a job started before a pending drink begins replaces that drink", function()
+    local app = working("running")
+    local began = 0
+    local module = package.loaded["LootBox/TillFull"]
+    local before = module.new
+    module.new = function() return {alreadySatisfied = function() return false end, isBusy = function() return false end, tick = function() began = began + 1 end, state = "finished"} end
+    app.jobs.settles = false
+    assert(app:tillFull({item}, "fluid") and app.borrowed)
+    assert(app:start(assert(app:preview(want))) and app.borrowed == nil)
+    App.tick(); assert(began == 0)
+    module.new = before
 end)
 
-test("deferred replacement fails safely when recovery appears or callback fails", function()
-    local app = assert(App.get(0))
-    local oldStatus, oldCancel, oldRecovery = app.jobs.status, app.jobs.cancel, app.recovery.status
-    local status, pending, ran = {hasJob = true, canPreview = false}, false, false
-    app.jobs.status = function() return status end
-    app.jobs.cancel = function() return true end
-    app.recovery.status = function() return {pending = pending} end
-    assert(app:replaceJob(function() ran = true end))
-    status, pending = {hasJob = false, canPreview = true}, true
-    app:runReplacement()
-    assert(not ran and app:status().reason:find("Recover personal gear", 1, true))
-    pending, status = false, {hasJob = true, canPreview = false}
-    assert(app:replaceJob(function() error("injected replacement error") end))
-    status = {hasJob = false, canPreview = true}
-    app:runReplacement()
-    assert(app.replacement == nil and app:status().reason:find("injected replacement error", 1, true))
-    app.replacementProblem = nil
-    app.jobs.status, app.jobs.cancel, app.recovery.status = oldStatus, oldCancel, oldRecovery
+test("drinking never resumes a job the player paused", function()
+    local app = working("paused")
+    local controller = {busy = false, state = "finished"}
+    function controller:isBusy() return self.busy end
+    function controller:alreadySatisfied() return false end
+    function controller:tick() end
+    function controller:status() return {state = self.state} end
+    local module = package.loaded["LootBox/TillFull"]
+    local before = module.new
+    module.new = function() return controller end
+    assert(app:tillFull({item}, "fluid"))
+    App.tick(); App.tick()
+    assert(app.jobs.state == "paused")
+    module.new = before
 end)
 
-test("Escape pauses work and clears queued replacements even when native UI consumed its event", function()
-    local app = assert(App.get(0))
-    local oldStatus, oldCancel = app.jobs.status, app.jobs.cancel
-    local status, ran = {hasJob = true, canPreview = false}, false
-    app.jobs.status = function() return status end
-    app.jobs.cancel = function() return true end
+test("an automatic sip yields to the player's own request", function()
+    local app = working("idle")
+    local sip = {automatic = true, busy = true}
+    function sip:isBusy() return self.busy end
+    function sip:cancel() self.busy = false; return true end
+    function sip:tick() end
+    function sip:status() return {state = "running"} end
+    app.consumption = sip
+    assert(app:start(assert(app:preview(want))) and not sip.busy)
+end)
+
+test("Escape pauses a job unless that press is closing something", function()
+    local app = working("running")
     Keyboard = {KEY_ESCAPE = 1}
-    local down = false
-    isKeyDown = function() return down end
-    assert(app:replaceJob(function() ran = true end))
-    local before = calls.pauses
-    App.onKeyStartPressed(2)
-    assert(calls.pauses == before)
-    App.onKeyStartPressed(1)
-    assert(calls.pauses == before + 1 and app.replacement == nil)
-    assert(app:replaceJob(function() ran = true end))
-    down = true; App.tick(); App.tick()
-    assert(calls.pauses == before + 2 and app.replacement == nil)
-    status = {hasJob = false, canPreview = true}
-    down = false; App.tick()
-    assert(not ran)
-    Keyboard, isKeyDown = nil, nil
-    app.jobs.status, app.jobs.cancel = oldStatus, oldCancel
+    local typing, guard = false, false
+    getCore = function() return {isDoingTextEntry = function() return typing end} end
+    App.escapeGuard = function() return guard end
+    typing = true; App.onKeyStartPressed(1); assert(app.jobs.state == "running")
+    typing, guard = false, true; App.onKeyStartPressed(1); assert(app.jobs.state == "running")
+    guard = false; App.onKeyStartPressed(2); assert(app.jobs.state == "running")
+    App.onKeyStartPressed(1); assert(app.jobs.state == "paused" and app.jobs.trigger == "escape")
+    Keyboard, getCore, App.escapeGuard = nil, nil, nil
 end)
 
-test("Pour Into owns one cancellable job and never supersedes a job, recovery or other action", function()
-    local app=assert(App.get(0))
-    local old=package.loaded["LootBox/Pour"]
-    local status, made, pending={hasJob=true,canPreview=false},0,false
-    local oldStatus,oldRecovery=app.jobs.status,app.recovery.status
-    app.jobs.status=function() return status end
-    app.recovery.status=function() return {pending=pending} end
-    local source,targets,options={},{},{}
-    local running=true
-    local job={name="Pour Into",tick=function() end,isBusy=function() return running end,
-        cancel=function() running=false;return true end, status=function() return {state="running"} end}
-    package.loaded["LootBox/Pour"]={options=function()return options end,displayed=function()return "selected" end,
-        new=function(p,w,s,t,o,context)
-            assert(p==player and w==app.world and s==source and t==targets and o==options)
-            local saved,pane=context();assert(saved==options and pane=="selected")
-            made=made+1;return job
-        end}
-    assert(not app:startPour(source,targets,options))
-    status={hasJob=false,canPreview=true}
-    pending=true;assert(not app:startPour(source,targets,options));pending=false
-    app.replacement=function() end
-    assert(not app:startPour(source,targets,options) and app.replacement)
-    app.replacement=nil
-    assert(made==0 and app:startPour(source,targets,options))
-    assert(app.consumption==job and made==1 and not app:startPour(source,targets,options))
-    local ok,msg=app:preview({});assert(not ok and msg:find("Pour Into",1,true))
-    assert(app:cancel() and not running)
-    app.consumption=nil
-    app.jobs.status,app.recovery.status,package.loaded["LootBox/Pour"]=oldStatus,oldRecovery,old
-end)
-
-test("a validly encoded malformed category document remains read-only", function()
-    assert(Store.save("LootBox/categories", { categories = false }))
+test("the game item catalog is read once and custom categories refresh it", function()
     App.reset()
-    assert(assert(App.catalog()).error)
-    assert(not App.saveCategory({ name = "Do not overwrite", types = {}, includes = {} }))
-    assert(assert(Store.load("LootBox/categories")).categories == false)
+    local reads, original = 0, getAllItems
+    getAllItems = function() reads = reads + 1; return original() end
+    local first = assert(App.catalog())
+    assert(App.catalog() == first and reads == 1)
+    assert(App.saveCategory({name = "Fresh", types = {}, includes = {}}))
+    local second = assert(App.catalog())
+    assert(second ~= first and reads == 1 and second.categories[#second.categories].name == "Fresh")
+    getAllItems = original
 end)
 print(passed .. " App integration cases passed (explicit world/action and file doubles)")
 

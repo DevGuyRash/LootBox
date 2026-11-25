@@ -1,2044 +1,433 @@
 package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.path
 
-local current
-local function copy(value)
-    if type(value) ~= "table" then return value end
-    local result = {}
-    for key, item in pairs(value) do result[key] = copy(item) end
-    return result
+-- Contextual rows: what is offered must follow from the facts of the moment.
+-- Native menus and the job engine are doubles; Menus, Describe and Log are real.
+local passed = 0
+function getTimestampMs() return 1 end
+Events = {}
+for _, name in ipairs({"OnFillInventoryObjectContextMenu", "OnFillInventoryContextMenuNoItems", "OnRefreshInventoryWindowContainers", "OnFillWorldObjectContextMenu"}) do
+    Events[name] = {Add = function(fn) Events[name].fn = fn end}
 end
-
+LuaEventManager = {AddEvent = function() end}
+local classes = setmetatable({}, {__mode = "k"})
+function instanceof(object, class) return type(object) == "table" and classes[object] == class end
+function getText(key) return key end
+function getTextOrNull() return nil end
+function getTexture(path) return {path = path} end
+function getItemNameFromFullType(value) return (value:gsub("^Base%.", "")) end
+function getCore() return {isTutorial = function() return false end} end
+function isGamePaused() return false end
+function triggerEvent() end
+for _, name in ipairs({"ISUI/ISContextMenu", "ISUI/ISToolTip"}) do package.loaded[name] = true end
+ISToolTip = {new = function() return {initialise = function() end, setVisible = function() end, setName = function() end} end}
 local Menu = {}
 Menu.__index = Menu
-function Menu:new(root) return setmetatable({ options = {}, optionPool = {}, submenus = {}, root = root }, self) end
-function Menu:clear()
-    for _, option in ipairs(self.options) do self.optionPool[#self.optionPool + 1] = option end
-    self.options = {}
-    if not self.root then self.menuCursor = 0 end
-    self.visible = false
-end
-function Menu:setVisible(visible) self.visible = visible end
-function Menu:bringToTop() self.raised = true end
-function Menu:addOption(name, target, action)
-    local option = table.remove(self.optionPool) or {}
-    local keys = {}
-    for key in pairs(option) do keys[#keys + 1] = key end
-    for _, key in ipairs(keys) do option[key] = nil end
-    option.name, option.target, option.onSelect = name, target, action
-    self.options[#self.options + 1] = option
-    return option
-end
+local function newMenu() return setmetatable({options = {}}, Menu) end
+function Menu:addOption(name, target, onSelect) local o = {name = name, target = target, onSelect = onSelect}; self.options[#self.options + 1] = o; return o end
 function Menu:addSubMenu(option, child) option.child = child end
-function Menu:setOptionChecked(option, checked) option.checkMark = checked end
-ISContextMenu = { getNew = function(_, parent)
-    local root = parent.root or parent
-    root.menuCursor = (root.menuCursor or 0) + 1
-    local child = root.submenus[root.menuCursor]
-    if not child then child = Menu:new(root); root.submenus[root.menuCursor] = child end
-    child:clear()
-    return child
-end }
-ISToolTip = { new = function()
-    return { initialise = function() end, setVisible = function() end,
-        setName = function(self, name) self.name = name end }
-end }
-package.loaded["ISUI/ISContextMenu"] = true
-package.loaded["ISUI/ISToolTip"] = true
+function Menu:setOptionChecked(option, on) option.checked = on end
+ISContextMenu = {getNew = function() return newMenu() end}
+ISInventoryPane = {getActualItems = function(rows)
+    local result = {}
+    for _, row in ipairs(rows) do if row.items then for index = 2, #row.items do result[#result + 1] = row.items[index] end else result[#result + 1] = row end end
+    return result
+end}
 
-local registrations = { inventory = {}, world = {}, background = {}, refresh = {} }
-local eventDeclarations = 0
-Events = {
-    OnFillInventoryObjectContextMenu = { Add = function(fn) registrations.inventory[#registrations.inventory + 1] = fn end },
-    OnFillWorldObjectContextMenu = { Add = function(fn) registrations.world[#registrations.world + 1] = fn end },
-    OnRefreshInventoryWindowContainers = { Add = function(fn) registrations.refresh[#registrations.refresh + 1] = fn end },
+local f
+local categories = {}
+package.loaded["LootBox/App"] = {
+    get = function() return f.app end, getPreferences = function() return f.preferences end, customCategories = function() return categories end,
+    category = function(id) for _, c in ipairs(categories) do if c.id == id then return c end end end,
+    categoryName = function(id) for _, c in ipairs(categories) do if c.id == id then return c.name end end return (id:gsub("^native:", "")) end,
+    saveCategory = function(definition) f.saved = definition; return definition.id end,
 }
-LuaEventManager = { AddEvent = function(name)
-    assert(name == "OnFillInventoryContextMenuNoItems")
-    eventDeclarations = eventDeclarations + 1
-    if not Events[name] then Events[name] = { Add = function(fn) registrations.background[#registrations.background + 1] = fn end } end
-end }
-assert(Events.OnFillInventoryContextMenuNoItems == nil)
-function getPlayerInventory() return current.inventoryPage end
-function getPlayerLoot() return current.lootPage end
-function getPlayerContextMenu(playerIndex) current.contextPlayer = playerIndex; return current.contextMenu end
-function isGamePaused() return current.paused end
-function getCore() return { isTutorial = function() return current.tutorial end } end
-ISInventoryPaneContextMenu = {}
-function instanceof(object, class) return type(object) == "table" and object.classes and object.classes[class] == true end
-function getSpecificPlayer() return current.player end
-function getText(key) return key == "IGUI_ItemCat_Food" and "Food" or key end
-function getTextOrNull() return nil end
-function getTexture(path)
-    assert(type(path) == "string" and path ~= "", "Native texture keys must be nonempty strings")
-    return path
-end
-function getMouseXScaled() return 10 end
-function getMouseYScaled() return 20 end
-ISWorldObjectContextMenu = { setTest = function() current.tested = current.tested + 1; return "available" end }
-IsoObjectPicker = { Instance = { PickVehicle = function() return current.pickedVehicle end } }
-
-local defaults = { contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
-    vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true,
-    confirmQuickMoves = true, rememberLastSetup = true, showTips = true }
-local App = {
-    getPreferences = function() return copy(current.preferences) end,
-    get = function() return current.app end,
-    category = function(id)
-        for _, definition in ipairs(current.definitions) do if definition.id == id then return definition end end
-    end,
-}
-package.loaded["LootBox/App"] = App
-local selectionInstalls = 0
-package.loaded["LootBox/Selection"] = {
-    install = function() selectionInstalls = selectionInstalls + 1 end,
-    capture = function(playerIndex, items)
-        current.selectionCapture = {playerIndex = playerIndex, items = items}
-        return current.selectionTarget
-    end,
-    open = function(target) current.selectionOpened = target end,
-    attach = function(pane) current.selectionAttached = pane end,
-}
+package.loaded["LootBox/Catalog"] = {categoryId = function(item) return "native:" .. item.category end}
+package.loaded["LootBox/Selection"] = {install = function() end, attach = function() end, capture = function() return f.amount end, open = function() end}
+package.loaded["LootBox/ObjectMenu"] = {building = function() return f.building end, append = function(_, menu, container) f.objectFor = container; menu:addOption("Disassemble", nil, function() end); return 1 end}
+package.loaded["LootBox/ContainerFocus"] = {select = function() return false end, button = function() end}
+package.loaded["LootBox/PaneClicks"] = {attach = function() end}
+package.loaded["LootBox/ConsumeMenu"] = {add = function() end}
+package.loaded["LootBox/PourMenu"] = {add = function() end}
+package.loaded["LootBox/MountedDispenserMenu"] = {add = function() end}
 local Menus = require "LootBox/Menus"
-local Guides = require "LootBox/Guides"
-local interface = {
-    showProgress = function(playerIndex) current.progressPlayer = playerIndex end,
-    open = function(playerIndex, context, mode)
-        local opened = { playerIndex = playerIndex, context = context, mode = mode }
-        current.opened = opened
-        return { messageText = function(_, message) opened.message = message end }
-    end,
-    quickAction = function(playerIndex, context, request, pickArea)
-        current.quick = { playerIndex = playerIndex, context = context, request = request, pickArea = pickArea }
-    end,
-}
-Menus.install(interface)
+Menus.install({act = function(_, request, options) f.acted, f.options = request, options end, say = function(_, text) f.said = text end,
+    open = function(_, page, context) f.opened, f.openContext = page, context end, showJob = function() f.shown = true end})
 
-local function container(kind, owned)
-    return { kind = kind, owned = owned,
-        getType = function(self) return self.kind end,
-        getContainingItem = function(self) return self.item end,
-        getParent = function(self) return self.parent end,
-        getCustomName = function(self) return self.customName end,
-        getVehiclePart = function(self) return self.part end }
+local function container(kind, fields)
+    local c = {kind = kind, facts = {kind = kind, items = 0, takeable = 0, explored = true, locked = false, owned = false, capacity = 50, types = {}, categories = {}}}
+    for key, value in pairs(fields or {}) do c.facts[key] = value end
+    function c:getType() return kind == "floor" and "floor" or kind end
+    function c:getContainingItem() return self.item end
+    function c:getVehiclePart() end
+    function c:getParent() return nil end
+    function c:getItems() return {size = function() return 1 end, get = function() return {} end} end
+    function c:isItemAllowed() return not self.refuses end
+    function c:isInside() return false end
+    function c:isLockedToCharacter() return false end
+    return c
 end
-
-local function item(source, kind)
-    return { classes = { InventoryItem = true }, source = source,
-        getContainer = function(self) return self.source end,
-        getFullType = function() return kind or "Base.Apple" end,
-        getDisplayCategory = function() return "Food" end,
-        getName = function(self) return self.name or kind or "Apple" end }
+local function item(name, where, category)
+    local i = {category = category or "Material", where = where, name = name}
+    classes[i] = "InventoryItem"
+    function i:getFullType() return "Base." .. name end
+    function i:getName() return name end
+    function i:getContainer() return self.where end
+    return i
 end
-
-local function fixture()
-    local f = { preferences = copy(defaults), definitions = {}, matches = {}, presets = {}, kept = {}, tested = 0,
-        jobStatus = {state = "idle"}, recovery = {pending = false} }
-    current = f
-    ISInventoryPaneContextMenu.dontCreateMenu = false
-    ContainerButtonIcons = nil
-    f.inventory, f.crate, f.floor = container("inventory", true), container("crate", false), container("floor", false)
-    f.square = { getRoom = function() return f.room end, getBuilding = function() return f.building end }
-    f.room, f.building = {}, {}
-    f.player = { classes = { IsoPlayer = true }, getInventory = function() return f.inventory end,
-        isDead = function() return f.dead end, getCurrentSquare = function() return f.square end, getSquare = function() return f.square end,
-        getVehicle = function() return f.seatedVehicle end }
-    f.inventory.parent = f.player
-    f.inventoryPage = { player = 0, inventoryPane = { inventory = f.inventory }, backpacks = {} }
-    f.lootPage = { player = 0, inventoryPane = { inventory = f.crate }, backpacks = {} }
-    f.contextMenu = Menu:new()
-    f.viewed = f.crate
-    f.checklist = { ids = { "native:Food" }, types = { "Base.Bandage" }, all = false }
-    f.app = {
-        status = function() return f.jobStatus end,
-        recoveryStatus = function() return f.recovery end,
-        recoverPersonalGear = function() f.recoveries = (f.recoveries or 0) + 1; return not f.recoveryError, f.recoveryError end,
-        world = {
-            owns = function(_, source) return source and source.owned == true end,
-            describe = function(_, selected) return { fullType = selected:getFullType(), categoryId = "native:Food" } end,
-            graph = { list = function() return f.definitions end,
-                matches = function(_, id) return f.matches[id] == true end },
-        },
-        currentContainer = function() return f.viewed end,
-        getChecklist = function() return copy(f.checklist) end,
-        getSetups = function() return { presets = f.presets }, f.setupError end,
-        isKept = function(_, selected) return f.kept[selected] == true end,
-        protect = function(_, selected, keep) f.kept[selected] = keep; return true end,
-        rememberVehicle = function(_, selected) f.remembered = selected; return true end,
-        resolveSetup = function(_, setup, context)
-            f.resolvedContext = context
-            local request = copy(setup)
-            if request.scope == "container" then request.sourceContainer = context.sourceContainer or context.container end
-            if request.destination.kind == "container" then request.destination.ref = context.targetContainer or context.container end
-            return request
-        end,
-        loadSetup = function(self, id, context)
-            f.loadedId = id
-            for _, preset in ipairs(f.presets) do
-                if preset.id == id then return self:resolveSetup(preset.setup, context) end
-            end
-            return nil, "Saved setup is unavailable"
-        end,
-        start = function() error("Context menus must hand requests to the review interface") end,
-    }
-    f.apple = item(f.inventory)
-    return f
+local function setup()
+    local main = container("main", {owned = true})
+    local square = {getRoom = function() return f.room end, getBuilding = function() return f.room end, getX = function() return 1 end, getY = function() return 2 end, getZ = function() return 0 end}
+    local player = {getInventory = function() return main end, getCurrentSquare = function() return square end, isDead = function() return false end, getVehicle = function() end}
+    f = {main = main, square = square, player = player, carried = {}, carriedCategory = {}, matching = 0, jobs = {state = "idle"}, presets = {},
+        checklist = {ids = {}, types = {}}, labels = {}, preferences = {contextMenus = true, inventoryShortcuts = true, worldShortcuts = true, vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true, tillFullEnabled = true}}
+    local world = {graph = {list = function() return {} end, matches = function() return false end}}
+    function world:owns(c) return c.facts.owned end
+    function world:containerFacts(c) return c.facts end
+    function world:hasKnownBins() return f.bins == true end
+    function world:hasStorageLabels() return f.storage == true end
+    function world:storageAccepts() return f.storage == true end
+    function world:rememberedVehicleLoaded() return f.car == true end
+    function world:isRememberedVehicle() return f.car == true end
+    function world:countCarried(fullType) if fullType then return f.carried[fullType] or 0 end local n = 0; for _, v in pairs(f.carried) do n = n + v end return n end
+    function world:countCarriedCategory(id) return f.carriedCategory[id] or 0 end
+    function world:countCarriedFilter() return f.matching end
+    function world:countMatching() return f.matching end
+    function world:roomFacts() return f.roomFacts end
+    function world:key(c) return c.kind ~= "corpse" and c or nil end
+    function world:describe() return {} end
+    f.app = {world = world, state = {}}
+    function f.app:status() return f.jobs end
+    function f.app:getChecklist() return f.checklist end
+    function f.app:getSetups() return {presets = f.presets} end
+    function f.app:labels(c) return f.labels[c] or {} end
+    function f.app:setLabels(c, ids) f.labels[c] = ids; return true end
+    function f.app:onChecklist() return f.listed == true end
+    function f.app:toggleChecklist() f.toggled = true; return true end
+    function f.app:isKept() return false end
+    function f.app:protect(i) f.kept = (f.kept or 0) + 1; return true end
+    function f.app:itemLabels() return {} end
+    function f.app:currentContainer() return f.open end
+    function f.app:rememberVehicle() f.remembered = true; return true end
+    categories = {}
+    getSpecificPlayer = function() return player end
+    local pages = {inventory = {backpacks = {{inventory = main}}}, loot = {backpacks = {}}}
+    f.pages = pages
+    getPlayerInventory = function() return pages.inventory end
+    getPlayerLoot = function() return pages.loot end
 end
-
-local function option(menu, name)
-    for _, candidate in ipairs(menu.options) do if candidate.name == name then return candidate end end
+local function open(...)
+    for _, c in ipairs({...}) do table.insert(f.pages.loot.backpacks, {inventory = c}) end
+    f.open = (...)
 end
-local function needed(menu, name) return assert(option(menu, name), "Missing menu action: " .. name) end
-local function click(menu, name)
-    local selected = needed(menu, name)
-    assert(not selected.notAvailable, "Action unexpectedly unavailable: " .. name)
-    assert(selected.onSelect, "Action is not selectable: " .. name)
-    selected.onSelect(selected.target)
-    return selected
-end
-local function icon(selected)
-    assert(selected.iconTexture ~= nil or selected.itemForTexture ~= nil, "Missing icon: " .. selected.name)
-    assert(selected.iconTexture == nil or selected.itemForTexture == nil, "Conflicting icon renderers: " .. selected.name)
-    return selected.iconTexture or selected.itemForTexture
-end
-local function iconTree(menu)
-    local total = 0
-    for _, selected in ipairs(menu.options) do
-        icon(selected)
-        total = total + 1
-        if selected.child then total = total + iconTree(selected.child) end
+local function tree(menu, into, prefix)
+    into, prefix = into or {}, prefix or ""
+    for _, option in ipairs(menu.options) do
+        into[#into + 1] = prefix .. option.name
+        into[prefix .. option.name] = option
+        if option.child then tree(option.child, into, prefix .. option.name .. " > ") end
     end
-    return total
+    return into
 end
-local function ownedIcons(parent)
-    local root = option(parent, "LootBox")
-    if not root then return end
-    icon(root)
-    assert(iconTree(root.child) > 0)
-    assert(icon(root) ~= icon(needed(root.child, "Open LootBox")), "Root and manager actions must have different symbols")
-end
-local function distinctIcons(menu)
-    local seen = {}
-    for _, selected in ipairs(menu.options) do
-        local image = icon(selected)
-        assert(not seen[image], "Unrelated actions share an icon: " .. tostring(seen[image]) .. " / " .. selected.name)
-        seen[image] = selected.name
+local function has(t, text) for _, name in ipairs(t) do if name:find(text, 1, true) then return t[name] end end end
+local function test(name, run) setup(); run(); passed = passed + 1; print("PASS " .. name) end
+local function every(menu, check)
+    for _, option in ipairs(menu.options) do
+        check(option)
+        if option.child then every(option.child, check) end
     end
 end
-local function inventoryMenu(f, selected)
-    local parent = Menu:new()
-    parent:addOption("Foreign action", nil, function() f.foreignClicked = true end)
-    Menus.inventoryMenu(0, parent, selected or { f.apple })
-    ownedIcons(parent)
-    return parent, option(parent, "LootBox") and option(parent, "LootBox").child
-end
-local function worldMenu(f, objects)
-    local parent = Menu:new()
-    parent:addOption("Foreign action", nil, function() f.foreignClicked = true end)
-    Menus.worldMenu(0, parent, objects or {}, false)
-    ownedIcons(parent)
-    return parent, option(parent, "LootBox") and option(parent, "LootBox").child
-end
-local function fixtureObject(f, target)
-    return { getSquare = function() return f.square end, getContainerCount = function() return 1 end,
-        getContainerByIndex = function(_, index) if index == 0 then return target end end }
-end
-local function vehicle(f)
-    local storage = container("TruckBed", false)
-    local part = { getItemContainer = function() return storage end, getId = function() return "TruckBed" end }
-    storage.part = part
-    return { getPartCount = function() return 1 end, getPartByIndex = function(_, index) if index == 0 then return part end end }
-end
 
-local function bag(f, owned, name)
-    local contents = container("bag", owned)
-    local selected = item(owned and f.inventory or f.crate, "Base.Bag_Schoolbag")
-    selected.classes.InventoryContainer = true
-    selected.name = name or "School Bag"
-    selected.getInventory = function() return contents end
-    contents.item = selected
-    return selected, contents
-end
-
-local function sidebar(f, page, source, original)
-    local button = { inventory = source, parent = { parent = page } }
-    button.onRightMouseDown = original or function(clicked, x, y)
-        f.nativeCalls = (f.nativeCalls or 0) + 1
-        f.nativeCoordinates = { x, y }
-        f.contextMenu:clear()
-        f.contextMenu:addOption("Native rename", nil, function() f.nativeRenamed = true end)
-        f.contextMenu:addOption("Foreign action", nil, function() f.foreignClicked = true end)
-        f.contextMenu.forceVisible, f.contextMenu.visibleCheck = false, false
-        return "native-result"
-    end
-    page.backpacks[#page.backpacks + 1] = button
-    return button
-end
-
-local function contentsMenu(f, source)
-    local parent = Menu:new()
-    Menus.containerMenu(0, parent, source)
-    ownedIcons(parent)
-    return parent, option(parent, "LootBox") and option(parent, "LootBox").child
-end
-
-local function count(menu, name)
-    local total = 0
-    for _, candidate in ipairs(menu.options) do if candidate.name == name then total = total + 1 end end
-    return total
-end
-
-local passed, failures = 0, {}
-local function test(name, run)
-    local ok, err = pcall(run, fixture())
-    if ok then passed = passed + 1; print("PASS " .. name)
-    else failures[#failures + 1] = name .. ": " .. tostring(err); print("FAIL " .. name .. ": " .. tostring(err)) end
-end
-
-print("Menu integration uses explicit native context/tooltip/App doubles; it does not prove native rendering or gameplay")
-
-test("install is idempotent and preserves foreign menu actions", function(f)
-    Menus.install(interface)
-    assert(#registrations.inventory == 1 and #registrations.world == 1)
-    assert(eventDeclarations == 1 and #registrations.background == 1 and #registrations.refresh == 1)
-    local parent, menu = inventoryMenu(f)
-    assert(menu)
-    click(parent, "Foreign action")
-    assert(f.foreignClicked)
+test("an ordinary item with nothing to do beyond itself gets no bulk rows", function()
+    f.carried["Base.Hammer"] = 1
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Hammer", f.main, "Tool")})
+    local t = tree(menu)
+    assert(not has(t, "All Hammer") and not has(t, "Drop") and not has(t, "Sort") and not has(t, "Settings") and not has(t, "help"))
+    assert(has(t, "LootBox > On my loot list") and has(t, "LootBox > Keep this one"))
 end)
 
-test("the master context option hides both entry points", function(f)
+test("more of the same elsewhere offers them as one submenu named for the item", function()
+    local crate = container("crate", {takeable = 3})
+    open(crate)
+    f.carried["Base.Nails"] = 40
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    local t = tree(menu)
+    assert(has(t, "All Nails (40) > Put in Crate") and has(t, "All Nails (40) > Drop"))
+    assert(not has(t, "Put away") and not has(t, "Throw away") and not has(t, "vehicle"), "No labels, bins or car are known")
+    has(t, "All Nails (40) > Put in Crate").onSelect()
+    assert(f.acted.scope == "inventory" and f.acted.destination.ref == crate and f.acted.filter.types[1] == "Base.Nails" and type(f.options.interaction) == "number")
+end)
+
+test("rows follow what is known: labels, bins and the car", function()
+    f.carried["Base.Nails"] = 40
+    f.storage, f.bins, f.car = true, true, true
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    local t = tree(menu)
+    assert(has(t, "All Nails (40) > Put away") and has(t, "All Nails (40) > Throw away") and has(t, "All Nails (40) > To my vehicle"))
+    has(t, "All Nails (40) > Throw away").onSelect()
+    assert(f.acted.destination.kind == "trash" and f.acted.scope == "inventory")
+end)
+
+test("a single choice is one row, not a submenu", function()
+    f.carried["Base.Nails"] = 1
+    f.storage = true
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    local t = tree(menu)
+    assert(has(t, "LootBox > Put away all Nails (1)") and not has(t, "All Nails (1) >"))
+end)
+
+test("loot items offer taking only when there is more than what was clicked", function()
+    local crate, shelf = container("crate", {takeable = 5, types = {["Base.Nails"] = 5}}), container("shelves", {takeable = 2, types = {["Base.Nails"] = 2}})
+    open(crate, shelf)
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", crate)})
+    local t = tree(menu)
+    assert(has(t, "All Nails (5) > Take") and has(t, "All Nails (5) > Take from all open containers (7)"))
+    crate.facts.types["Base.Nails"], shelf.facts.types["Base.Nails"] = 1, nil
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", crate)})
+    assert(not has(tree(menu), "Take"))
+end)
+
+test("several selected types act as one selection", function()
+    f.carried["Base.Nails"], f.carried["Base.Screws"] = 30, 12
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main), item("Screws", f.main)})
+    local row = has(tree(menu), "LootBox > Drop all 2 selected types (42)")
+    row.onSelect()
+    assert(#f.acted.filter.types == 2)
+end)
+
+test("a container offers only what its contents allow", function()
+    local crate = container("crate")
+    open(crate)
+    local menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    local t = tree(menu)
+    assert(not has(t, "Take") and not has(t, "Move contents") and not has(t, "Throw"), "Empty")
+    crate.facts.takeable, crate.facts.types = 4, {["Base.Nails"] = 4}
+    f.bins = true
+    menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    t = tree(menu)
+    assert(has(t, "Take everything (4)") and has(t, "Throw away contents (4)") and has(t, "Move contents > The floor"))
+    has(t, "Take everything (4)").onSelect()
+    assert(f.acted.scope == "container" and f.acted.sourceContainer == crate and f.acted.destination.kind == "inventory")
+end)
+
+test("a locked container, and the player's own inventory, get no destructive or useless rows", function()
+    local crate = container("crate", {takeable = 4, locked = true})
+    open(crate)
+    local menu = newMenu()
+    assert(Menus.containerMenu(0, menu, crate) == false and #menu.options == 0)
+    f.main.facts.takeable, f.bins = 9, true
+    menu = newMenu()
+    Menus.containerMenu(0, menu, f.main)
+    local t = tree(menu)
+    assert(not has(t, "Throw") and not has(t, "Take everything") and not has(t, "Belongs here"))
+end)
+
+test("unopened containers can be taken from before their contents are known", function()
+    local crate = container("crate", {explored = false})
+    open(crate)
+    f.checklist = {ids = {"native:Food"}, types = {}}
+    local menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    local t = tree(menu)
+    assert(t["LootBox > Take everything"] and t["LootBox > Take my loot list"])
+end)
+
+test("a key ring is not offered for planks", function()
+    local crate, ring = container("crate", {takeable = 1}), container("KeyRing", {owned = true})
+    ring.refuses = true
+    open(crate)
+    table.insert(f.pages.inventory.backpacks, {inventory = ring})
+    local menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    assert(not has(tree(menu), "KeyRing"))
+end)
+
+test("labels are ticked in place, starting with what is already inside", function()
+    local crate = container("crate", {takeable = 5, categories = {["native:Food"] = 4, ["native:Tool"] = 1}})
+    open(crate)
+    local menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    local t = tree(menu)
+    assert(has(t, "Belongs here > Food") and has(t, "Belongs here > Tool") and has(t, "Belongs here > More..."))
+    has(t, "Belongs here > Food").onSelect()
+    assert(f.labels[crate][1] == "native:Food" and not f.acted, "Labelling starts no job")
+    menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    t = tree(menu)
+    local row = has(t, "Belongs here: Food > Food")
+    assert(row.checked)
+    row.onSelect()
+    assert(#f.labels[crate] == 0)
+end)
+
+test("what is carried that fits a container is offered by count", function()
+    local crate = container("crate", {takeable = 5, types = {["Base.Nails"] = 5}})
+    open(crate)
+    f.carried["Base.Nails"], f.labels[crate], f.carriedCategory["native:Food"] = 7, {"native:Food"}, 3
+    local menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    local t = tree(menu)
+    assert(has(t, "Put in > More of what is inside (7)") and has(t, "Put in > What belongs here (3)"))
+end)
+
+test("the ground outdoors with nothing in reach adds no LootBox entry at all", function()
+    local menu = newMenu()
+    Menus.worldMenu(0, menu, {})
+    assert(#menu.options == 0)
+end)
+
+test("indoors, place actions live under one row and only for places with something in them", function()
+    f.room, f.roomFacts = {}, {containers = 0, groundItems = 0}
+    local menu = newMenu()
+    Menus.worldMenu(0, menu, {})
+    local t = tree(menu)
+    assert(not has(t, "This room"), "An empty room")
+    f.roomFacts, f.checklist = {containers = 2, groundItems = 0}, {ids = {"native:Food"}, types = {}}
+    menu = newMenu()
+    Menus.worldMenu(0, menu, {})
+    t = tree(menu)
+    assert(#menu.options == 1 and #menu.options[1].child.options == 1 and menu.options[1].child.options[1].name == "Around here")
+    assert(has(t, "This room > Take my loot list") and has(t, "This building > Take everything") and has(t, "Mark an area"))
+    assert(not has(t, "Throw"), "No trash can is known")
+    has(t, "This room > Take my loot list").onSelect()
+    assert(f.acted.scope == "room" and f.acted.filter.ids[1] == "native:Food")
+end)
+
+test("a clicked vehicle replaces place actions with its own", function()
+    local trunk = container("trunk", {takeable = 2, kind = "vehicle"})
+    local car = {getPartCount = function() return 1 end, getPartByIndex = function() return {getItemContainer = function() return trunk end} end,
+        canAccessContainer = function() return true end}
+    IsoObjectPicker = {Instance = {PickVehicle = function() return car end}}
+    getMouseXScaled, getMouseYScaled = function() return 0 end, function() return 0 end
+    f.room, f.roomFacts = {}, {containers = 2, groundItems = 0}
+    f.carried["Base.Nails"] = 2
+    local menu = newMenu()
+    Menus.worldMenu(0, menu, {})
+    local t = tree(menu)
+    assert(has(t, "Load everything I carry") and has(t, "My vehicle") and has(t, "Trunk > Take everything (2)") and not has(t, "Around here"))
+    IsoObjectPicker = nil
+end)
+
+test("a job in progress is one row in the world menu and never on containers or items", function()
+    local crate = container("crate", {takeable = 1})
+    open(crate)
+    f.jobs = {state = "running", hasJob = true, canPause = true, label = "Clean kitchen"}
+    function f.app:pause() f.paused = true; return true end
+    function f.app:cancel() f.cancelled = true; return true end
+    local menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    assert(not has(tree(menu), "Job:"))
+    menu = newMenu()
+    Menus.worldMenu(0, menu, {})
+    local t = tree(menu)
+    assert(menu.options[1].child.options[1].name == "Job: Clean kitchen")
+    has(t, "Job: Clean kitchen > Pause").onSelect()
+    assert(f.paused and not has(t, "Resume"))
+end)
+
+test("presets appear where they can run", function()
+    f.presets = {{id = "setup:1", name = "Crate to car", setup = {scope = "container", destination = {kind = "vehicle"}}},
+        {id = "setup:2", name = "Room food", setup = {scope = "room", destination = {kind = "inventory"}}}}
+    local crate = container("crate", {takeable = 1})
+    open(crate)
+    f.room, f.roomFacts = {}, {containers = 2, groundItems = 0}
+    local menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    local t = tree(menu)
+    assert(has(t, "Presets > Crate to car") and not has(t, "Room food"))
+    menu = newMenu()
+    Menus.worldMenu(0, menu, {})
+    t = tree(menu)
+    assert(has(t, "Presets > Room food") and not has(t, "Crate to car"))
+end)
+
+test("a refused action is told to the player", function()
+    local menu = newMenu()
+    function f.app:toggleChecklist() return nil, "The disk is full" end
+    f.carried["Base.Nails"] = 1
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    has(tree(menu), "On my loot list").onSelect()
+    assert(f.said == "The disk is full")
+end)
+
+test("no row is disabled, every row has an icon, and submenus are never empty", function()
+    local crate = container("crate", {takeable = 5, types = {["Base.Nails"] = 5}, categories = {["native:Material"] = 5}})
+    open(crate, container("shelves", {takeable = 1}))
+    categories = {{id = "custom:1", name = "Workshop", types = {"Base.Nails"}, includes = {}}}
+    f.storage, f.bins, f.car, f.carried["Base.Nails"], f.room, f.roomFacts = true, true, true, 30, {}, {containers = 3, groundItems = 2}
+    f.checklist = {ids = {"native:Food"}, types = {}}
+    for _, build in ipairs({function(m) Menus.containerMenu(0, m, crate) end, function(m) Menus.inventoryMenu(0, m, {item("Nails", f.main)}) end,
+        function(m) Menus.worldMenu(0, m, {}) end}) do
+        local menu = newMenu()
+        build(menu)
+        every(menu, function(option)
+            assert(not option.notAvailable, option.name)
+            assert(option.iconTexture or option.itemForTexture, "No icon: " .. option.name)
+            assert(option.onSelect or (option.child and #option.child.options > 0), "Dead row: " .. option.name)
+        end)
+    end
+end)
+
+test("an icon shows the object's options, then mods' container options, then LootBox once", function()
+    local crate = container("crate", {takeable = 2})
+    local page = {player = 0, onCharacter = false}
+    local button = {inventory = crate, parent = {parent = page}}
+    page.backpacks = {button}
+    local menu = newMenu()
+    function menu:setVisible() end
+    function menu:bringToTop() end
+    getPlayerContextMenu = function() return menu end
+    button.onRightMouseDown = function() menu:addOption("Rename", nil, function() end) end
+    triggerEvent = function(_, _, m) m:addOption("Mod: sort", nil, function() end); Menus.paneMenu(0, m, true) end
+    f.pages.loot = {backpacks = {button}, inventoryPane = {inventory = crate}}
+    Menus.refreshContainers(page, "end")
+    button:onRightMouseDown(1, 1)
+    local names = {}
+    for _, option in ipairs(menu.options) do names[#names + 1] = option.name end
+    assert(table.concat(names, "|") == "Rename|Disassemble|Mod: sort|LootBox", table.concat(names, "|"))
+    triggerEvent = function() end
+end)
+
+test("the empty space of a container gives the same options as its icon", function()
+    local crate = container("crate", {takeable = 2})
+    f.pages.loot = {backpacks = {{inventory = crate}}, inventoryPane = {inventory = crate}}
+    local menu = newMenu()
+    Menus.paneMenu(0, menu, true)
+    assert(menu.options[1].name == "Disassemble" and menu.options[2].name == "LootBox" and f.objectFor == crate)
+end)
+
+test("category rows and presets can be switched off on their own", function()
+    f.carried["Base.Nails"], f.carriedCategory["native:Material"] = 30, 50
+    f.presets = {{id = "setup:1", name = "Crate to car", setup = {scope = "container", destination = {kind = "vehicle"}}}}
+    local crate = container("crate", {takeable = 1})
+    open(crate)
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    assert(has(tree(menu), "All Material (50)"))
+    f.preferences.categoryShortcuts, f.preferences.savedShortcuts = false, false
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    assert(not has(tree(menu), "All Material") and has(tree(menu), "All Nails"))
+    menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    assert(not has(tree(menu), "Presets"))
+end)
+
+test("switching menus off removes every entry", function()
+    local crate = container("crate", {takeable = 2})
+    open(crate)
     f.preferences.contextMenus = false
-    local _, inventory = inventoryMenu(f)
-    local _, world = worldMenu(f)
-    assert(not inventory and not world)
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)}); Menus.containerMenu(0, menu, crate); Menus.worldMenu(0, menu, {})
+    assert(#menu.options == 0)
 end)
 
-test("disabling item shortcuts retains the full manager help and settings", function(f)
-    f.preferences.inventoryShortcuts = false
-    local _, menu = inventoryMenu(f)
-    assert(not option(menu, "Drop all of this type here"))
-    assert(not option(menu, "Keep this copy"))
-    click(menu, "Open LootBox")
-    assert(f.opened.mode == "home")
-    click(menu, "Workflow help")
-    assert(f.opened.mode == "help")
-    click(menu, "Settings")
-    assert(f.opened.mode == "settings")
-end)
-
-test("an exact-type drop spans carried bags and uses the current floor", function(f)
-    local _, menu = inventoryMenu(f, { { items = { f.apple } } })
-    click(menu, "Drop all of this type here")
-    local request = f.quick.request
-    assert(request.scope == "inventory" and request.includeBags == true)
-    assert(request.destination.kind == "floor" and request.destination.ref == f.square)
-    assert(request.filter.all == false and #request.filter.ids == 0)
-    assert(#request.filter.types == 1 and request.filter.types[1] == "Base.Apple")
-end)
-
-test("a selected storage destination receives carried type matches", function(f)
-    local _, menu = inventoryMenu(f)
-    click(menu, "Put all of this type in Crate")
-    assert(f.quick.request.scope == "inventory")
-    assert(f.quick.request.destination.kind == "container" and f.quick.request.destination.ref == f.crate)
-    assert(f.quick.context.targetContainer == f.crate)
-end)
-
-test("a selected floor does not become a storage destination", function(f)
-    f.viewed = f.floor
-    local _, menu = inventoryMenu(f)
-    assert(not option(menu, "Put all of this type in Floor"))
-    assert(not option(menu, "Label Floor..."))
-    click(menu, "Tag this copy...")
-    assert(f.opened.context.labelKind == "item" and #f.opened.context.containers == 0)
-    assert(f.opened.context.targetContainer == nil and f.opened.context.container == nil)
-end)
-
-test("external item transfer uses its actual clicked source", function(f)
-    local other = container("locker", false)
-    local selected = item(other, "Base.CannedSardines")
-    local _, menu = inventoryMenu(f, { selected })
-    click(menu, "Take all of this type")
-    assert(f.quick.request.scope == "container" and f.quick.request.sourceContainer == other)
-    assert(f.quick.request.destination.kind == "inventory")
-    assert(f.quick.request.filter.types[1] == "Base.CannedSardines")
-end)
-
-test("category actions select the native group instead of the clicked type", function(f)
-    local _, menu = inventoryMenu(f)
-    local category = needed(menu, "Category: Food").child
-    click(category, "Drop carried Food here")
-    assert(f.quick.request.filter.ids[1] == "native:Food" and #f.quick.request.filter.types == 0)
-    assert(f.quick.request.filter.all == false)
-end)
-
-test("matching custom categories provide reusable group actions", function(f)
-    f.definitions = { { id = "custom:7", name = "Run supplies" } }
-    f.matches["custom:7"] = true
-    local _, menu = inventoryMenu(f)
-    click(needed(menu, "My matching categories").child, "Put carried Run supplies in Crate")
-    assert(f.quick.request.filter.ids[1] == "custom:7")
-    assert(f.quick.request.destination.ref == f.crate)
-end)
-
-test("category shortcuts can be hidden independently", function(f)
-    f.preferences.categoryShortcuts = false
-    f.definitions = { { id = "custom:7", name = "Run supplies" } }
-    f.matches["custom:7"] = true
-    local _, menu = inventoryMenu(f)
-    assert(not option(menu, "Category: Food") and not option(menu, "My matching categories"))
-    assert(option(menu, "Drop all of this type here"))
-end)
-
-test("Keep changes only the clicked copy and exposes its checked state", function(f)
-    local other = item(f.inventory)
-    local _, menu = inventoryMenu(f)
-    assert(needed(menu, "Keep this copy").checkMark == false)
-    local keepIcon = icon(needed(menu, "Keep this copy"))
-    click(menu, "Keep this copy")
-    assert(f.kept[f.apple] and not f.kept[other])
-    local _, reopened = inventoryMenu(f)
-    assert(needed(reopened, "Keep this copy").checkMark == true)
-    assert(icon(needed(reopened, "Keep this copy")) == keepIcon)
-    click(reopened, "Keep this copy")
-    assert(f.kept[f.apple] == false)
-end)
-
-test("copy tags and storage labels focus their distinct targets", function(f)
-    local _, menu = inventoryMenu(f)
-    click(menu, "Tag this copy...")
-    assert(f.opened.mode == "labels" and f.opened.context.labelKind == "item")
-    click(menu, "Label Crate...")
-    assert(f.opened.mode == "labels" and f.opened.context.labelKind == "container")
-    assert(f.opened.context.container == f.crate)
-end)
-
-test("a floor click never borrows the unrelated open loot pane", function(f)
-    f.viewed = f.crate
-    local _, menu = worldMenu(f, { { getSquare = function() return f.square end, getContainerCount = function() return 0 end } })
-    assert(not option(menu, "Loot contents (Smart Load)") and not option(menu, "Label this container..."))
-    click(menu, "Open LootBox")
-    assert(f.opened.context.container == nil and f.opened.context.targetContainer == nil)
-    assert(#f.opened.context.containers == 0)
-end)
-
-test("a clicked fixture exposes its own take put and label actions", function(f)
-    local locker = container("locker", false)
-    local _, menu = worldMenu(f, { fixtureObject(f, locker) })
-    click(menu, "Loot contents (Smart Load)")
-    assert(f.quick.request.sourceContainer == locker and f.quick.request.filter.all)
-    click(menu, "Put carried items in Locker...")
-    assert(f.quick.request.destination.ref == locker and f.quick.request.scope == "inventory")
-    click(menu, "Label this container...")
-    assert(f.opened.context.container == locker and f.opened.context.labelKind == "container")
-end)
-
-test("room and area cleanup exclude carried inventory and request review", function(f)
-    local _, menu = worldMenu(f)
-    local clean = needed(menu, "Clean and delete").child
-    click(clean, "Clean current room...")
-    local request = f.quick.request
-    assert(request.scope == "room" and request.destination.kind == "trash")
-    assert(request.filter.all and request.includeInventory == false and request.includeBags == true)
-    assert(not request.approval and not request.approved)
-    click(clean, "Clean an area...")
-    assert(f.quick.request.scope == "area" and f.quick.pickArea == true)
-end)
-
-test("loot shortcuts reuse the checklist for the chosen current scope", function(f)
-    local _, menu = worldMenu(f)
-    local loot = needed(menu, "Loot supplies").child
-    for _, choice in ipairs({ { "Within reach...", "reach" }, { "Current room...", "room" },
-        { "Current building...", "building" }, { "Select an area...", "area" } }) do
-        click(loot, choice[1])
-        local request = f.quick.request
-        assert(request.scope == choice[2] and request.destination.kind == "inventory")
-        assert(request.filter.all == false and request.filter.ids[1] == "native:Food")
-        assert(request.filter.types[1] == "Base.Bandage" and request.includeInventory == false)
-        if choice[2] == "area" then assert(f.quick.pickArea == true and request.area == nil) end
-    end
-end)
-
-test("room and building shortcuts explain unavailable locations", function(f)
-    f.room, f.building = nil, nil
-    local _, menu = worldMenu(f)
-    local loot = needed(menu, "Loot supplies").child
-    local room = needed(loot, "Current room...")
-    local building = needed(loot, "Current building...")
-    local clean = needed(needed(menu, "Clean and delete").child, "Clean current room...")
-    local cleanBuilding = needed(needed(menu, "Clean and delete").child, "Clean current building...")
-    assert(room.notAvailable and room.toolTip.description:find("Stand inside", 1, true))
-    assert(building.notAvailable and clean.notAvailable and cleanBuilding.notAvailable)
-    assert(not needed(loot, "Select an area...").notAvailable)
-end)
-
-test("building cleanup requests the full building without carried items or an area picker", function(f)
-    local _, menu = worldMenu(f)
-    click(needed(menu, "Clean and delete").child, "Clean current building...")
-    local request = f.quick.request
-    assert(request.scope == "building" and request.destination.kind == "trash")
-    assert(request.filter.all and #request.filter.ids == 0 and #request.filter.types == 0)
-    assert(request.includeInventory == false and request.includeBags == true)
-    assert(not f.quick.pickArea)
-end)
-
-test("world shortcuts can be hidden without hiding the manager", function(f)
-    f.preferences.worldShortcuts = false
-    local _, menu = worldMenu(f, { fixtureObject(f, f.crate) })
-    assert(not option(menu, "Loot supplies") and not option(menu, "Clean and delete"))
-    assert(not option(menu, "Loot contents (Smart Load)"))
-    click(menu, "Open LootBox")
-    assert(f.opened.mode == "home")
-end)
-
-test("vehicle shortcuts remember and haul to the actual selected vehicle", function(f)
-    local selected = vehicle(f)
-    f.pickedVehicle = selected
-    local _, menu = worldMenu(f)
-    click(menu, "Remember this vehicle")
-    assert(f.remembered == selected)
-    click(menu, "Haul my checklist to this vehicle...")
-    assert(f.quick.request.destination.kind == "vehicle" and f.quick.request.destination.ref == selected)
-    assert(f.quick.request.filter.ids[1] == "native:Food")
-    click(menu, "Label this vehicle's storage...")
-    assert(f.opened.context.vehicle == selected and #f.opened.context.containers == 1)
-end)
-
-test("vehicle shortcuts can be hidden while other world actions remain", function(f)
-    f.pickedVehicle = vehicle(f)
-    f.preferences.vehicleShortcuts = false
-    local _, menu = worldMenu(f)
-    assert(not option(menu, "Remember this vehicle") and not option(menu, "Haul my checklist to this vehicle..."))
-    assert(option(menu, "Loot supplies"))
-end)
-
-test("saved setups receive fresh clicked targets and can be hidden", function(f)
-    f.presets = { { id = "setup:9", name = "Food to clicked storage", setup = {
-        scope = "inventory", filter = { ids = { "native:Food" }, types = {}, all = false },
-        destination = { kind = "container" } } } }
-    local target = container("locker", false)
-    local _, menu = worldMenu(f, { fixtureObject(f, target) })
-    click(needed(menu, "Saved setups").child, "Food to clicked storage")
-    assert(f.loadedId == "setup:9" and f.resolvedContext.container == target)
-    assert(f.quick.request.destination.ref == target)
-    f.preferences.savedShortcuts = false
-    local _, hidden = worldMenu(f, { fixtureObject(f, target) })
-    assert(not option(hidden, "Saved setups"))
-end)
-
-test("native world availability probing respects the master setting", function(f)
-    local parent = Menu:new()
-    assert(Menus.worldMenu(0, parent, {}, true) == "available")
-    assert(f.tested == 1 and #parent.options == 0)
-    f.preferences.contextMenus = false
-    assert(Menus.worldMenu(0, parent, {}, true) == nil)
-    assert(f.tested == 1 and #parent.options == 0)
-end)
-
-test("guide starters reuse a checklist while clean and sort select unprotected items", function(f)
-    local context = { square = f.square, container = f.crate }
-    local loot = assert(Guides.prepare("loot-room", f.app, context))
-    assert(loot.scope == "room" and loot.destination.kind == "inventory")
-    assert(loot.filter.ids[1] == "native:Food" and loot.filter.types[1] == "Base.Bandage")
-    assert(loot.filter.all == false and loot.includeInventory == false and loot.includeBags)
-    local clean = assert(Guides.prepare("clean-area", f.app, context))
-    assert(clean.scope == "area" and clean.area == nil and clean.destination.kind == "trash")
-    assert(clean.filter.all and #clean.filter.ids == 0 and #clean.filter.types == 0 and clean.includeInventory == false)
-    local sort = assert(Guides.prepare("sort-carried", f.app, context))
-    assert(sort.scope == "inventory" and sort.destination.kind == "labels" and sort.filter.all)
-    assert(f.resolvedContext == context)
-end)
-
-test("building guide starters keep the loot checklist distinct from whole-building cleanup", function(f)
-    local context = { square = f.square }
-    local loot = assert(Guides.prepare("loot-building", f.app, context))
-    assert(loot.scope == "building" and loot.destination.kind == "inventory")
-    assert(loot.filter.ids[1] == "native:Food" and loot.filter.types[1] == "Base.Bandage" and not loot.filter.all)
-    assert(loot.includeInventory == false and loot.includeBags == true)
-    local clean = assert(Guides.prepare("clean-building", f.app, context))
-    assert(clean.scope == "building" and clean.destination.kind == "trash" and clean.filter.all)
-    assert(#clean.filter.ids == 0 and #clean.filter.types == 0 and clean.includeInventory == false)
-    assert(f.resolvedContext == context)
-end)
-
-test("vehicle guide starter keeps remembered-car semantics and invalid tasks return errors", function(f)
-    local haul = assert(Guides.prepare("haul-car", f.app, { vehicle = vehicle(f) }))
-    assert(haul.scope == "inventory" and haul.destination.kind == "vehicle" and haul.destination.ref == nil)
-    local missing, reason = Guides.prepare("not-a-task", f.app, {})
-    assert(missing == nil and type(reason) == "string")
-    missing, reason = Guides.prepare("loot-room", nil, {})
-    assert(missing == nil and type(reason) == "string")
-end)
-
-test("container contents shortcuts capture B even when A stays selected", function(f)
-    local clicked = container("locker", false)
-    local _, menu = contentsMenu(f, clicked)
-    for _, route in ipairs({ { "Loot contents (Smart Load)", "inventory" },
-        { "Empty contents onto floor here...", "floor" }, { "Sort contents...", "labels" },
-        { "Clean contents (delete)", "trash" } }) do
-        click(menu, route[1])
-        local request = f.quick.request
-        assert(request.scope == "container" and request.sourceContainer == clicked)
-        assert(request.sourceContainer ~= f.viewed and request.destination.kind == route[2])
-        assert(request.filter.all and #request.filter.ids == 0 and #request.filter.types == 0)
-        assert(request.includeBags and request.includeInventory == false)
-        assert(not request.approval and not request.approved and not request.binReview)
-        if route[2] == "floor" then assert(request.destination.ref == f.square) end
-    end
-    assert(f.viewed == f.crate)
-end)
-
-test("container composer and labels retain the exact clicked source", function(f)
-    local clicked = container("locker", false)
-    local _, menu = contentsMenu(f, clicked)
-    click(menu, "Choose items and categories...")
-    local context = f.opened.context
-    assert(f.opened.mode == "compose" and context.sourceContainer == clicked)
-    assert(context.request.scope == "container" and context.request.sourceContainer == clicked)
-    assert(context.request.includeBags and context.request.filter.all == false)
-    assert(#context.request.filter.ids == 0 and #context.request.filter.types == 0)
-    click(menu, "Label this container...")
-    assert(f.opened.mode == "labels" and f.opened.context.labelKind == "container")
-    assert(f.opened.context.container == clicked and f.opened.context.targetContainer == clicked)
-    click(menu, "Open LootBox")
-    assert(f.opened.mode == "home" and f.opened.context.sourceContainer == clicked)
-end)
-
-test("inbound carried transfers target the clicked container", function(f)
-    local clicked = container("locker", false)
-    local _, menu = contentsMenu(f, clicked)
-    click(menu, "Put carried items in Locker...")
-    assert(f.quick.request.scope == "inventory" and f.quick.request.sourceContainer == nil)
-    assert(f.quick.request.destination.kind == "container" and f.quick.request.destination.ref == clicked)
-    assert(f.quick.context.targetContainer == clicked and f.quick.request.includeBags)
-end)
-
-test("unpacking a carried bag explicitly targets main inventory", function(f)
-    local selected, contents = bag(f, true)
-    local _, menu = inventoryMenu(f, { selected })
-    local inside = needed(menu, "Contents of School Bag").child
-    click(inside, "Unpack contents to main inventory...")
-    local request = f.quick.request
-    assert(request.scope == "container" and request.sourceContainer == contents)
-    assert(request.destination.kind == "container" and request.destination.ref == f.inventory)
-    assert(request.sourceContainer ~= selected:getContainer() and request.includeBags)
-    assert(not option(inside, "Loot contents (Smart Load)"))
-    click(inside, "Choose items and categories...")
-    assert(f.opened.context.request.sourceContainer == contents)
-    assert(f.opened.context.request.destination.kind == "container" and f.opened.context.request.destination.ref == f.inventory)
-end)
-
-test("external bag contents loot separately from the bag item", function(f)
-    local selected, contents = bag(f, false, "Store bag")
-    local _, menu = inventoryMenu(f, { selected })
-    local inside = needed(menu, "Contents of Store bag").child
-    click(inside, "Loot contents (Smart Load)")
-    assert(f.quick.request.sourceContainer == contents and f.quick.request.destination.kind == "inventory")
-    assert(f.quick.context.item == nil)
-    click(menu, "Take all of this type")
-    assert(f.quick.request.sourceContainer == f.crate and f.quick.request.filter.types[1] == "Base.Bag_Schoolbag")
-    click(inside, "Label this container...")
-    assert(f.opened.context.container == contents)
-    click(menu, "Tag this copy...")
-    assert(f.opened.context.item == selected and f.opened.context.container == f.crate)
-    assert(f.opened.context.sourceContainer == f.crate and f.opened.context.labelKind == "item")
-end)
-
-test("visible destination choices retain distinct exact references", function(f)
-    local clicked = container("locker", false)
-    local cupboard, trunk = container("cupboard", false), container("TruckBed", false)
-    local part = { getId = function() return "TruckBed" end }
-    trunk.part = part
-    sidebar(f, f.inventoryPage, f.inventory)
-    sidebar(f, f.lootPage, clicked)
-    sidebar(f, f.lootPage, cupboard)
-    sidebar(f, f.lootPage, trunk)
-    sidebar(f, f.lootPage, cupboard)
-    local _, menu = contentsMenu(f, clicked)
-    local moves = needed(menu, "Move contents to").child
-    assert(not option(moves, "Locker..."))
-    assert(count(moves, "Cupboard...") == 1)
-    for _, route in ipairs({ { "Main inventory only...", f.inventory }, { "Cupboard...", cupboard }, { "TruckBed...", trunk } }) do
-        click(moves, route[1])
-        assert(f.quick.request.scope == "container" and f.quick.request.sourceContainer == clicked)
-        assert(f.quick.request.destination.kind == "container" and f.quick.request.destination.ref == route[2])
-        assert(f.quick.context.targetContainer == route[2])
-    end
-    click(moves, "My remembered vehicle...")
-    assert(f.quick.request.sourceContainer == clicked and f.quick.request.destination.kind == "vehicle")
-    assert(f.quick.request.destination.ref == nil)
-end)
-
-test("same-name destinations expose their native sidebar positions", function(f)
-    local first, second = container("crate", false), container("crate", false)
-    sidebar(f, f.lootPage, f.floor)
-    sidebar(f, f.lootPage, first)
-    sidebar(f, f.lootPage, second)
-    local _, menu = contentsMenu(f, f.inventory)
-    local moves = needed(menu, "Move contents to").child
-    assert(not option(moves, "Crate..."))
-    click(moves, "Crate (Loot icon 2)...")
-    assert(f.quick.request.destination.ref == first)
-    click(moves, "Crate (Loot icon 3)...")
-    assert(f.quick.request.destination.ref == second)
-    assert(needed(moves, "Crate (Loot icon 2)...").toolTip.description:find("top", 1, true))
-end)
-
-test("unpack avoids a redundant main-inventory move choice", function(f)
-    local _, contents = bag(f, true)
-    sidebar(f, f.inventoryPage, f.inventory)
-    sidebar(f, f.inventoryPage, contents)
-    sidebar(f, f.lootPage, f.crate)
-    local _, menu = contentsMenu(f, contents)
-    local moves = needed(menu, "Move contents to").child
-    assert(not option(moves, "Main inventory only...") and not option(moves, "School Bag..."))
-    assert(option(moves, "Crate..."))
-    click(menu, "Unpack contents to main inventory...")
-    assert(f.quick.request.destination.ref == f.inventory)
-end)
-
-test("main inventory omits self-looting and starts composer with sorting", function(f)
-    local _, menu = contentsMenu(f, f.inventory)
-    assert(not option(menu, "Loot contents (Smart Load)") and not option(menu, "Unpack contents to main inventory..."))
-    assert(not option(menu, "Put carried items in My inventory..."))
-    assert(option(menu, "Empty contents onto floor here...") and option(menu, "Clean contents (delete)"))
-    click(menu, "Choose items and categories...")
-    assert(f.opened.context.request.sourceContainer == f.inventory)
-    assert(f.opened.context.request.destination.kind == "labels")
-end)
-
-test("floor contents offer pickup sorting cleanup but no floor-to-self or labels", function(f)
-    local unsafeNames = 0
-    f.floor.getCustomName = function() unsafeNames = unsafeNames + 1; error("Native custom names require a parent object") end
-    local _, menu = contentsMenu(f, f.floor)
-    assert(not option(menu, "Empty contents onto floor here...") and not option(menu, "Label this container..."))
-    assert(not option(menu, "Put carried items in Floor...") and unsafeNames == 0)
-    for _, route in ipairs({ { "Loot contents (Smart Load)", "inventory" }, { "Sort contents...", "labels" }, { "Clean contents (delete)", "trash" } }) do
-        click(menu, route[1])
-        assert(f.quick.request.sourceContainer == f.floor and f.quick.request.destination.kind == route[2])
-    end
-end)
-
-test("native no-item pane events use their own displayed container without opposite-pane fallback", function(f)
-    local _, contents = bag(f, true)
-    f.inventoryPage.inventoryPane.inventory = contents
-    local inventoryParent, lootParent = Menu:new(), Menu:new()
-    registrations.background[1](0, inventoryParent, false)
-    registrations.background[1](0, lootParent, true)
-    click(needed(inventoryParent, "LootBox").child, "Empty contents onto floor here...")
-    assert(f.quick.request.sourceContainer == contents)
-    click(needed(lootParent, "LootBox").child, "Loot contents (Smart Load)")
-    assert(f.quick.request.sourceContainer == f.crate)
-    f.inventoryPage = nil
-    local missing = Menu:new()
-    registrations.background[1](0, missing, false)
-    assert(not option(missing, "LootBox"))
-    f.inventoryPage = { inventoryPane = { inventory = f.inventory } }
-    f.lootPage = nil
-    registrations.background[1](0, missing, true)
-    assert(not option(missing, "LootBox"))
-end)
-
-test("sidebar callback preserves native entries result and clicked B source", function(f)
-    local clicked = container("locker", false)
-    local button = sidebar(f, f.lootPage, clicked)
-    registrations.refresh[1](f.lootPage, "end")
-    assert(button.onRightMouseDown(button, 7, 9) == "native-result")
-    assert(f.nativeCalls == 1 and f.nativeCoordinates[1] == 7 and f.nativeCoordinates[2] == 9)
-    click(f.contextMenu, "Native rename"); click(f.contextMenu, "Foreign action")
-    assert(f.nativeRenamed and f.foreignClicked)
-    assert(f.contextMenu.visible and f.contextMenu.raised and f.contextMenu.forceVisible and f.contextMenu.visibleCheck)
-    local menu = needed(f.contextMenu, "LootBox").child
-    click(menu, "Loot contents (Smart Load)")
-    assert(f.quick.request.sourceContainer == clicked and f.viewed == f.crate)
-    assert(count(f.contextMenu, "LootBox") == 1)
-end)
-
-test("refresh waits until native buttons are complete and repeated refresh does not duplicate callbacks", function(f)
-    local button = sidebar(f, f.lootPage, f.crate)
-    local original = button.onRightMouseDown
-    for _, phase in ipairs({ "begin", "beforeFloor", "buttonsAdded" }) do registrations.refresh[1](f.lootPage, phase) end
-    assert(button.onRightMouseDown == original)
-    registrations.refresh[1](f.lootPage, "end")
-    registrations.refresh[1](f.lootPage, "end")
-    button.onRightMouseDown(button, 0, 0)
-    assert(f.nativeCalls == 1 and count(f.contextMenu, "LootBox") == 1)
-    local menu = needed(f.contextMenu, "LootBox").child
-    assert(count(menu, "Loot contents (Smart Load)") == 1 and count(menu, "Open LootBox") == 1)
-end)
-
-test("pooled sidebar buttons read current container and current owning page", function(f)
-    local button = sidebar(f, f.lootPage, f.crate)
-    registrations.refresh[1](f.lootPage, "end")
-    button.onRightMouseDown(button, 0, 0)
-    click(needed(f.contextMenu, "LootBox").child, "Loot contents (Smart Load)")
-    assert(f.quick.request.sourceContainer == f.crate)
-    local replacement = container("locker", false)
-    button.inventory = replacement
-    button.parent.parent = f.inventoryPage
-    f.inventoryPage.player = 1
-    button.onRightMouseDown(button, 0, 0)
-    click(needed(f.contextMenu, "LootBox").child, "Loot contents (Smart Load)")
-    assert(f.quick.request.sourceContainer == replacement and f.nativeCalls == 2)
-    assert(f.contextPlayer == 1 and f.quick.playerIndex == 1)
-end)
-
-test("pooled context submenus repopulate all contents actions on reopening", function(f)
-    local selected = bag(f, true)
-    local parent = Menu:new()
-    for _ = 1, 3 do
-        parent:clear()
-        Menus.inventoryMenu(0, parent, { selected })
-        local menu = needed(parent, "LootBox").child
-        local contents = needed(menu, "Contents of School Bag").child
-        assert(count(parent, "LootBox") == 1 and count(contents, "Sort contents...") == 1)
-        click(contents, "Clean contents (delete)")
-        assert(f.quick.request.sourceContainer == selected:getInventory())
-    end
-end)
-
-test("cooperative wrapper chains append one contents group without removing foreign behavior", function(f)
-    local button = sidebar(f, f.lootPage, f.crate)
-    registrations.refresh[1](f.lootPage, "end")
-    local wrapped = button.onRightMouseDown
-    button.onRightMouseDown = function(clicked, x, y)
-        local result = wrapped(clicked, x, y)
-        f.foreignWrapper = (f.foreignWrapper or 0) + 1
-        return result
-    end
-    registrations.refresh[1](f.lootPage, "end")
-    assert(button.onRightMouseDown(button, 0, 0) == "native-result")
-    assert(f.nativeCalls == 1 and f.foreignWrapper == 1)
-    local menu = needed(f.contextMenu, "LootBox").child
-    assert(count(f.contextMenu, "LootBox") == 1 and count(menu, "Loot contents (Smart Load)") == 1)
-    assert(count(menu, "Open LootBox") == 1)
-end)
-
-test("portable-bag sidebar uses one native item-event menu instead of appending a second root", function(f)
-    local selected, contents = bag(f, true)
-    local button = sidebar(f, f.inventoryPage, contents, function()
-        f.contextMenu:clear()
-        f.contextMenu:addOption("Equip on back", nil, function() f.equipped = true end)
-        registrations.inventory[1](0, f.contextMenu, { selected })
-        return "bag-result"
-    end)
-    registrations.refresh[1](f.inventoryPage, "end")
-    assert(button.onRightMouseDown(button, 0, 0) == "bag-result")
-    local menu = needed(f.contextMenu, "LootBox").child
-    assert(count(f.contextMenu, "LootBox") == 1 and count(menu, "Contents of School Bag") == 1)
-    assert(not option(menu, "Clean contents (delete)"))
-    click(f.contextMenu, "Equip on back"); assert(f.equipped)
-    click(needed(menu, "Contents of School Bag").child, "Sort contents...")
-    assert(f.quick.request.sourceContainer == contents and f.quick.request.destination.kind == "labels")
-end)
-
-test("portable-bag wrapper never resurrects a deliberately suppressed native menu", function(f)
-    local _, contents = bag(f, true)
-    local button = sidebar(f, f.inventoryPage, contents, function()
-        f.contextMenu:clear()
-        return "suppressed"
-    end)
-    registrations.refresh[1](f.inventoryPage, "end")
-    assert(button.onRightMouseDown(button, 0, 0) == "suppressed")
-    assert(#f.contextMenu.options == 0 and not f.contextMenu.visible)
-end)
-
-test("container shortcuts respect preferences without removing native entries", function(f)
-    local button = sidebar(f, f.lootPage, f.crate)
-    registrations.refresh[1](f.lootPage, "end")
-    f.preferences.inventoryShortcuts = false
-    button.onRightMouseDown(button, 0, 0)
-    local menu = needed(f.contextMenu, "LootBox").child
-    assert(not option(menu, "Loot contents (Smart Load)") and not option(menu, "Clean contents (delete)"))
-    click(menu, "Settings"); assert(f.opened.mode == "settings")
-    f.preferences.contextMenus = false
-    button.onRightMouseDown(button, 0, 0)
-    assert(not option(f.contextMenu, "LootBox") and option(f.contextMenu, "Native rename"))
-    assert(not f.contextMenu.forceVisible and not f.contextMenu.visibleCheck)
-end)
-
-test("container entry points respect native paused tutorial dead and suppressed-menu states", function(f)
-    for _, key in ipairs({ "paused", "tutorial", "dead", "suppressed" }) do
-        f[key] = true
-        ISInventoryPaneContextMenu.dontCreateMenu = f.suppressed
-        local parent = Menu:new()
-        Menus.containerMenu(0, parent, f.crate)
-        Menus.inventoryMenu(0, parent, { f.apple })
-        Menus.worldMenu(0, parent, {}, false)
-        assert(#parent.options == 0)
-        f[key] = false
-        ISInventoryPaneContextMenu.dontCreateMenu = false
-    end
-end)
-
-test("world fixtures offer separate exact contents contexts for every compartment", function(f)
-    local first, second = container("crate", false), container("crate", false)
-    local object = { getSquare = function() return f.square end, getContainerCount = function() return 2 end,
-        getContainerByIndex = function(_, index) return index == 0 and first or second end,
-        getContainerIndex = function(_, selected) return selected == first and 0 or 1 end }
-    first.parent, second.parent = object, object
-    local _, menu = worldMenu(f, { object })
-    for index, source in ipairs({ first, second }) do
-        local contents = needed(menu, "Contents of Crate [compartment " .. tostring(index) .. "]").child
-        click(contents, "Sort contents...")
-        assert(f.quick.request.sourceContainer == source and f.quick.request.destination.kind == "labels")
-        click(contents, "Clean contents (delete)")
-        assert(f.quick.request.sourceContainer == source and f.quick.request.destination.kind == "trash")
-        click(contents, "Put carried items in Crate [compartment " .. tostring(index) .. "]...")
-        assert(f.quick.request.destination.ref == source)
-    end
-end)
-
-test("separate same-name world sources identify their sidebar icon and preserve the exact source", function(f)
-    local first, second = container("crate", false), container("crate", false)
-    sidebar(f, f.lootPage, f.floor)
-    sidebar(f, f.lootPage, first)
-    sidebar(f, f.lootPage, second)
-    local _, menu = worldMenu(f, {fixtureObject(f, first), fixtureObject(f, second)})
-    for index, source in ipairs({first, second}) do
-        local contents = needed(menu, "Contents of Crate (Loot icon " .. tostring(index + 1) .. ")").child
-        click(contents, "Loot contents (Smart Load)")
-        assert(f.quick.request.sourceContainer == source)
-    end
-    local point = {getX = function() return 100 end, getY = function() return 200 end, getZ = function() return 1 end}
-    for index, source in ipairs({first, second}) do
-        local slot = index
-        source.parent = {getSquare = function() return point end, getObjectIndex = function() return slot end}
-    end
-    f.lootPage.backpacks = {}
-    _, menu = worldMenu(f, {fixtureObject(f, first), fixtureObject(f, second)})
-    for index, source in ipairs({first, second}) do
-        local contents = needed(menu, "Contents of Crate (100, 200, floor 1; object " .. tostring(index + 1) .. ")").child
-        click(contents, "Clean contents (delete)")
-        assert(f.quick.request.sourceContainer == source and f.quick.request.destination.kind == "trash")
-    end
-end)
-
-test("container help provides a complete workflow with explicit nondeletion and cleanup guidance", function()
-    local guide
-    for _, candidate in ipairs(Guides.list) do if candidate.id == "container-contents" then guide = candidate end end
-    assert(guide and guide.prerequisites and #guide.steps >= 6 and guide.expected and #guide.troubleshooting > 0)
-    local text = table.concat(guide.steps, " ")
-    assert(text:find("never deletes", 1, true) and text:find("directly", 1, true) and text:find("separately optional", 1, true))
-    assert(text:find("Sort contents", 1, true) and text:find("Choose items and categories", 1, true))
-end)
-
-test("item menus include distinct action icons and icons on every generated choice", function(f)
-    for index = 1, 8 do
-        local id = "custom:" .. tostring(index)
-        f.definitions[index] = { id = id, name = "Supplies " .. tostring(index) }
-        f.matches[id] = true
-    end
-    f.presets = {
-        { id = "setup:1", name = "Sorting", setup = {scope = "inventory", destination = {kind = "labels"}, filter = {all = true}} },
-        { id = "setup:2", name = "Dropping", setup = {scope = "inventory", destination = {kind = "floor"}, filter = {all = true}} },
-    }
-    local selected, source = bag(f, true)
-    local locker = container("locker", false)
-    sidebar(f, f.inventoryPage, f.inventory)
-    sidebar(f, f.inventoryPage, source)
-    sidebar(f, f.lootPage, f.crate)
-    sidebar(f, f.lootPage, locker)
-    local parent, menu = inventoryMenu(f, {selected})
-    distinctIcons(menu)
-    distinctIcons(needed(menu, "Category: Food").child)
-    local contentsHeader = needed(menu, "Contents of School Bag")
-    assert(contentsHeader.itemForTexture == selected and contentsHeader.iconTexture == nil)
-    distinctIcons(contentsHeader.child)
-    local moves = needed(contentsHeader.child, "Move contents to").child
-    assert(icon(needed(moves, "Crate...")) == icon(needed(moves, "Locker...")))
-    assert(icon(needed(moves, "Crate...")) ~= icon(needed(moves, "My remembered vehicle...")))
-    local custom = needed(menu, "My matching categories").child
-    local more = needed(custom, "More categories in Actions...")
-    local storeIcon = icon(needed(menu, "Put all of this type in Crate"))
-    for _, selectedCategory in ipairs(custom.options) do
-        if selectedCategory ~= more then assert(icon(selectedCategory) == storeIcon) end
-    end
-    assert(icon(more) ~= storeIcon)
-    local saved = needed(menu, "Saved setups").child
-    assert(#saved.options == 2 and icon(saved.options[1]) == icon(saved.options[2]))
-    assert(icon(needed(menu, "Saved setups")) ~= icon(saved.options[1]))
-    assert(iconTree(needed(parent, "LootBox").child) > #menu.options)
-end)
-
-test("container floor and carried inventory operations use distinct action symbols", function(f)
-    for _, source in ipairs({f.crate, f.floor, f.inventory}) do
-        local _, menu = contentsMenu(f, source)
-        distinctIcons(menu)
-    end
-    local selected = item(f.crate)
-    local _, menu = inventoryMenu(f, {selected})
-    distinctIcons(menu)
-    distinctIcons(needed(menu, "Category: Food").child)
-    assert(icon(needed(menu, "Take all of this type")) ~= icon(needed(menu, "Put all of this type in Crate")))
-end)
-
-test("vehicle and unavailable world actions retain distinct icons", function(f)
-    f.pickedVehicle = vehicle(f)
-    f.room, f.building = nil, nil
-    local _, menu = worldMenu(f)
-    distinctIcons(menu)
-    assert(icon(needed(menu, "Label this container...")) ~= icon(needed(menu, "Label this vehicle's storage...")))
-    assert(icon(needed(menu, "Remember this vehicle")) ~= icon(needed(menu, "Haul my checklist to this vehicle...")))
-    local loot, clean = needed(menu, "Loot supplies").child, needed(menu, "Clean and delete").child
-    distinctIcons(loot)
-    distinctIcons(clean)
-    for _, choice in ipairs({needed(loot, "Current room..."), needed(loot, "Current building..."),
-        needed(clean, "Clean current room..."), (needed(clean, "Clean current building..."))}) do
-        assert(choice.notAvailable and choice.toolTip and icon(choice))
-    end
-end)
-
-test("contents groups use native container imagery and retain unknown-storage fallback", function(f)
-    local nativeCrate, nativeTrunk = {}, {}
-    ContainerButtonIcons = {crate = nativeCrate, TruckBed = nativeTrunk}
-    f.pickedVehicle = vehicle(f)
-    local unknown = container("moddedbox", false)
-    local _, menu = worldMenu(f, {fixtureObject(f, f.crate), fixtureObject(f, unknown)})
-    local crate = needed(menu, "Contents of Crate")
-    local trunk = needed(menu, "Contents of TruckBed")
-    local fallback = needed(menu, "Contents of Moddedbox")
-    assert(crate.iconTexture == nativeCrate and crate.itemForTexture == nil)
-    assert(trunk.iconTexture == nativeTrunk and trunk.itemForTexture == nil)
-    assert(fallback.iconTexture ~= nil and fallback.itemForTexture == nil)
-    assert(iconTree(crate.child) > 0 and iconTree(trunk.child) > 0 and iconTree(fallback.child) > 0)
-end)
-
-test("sidebar no-item and preference-only menus keep complete icon coverage", function(f)
-    local button = sidebar(f, f.lootPage, f.crate)
-    registrations.refresh[1](f.lootPage, "end")
-    button.onRightMouseDown(button, 0, 0)
-    ownedIcons(f.contextMenu)
-    assert(option(f.contextMenu, "Native rename") and option(f.contextMenu, "Foreign action"))
-    for _, isLoot in ipairs({false, true}) do
-        local parent = Menu:new()
-        registrations.background[1](0, parent, isLoot)
-        ownedIcons(parent)
-        distinctIcons(needed(parent, "LootBox").child)
-    end
-    f.preferences.inventoryShortcuts, f.preferences.worldShortcuts, f.preferences.vehicleShortcuts = false, false, false
-    local parent, menu = inventoryMenu(f)
-    distinctIcons(menu)
-    assert(not option(menu, "Keep this copy") and option(menu, "Settings"))
-    parent, menu = worldMenu(f, {fixtureObject(f, f.crate)})
-    distinctIcons(menu)
-    assert(not option(menu, "Loot contents (Smart Load)") and option(menu, "Workflow help"))
-end)
-
-test("pooled menu options switch between bag and native storage images without stale state", function(f)
-    local selected = bag(f, true)
-    local first, second = container("crate", false), container("locker", false)
-    local nativeCrate, nativeLocker = {}, {}
-    ContainerButtonIcons = {crate = nativeCrate, locker = nativeLocker}
-    local parent = Menu:new()
-    for _ = 1, 3 do
-        parent:clear()
-        Menus.inventoryMenu(0, parent, {selected})
-        ownedIcons(parent)
-        local header = needed(needed(parent, "LootBox").child, "Contents of School Bag")
-        assert(header.itemForTexture == selected and header.iconTexture == nil)
-        parent:clear()
-        Menus.worldMenu(0, parent, {fixtureObject(f, first), fixtureObject(f, second)}, false)
-        ownedIcons(parent)
-        local menu = needed(parent, "LootBox").child
-        for _, choice in ipairs({{ "Contents of Crate", nativeCrate }, { "Contents of Locker", nativeLocker }}) do
-            local storage = needed(menu, choice[1])
-            assert(storage.iconTexture == choice[2] and storage.itemForTexture == nil)
-        end
-    end
-end)
-
-test("an eligible amount action is top-level and opens the exact captured native stack", function(f)
-    f.selectionTarget = {pane = f.inventoryPage.inventoryPane, marker = "exact clicked stack"}
-    local items = {{items = {f.apple}}}
-    local parent, menu = inventoryMenu(f, items)
-    local amount = needed(parent, "Select amount...")
-    assert(not option(menu, "Select amount..."))
-    assert(amount.iconTexture and amount.iconTexture ~= needed(parent, "LootBox").iconTexture)
-    assert(f.selectionCapture.playerIndex == 0 and f.selectionCapture.items == items)
-    click(parent, "Select amount...")
-    assert(f.selectionOpened == f.selectionTarget and f.quick == nil and f.opened == nil)
-end)
-
-test("amount actions stay hidden for unresolved stacks and disabled shortcut preferences", function(f)
-    local parent = inventoryMenu(f)
-    assert(not option(parent, "Select amount..."))
-    f.selectionTarget = {pane = f.inventoryPage.inventoryPane}
-    f.preferences.inventoryShortcuts = false
-    parent = inventoryMenu(f)
-    assert(not option(parent, "Select amount..."))
-    f.preferences.inventoryShortcuts = true
-    f.preferences.contextMenus = false
-    parent = inventoryMenu(f)
-    assert(not option(parent, "Select amount..."))
-end)
-
-test("selection adapter installation and pane attachment follow native menu lifecycle", function(f)
-    Menus.install(interface)
-    assert(selectionInstalls == 1)
-    registrations.refresh[1](f.lootPage, "begin")
-    assert(f.selectionAttached == nil)
-    registrations.refresh[1](f.lootPage, "end")
-    assert(f.selectionAttached == f.lootPage.inventoryPane)
-    registrations.refresh[1](f.inventoryPage, "end")
-    assert(f.selectionAttached == f.inventoryPage.inventoryPane)
-end)
-
-test("Current job appears for active paused and finished work and keeps a distinct icon", function(f)
-    for _, state in ipairs({"running", "needs_review", "paused", "cancelled", "finished_with_skips", "finished"}) do
-        f.jobStatus.state = state
-        local _, menu = inventoryMenu(f)
-        local currentJob = needed(menu, "Current job")
-        distinctIcons(menu)
-        assert(currentJob.toolTip.description:find("Key bindings", 1, true))
-        click(menu, "Current job")
-        assert(f.progressPlayer == 0 and not f.quick and not f.opened)
-    end
-    f.jobStatus.state = "idle"
-    local _, menu = inventoryMenu(f)
-    assert(not option(menu, "Current job"))
-end)
-
-test("pending personal gear is accessible from idle inventory world and empty-pane menus", function(f)
-    f.recovery = {pending = true, count = 2}
-    local _, inventory = inventoryMenu(f)
-    needed(inventory, "Current job")
-    local _, world = worldMenu(f, {fixtureObject(f, f.crate)})
-    needed(world, "Current job")
-    for _, isLoot in ipairs({false, true}) do
-        local parent = Menu:new()
-        registrations.background[1](0, parent, isLoot)
-        local menu = needed(parent, "LootBox").child
-        needed(menu, "Current job")
-        distinctIcons(menu)
-        click(menu, "Current job")
-        assert(f.progressPlayer == 0)
-    end
-    assert(f.recoveries == nil and f.quick == nil)
-end)
-
-test("Current job follows context preferences without re-enabling hidden shortcut actions", function(f)
-    f.jobStatus.state = "paused"
-    f.preferences.inventoryShortcuts = false
-    f.preferences.worldShortcuts = false
-    local _, menu = inventoryMenu(f)
-    needed(menu, "Current job")
-    assert(not option(menu, "Keep this copy"))
-    f.preferences.contextMenus = false
-    local parent = inventoryMenu(f)
-    assert(not option(parent, "LootBox"))
-end)
-
-test("Smart Load contents and an individual main-inventory target stay distinct", function(f)
-    local clicked = container("crate", false)
-    sidebar(f, f.inventoryPage, f.inventory)
-    sidebar(f, f.lootPage, clicked)
-    local _, menu = contentsMenu(f, clicked)
-    local smart = needed(menu, "Loot contents (Smart Load)")
-    assert(smart.toolTip.description:find("bags first", 1, true))
-    click(menu, smart.name)
-    assert(f.quick.request.scope == "container" and f.quick.request.sourceContainer == clicked)
-    assert(f.quick.request.destination.kind == "inventory" and f.quick.request.destination.ref == nil)
-    local moves = needed(menu, "Move contents to").child
-    click(moves, "Main inventory only...")
-    assert(f.quick.request.destination.kind == "container" and f.quick.request.destination.ref == f.inventory)
-    assert(count(menu, "Loot contents (Smart Load)") == 1)
-end)
-
-test("workflow help explains optional reviews and the paired all-source transfer buttons", function()
-    local settings, matching
-    for _, guide in ipairs(Guides.list) do
-        if guide.id == "settings" then settings = guide end
-        if guide.id == "matching-transfers" then matching = guide end
-    end
-    assert(settings and matching and #matching.steps >= 5 and #matching.troubleshooting > 0)
-    local choices = table.concat(settings.steps, " ")
-    assert(choices:find("separate optional settings", 1, true) and choices:find("existing saved preferences", 1, true))
-    local steps = table.concat(matching.steps, " ")
-    assert(steps:find("Match Displayed", 1, true) and steps:find("Match Nearby", 1, true))
-    assert(steps:find("every carried", 1, true) and steps:find("optional", 1, true))
-end)
-
-test("Til Full binds native intent to one exact selected stack", function(f)
-    local oldPane = ISInventoryPane
-    local second, foreign, otherRow = item(f.inventory), item(f.crate), item(f.inventory)
-    f.bandage = item(f.inventory, "Base.Bandage")
-    local stack = {items = {f.apple, f.apple, second, foreign, f.bandage}}
-    local selected = {stack, otherRow, f.bandage}
-    ISInventoryPane = {getActualItems = function(items)
-        local result = {}
-        for _, row in ipairs(items or {}) do
-            for _, actual in ipairs(row.items or {row}) do result[#result + 1] = actual end
-        end
-        return result
-    end}
-    ISInventoryPaneContextMenu.onEatItems = function() end
-    ISInventoryPaneContextMenu.onDrinkFluid = function() end
-    f.preferences.tillFullEnabled = true
-    f.app.tillFull = function(_, items, kind) f.consumed, f.consumeKind = items, kind; return true end
-    for _, kind in ipairs({"food", "fluid"}) do
-        local parent, child = Menu:new(), Menu:new()
-        local root = parent:addOption("Localized native label", nil, nil)
-        root.subOption = 37
-        root.itemForTexture = f.apple
-        parent.getSubMenu = function(_, id) assert(id == 37); return child end
-        local callback = kind == "food" and ISInventoryPaneContextMenu.onEatItems or ISInventoryPaneContextMenu.onDrinkFluid
-        local original = child:addOption("Localized fraction", kind == "food" and selected or f.apple, callback)
-        Menus.inventoryMenu(0, parent, selected)
-        assert(#child.options == 2 and child.options[1] == original and original.onSelect == callback)
-        local added = child.options[2]
-        assert(added.name == "Til Full" and added.itemForTexture == f.apple)
-        assert(added.child == nil and added.subOption == nil)
-        -- Later selection mutation cannot widen the captured stack.
-        stack.items[#stack.items + 1] = otherRow
-        added.onSelect(added.target)
-        assert(f.progressPlayer == nil, "Til Full must start directly without opening Current job")
-        assert(f.consumeKind == kind and #f.consumed == 2 and f.consumed[1] == f.apple and f.consumed[2] == second)
-        table.remove(stack.items)
-        Menus.inventoryMenu(0, parent, selected)
-        assert(#child.options == 2)
-    end
-    -- A foreign native submenu cannot authorize an unselected item.
-    local parent, child = Menu:new(), Menu:new()
-    local root = parent:addOption("Drink", foreign, nil); root.subOption = 1
-    parent.getSubMenu = function() return child end
-    child:addOption("All", foreign, ISInventoryPaneContextMenu.onDrinkFluid)
-    Menus.inventoryMenu(0, parent, {f.apple})
-    assert(#child.options == 1)
-    ISInventoryPane = oldPane
-end)
-
-test("Til Full captures expanded selected children but never unselected peers", function(f)
-    local oldPane = ISInventoryPane
-    ISInventoryPane = {getActualItems = function(items) return items end}
-    ISInventoryPaneContextMenu.onEatItems = function() end
-    f.preferences.tillFullEnabled = true
-    f.app.tillFull = function(_, items) f.consumed = items; return true end
-    local second, foreign, different = item(f.inventory), item(f.crate), item(f.inventory, "Base.Other")
-    for _, selected in ipairs({{f.apple,second,foreign,different}, {f.apple}}) do
-        local parent, child = Menu:new(), Menu:new()
-        local root = parent:addOption("Eat", nil, nil); root.subOption = 1
-        parent.getSubMenu = function() return child end
-        child:addOption("All", selected, ISInventoryPaneContextMenu.onEatItems)
-        Menus.inventoryMenu(0,parent,selected)
-        local added = child.options[2]; assert(added)
-        added.onSelect(added.target)
-        local expected = #selected > 1 and 2 or 1
-        assert(#f.consumed == expected and f.consumed[1] == f.apple)
-        if expected == 2 then assert(f.consumed[2] == second) end
-    end
-    ISInventoryPane = oldPane
-end)
-
-test("Til Full refusal uses compact native feedback without another window", function(f)
-    local oldPane, oldHalo = ISInventoryPane, HaloTextHelper
-    ISInventoryPane = {getActualItems = function() return {f.apple} end}
-    ISInventoryPaneContextMenu.onEatItems = function() end
-    f.preferences.tillFullEnabled = true
-    f.app.tillFull = function() return nil, "Keep" end
-    local message, recipient
-    HaloTextHelper = {addBadText = function(player, text) recipient, message = player, text end}
-    local parent, child = Menu:new(), Menu:new()
-    local root = parent:addOption("Eat", nil, nil); root.subOption = 1
-    parent.getSubMenu = function() return child end
-    child:addOption("All", {}, ISInventoryPaneContextMenu.onEatItems)
-    Menus.inventoryMenu(0, parent, {f.apple})
-    local added = child.options[2]
-    local ok, err = added.onSelect(added.target)
-    assert(not ok and err == "Keep" and message == "Til Full: Keep" and recipient == getSpecificPlayer(0))
-    assert(f.progressPlayer == nil and f.opened == nil and added.child == nil)
-    HaloTextHelper = nil
-    assert(not added.onSelect(added.target))
-    assert(f.progressPlayer == nil and f.opened == nil)
-    ISInventoryPane, HaloTextHelper = oldPane, oldHalo
-end)
-
-test("Til Full respects disabled, unavailable and stale native opening recipes", function(f)
-    local oldPane = ISInventoryPane
-    ISInventoryPane = {getActualItems = function() return {f.apple} end}
-    ISInventoryPaneContextMenu.onEatItems = function() end
-    for _, mode in ipairs({"disabled", "parent", "child", "recipe", "foreign"}) do
-        local parent, child = Menu:new(), Menu:new()
-        local root = parent:addOption("Eat", nil, nil)
-        root.subOption = 1
-        parent.getSubMenu = function() return child end
-        local original = child:addOption("All", {}, mode == "foreign" and function() end or ISInventoryPaneContextMenu.onEatItems)
-        f.preferences.tillFullEnabled = mode ~= "disabled"
-        root.notAvailable = mode == "parent"
-        original.notAvailable = mode == "child"
-        original.param3 = mode == "recipe" and {} or nil
-        Menus.inventoryMenu(0, parent, {f.apple})
-        assert(#child.options == 1, mode)
-    end
-    ISInventoryPane = oldPane
-end)
-
-test("Til Full follows a native Open and Eat or Drink recipe without relying on labels", function(f)
-    local oldPane, oldManager, oldClient = ISInventoryPane, getScriptManager, isClient
-    isClient=function() return false end
-    local recipe = {}
-    getScriptManager = function() return {getCraftRecipe=function(_,key) return key=="OpenMe" and recipe end} end
-    ISInventoryPane = {getActualItems = function(selected) return selected end}
-    ISInventoryPaneContextMenu.onEatItems, ISInventoryPaneContextMenu.onDrinkFluid = function() end, function() end
-    f.apple.getOpeningRecipe = function() return "OpenMe" end
-    f.preferences.tillFullEnabled = true
-    f.app.tillFull = function(_,items,kind,opening)
-        assert(#items == 1 and items[1] == f.apple and opening == recipe)
-        f.consumeKind = kind;return true
-    end
-    for _, kind in ipairs({"food","fluid"}) do
-        local parent, child = Menu:new(), Menu:new()
-        local root = parent:addOption("Native localized name", nil, nil);root.subOption=7
-        parent.getSubMenu = function() return child end
-        local original
-        if kind == "food" then original = child:addOption("1/4", {f.apple}, ISInventoryPaneContextMenu.onEatItems)
-        else original = child:addOption("All", f.apple, ISInventoryPaneContextMenu.onDrinkFluid);original.param4=f.apple end
-        original.param3 = recipe
-        Menus.inventoryMenu(0,parent,{f.apple});Menus.inventoryMenu(0,parent,{f.apple})
-        assert(#child.options==2 and child.options[1]==original and original.param3==recipe)
-        local added=child.options[2];assert(added.name==(kind=="food" and "Open and Eat Til Full" or "Open and Drink Til Full") and added.itemForTexture==f.apple)
-        assert(added.onSelect(added.target) and f.consumeKind==kind)
-    end
-    isClient=function() return true end
-    local parent,child=Menu:new(),Menu:new()
-    local root=parent:addOption("Open and eat",nil,nil);root.subOption=7
-    parent.getSubMenu=function() return child end
-    child:addOption("All",{f.apple},ISInventoryPaneContextMenu.onEatItems).param3=recipe
-    Menus.inventoryMenu(0,parent,{f.apple})
-    assert(child.options[2].name=="Til Full (use the opened item)" and child.options[2].notAvailable and not child.options[2].onSelect)
-    assert(child.options[2].toolTip.description:find("without eating",1,true))
-    ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
-end)
-
-test("nearby loot Eat/Drink follows nested native rows and preserves exact clicked source", function(f)
-    local oldPane, oldManager, oldClient = ISInventoryPane, getScriptManager, isClient
-    ISInventoryPane = {getActualItems = function(rows)
-        local out = {}
-        for _, row in ipairs(rows) do
-            if row.items then for n=2,#row.items do out[#out+1] = row.items[n] end
-            else out[#out+1] = row end
-        end
-        return out
-    end}
-    local recipe = {}
-    isClient = function() return false end
-    getScriptManager = function() return {getCraftRecipe=function(_,key) return key=="OpenMe" and recipe end} end
-    ISInventoryPaneContextMenu.onEatItems, ISInventoryPaneContextMenu.onDrinkFluid = function() end, function() end
-    f.preferences.tillFullEnabled = true
-    local picked, peer, decoy = item(f.crate), item(f.crate), item(f.inventory)
-    picked.getOpeningRecipe = function() return "OpenMe" end
-    local rows = {{items={picked,picked,peer}}, decoy}
-    local originalSource = f.crate
-    for _, kind in ipairs({"food", "fluid"}) do for _, closed in ipairs({false,true}) do
-        local parent, group, amounts = Menu:new(), Menu:new(), Menu:new()
-        local menus = {group, amounts}
-        parent.getSubMenu = function(_,id) return menus[id] end
-        local use = parent:addOption("Container actions",nil,nil);use.subOption=1
-        local action=group:addOption("Localized native action",nil,nil);action.subOption=2
-        local original = amounts:addOption("1/4", kind=="food" and rows or picked,
-            kind=="food" and ISInventoryPaneContextMenu.onEatItems or ISInventoryPaneContextMenu.onDrinkFluid)
-        original.param3=closed and recipe or nil
-        original.param4=kind=="fluid" and picked or 25
-        use.notAvailable=true
-        Menus.inventoryMenu(0,parent,rows);assert(#amounts.options==1)
-        use.notAvailable=false
-        Menus.inventoryMenu(0,parent,rows);Menus.inventoryMenu(0,parent,rows)
-        assert(#amounts.options==2 and amounts.options[1]==original)
-        local added=amounts.options[2];assert(added.name==(closed and (kind=="food" and "Open and Eat Til Full" or "Open and Drink Til Full") or "Til Full"))
-        local captured
-        f.app.tillFull = function(_,items,actionKind,open,source)
-            assert(#items==2 and items[1]==picked and items[2]==peer and actionKind==kind)
-            assert(open==original.param3 and source==originalSource)
-            captured=true;return true
-        end
-        picked.source=f.inventory -- menu never recaptures a moved item at click time
-        assert(added.onSelect(added.target) and captured)
-        picked.source=originalSource
-    end end
-    ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
-end)
-
-test("stock plain recipe rows retain the exact source for mapped MP opening and fall back for unknown producers",function(f)
-    local oldPane,oldManager,oldCraft,oldFlags,oldMoodle,oldClient = ISInventoryPane,getScriptManager,CraftRecipeManager,InputFlag,MoodleType,isClient
-    local oldResource=ResourceType
-    local oldNew,oldEat = ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems
-    ISInventoryPane={getActualItems=function(rows) return rows end}
-    ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems=function() end,function() end
-    InputFlag={IsSealed={},Unseal={}};MoodleType={FOOD_EATEN={}}
-    ResourceType={Item={}}
-    f.preferences.tillFullEnabled=true
-    local drink={getName=function() return "OpenCanOfBeverage" end,isVanilla=function() return true end,getOutputCount=function() return 0 end}
-    local food={getName=function() return "OpenCannedFood" end,isVanilla=function() return true end,getOutputCount=function() return 1 end}
-    local unknown={getName=function() return "UnpackEverything" end,isVanilla=function() return true end,getOutputCount=function() return 1 end}
-    local ration={getName=function() return "OpenWaterRationCan" end,isVanilla=function() return true end,getOutputCount=function() return 0 end}
-    local jar={getName=function() return "OpenJarOfFood" end,isVanilla=function() return true end,getOutputCount=function() return 1 end}
-    local registry={OpenCanOfBeverage=drink,OpenCannedFood=food,UnpackEverything=unknown,OpenWaterRationCan=ration,OpenJarOfFood=jar}
-    local catalog={}
-    getScriptManager=function() return {getCraftRecipe=function(_,n) return registry[n] end,getItem=function(_,n) return catalog[n] end} end
-    local mealLevel=0;f.player.getMoodles=function() return {getMoodleLevel=function() return mealLevel end} end
-    for _,name in ipairs({"CannedPeaches","CannedMilk","CannedFruitBeverage","Pop","WaterRationCan","CannedTomato"}) do
-        for _,mode in ipairs({"plain","amount-and-plain","multiplayer","unmapped-mp","unknown","disabled","full","not-selected","wrong-player"}) do
-            isClient=function() return mode=="multiplayer" or mode=="unmapped-mp" end
-            local source = name=="Pop" and f.inventory or f.crate
-            local chosen,decoy=item(source),item(source)
-            local r=mode=="unknown" and unknown or (name=="Pop" and drink or name=="WaterRationCan" and ration
-                or name=="CannedTomato" and jar or food)
-            chosen.classes.Food=name~="Pop"
-            chosen.getFullType=function() return "Base."..name end;decoy.getFullType=chosen.getFullType
-            chosen.getOpeningRecipe=function()
-                return (name=="CannedMilk" or name=="CannedPeaches") and "OpenCannedFood" or nil
-            end
-            chosen.isSealed=function() return name=="Pop" end
-            chosen.getFluidContainer=function()
-                if name=="Pop" then return {isEmpty=function() return false end,getCapacity=function() return .3 end,
-                    getProperties=function() return {getHungerChange=function() return -.05 end} end} end
-            end
-            local slot={isKeep=function() return name=="Pop" end,
-                hasFlag=function(_,k) return name=="Pop" and (k==InputFlag.IsSealed or k==InputFlag.Unseal) end,
-                getResourceType=function() return ResourceType.Item end,getAmount=function() return 1 end}
-            CraftRecipeManager={getValidInputScriptForItem=function(recipe,selected,player)
-                assert(selected==chosen and player==f.player)
-                return slot
-            end}
-            local function pack(value) return {size=function() return 1 end,get=function() return value end} end
-            local closed={}
-            chosen.getScriptItem=function() return closed end
-            local opened={getFullName=function() return "Base."..name.."Open" end,
-                getActualWeight=function() return .25 end,isCantEat=function() return false end}
-            catalog["Base.WaterRationCanEmpty"]=mode~="unmapped-mp" and {getFullName=function() return "Base.WaterRationCanEmpty" end,
-                getActualWeight=function() return .2 end} or nil
-            catalog["Base.JarLid"]={getFullName=function() return "Base.JarLid" end,
-                getActualWeight=function() return .1 end,getConditionMax=function() return 10 end}
-            local mapper={getResultItems=function() return pack(opened) end,
-                getPatternForResult=function() return pack(closed) end}
-            local out={getAmount=function() return 1 end,getResourceType=function() return ResourceType.Item end,
-                getOutputMapper=function() if mode~="unmapped-mp" then return mapper end end}
-            for _,route in ipairs({food,jar,ration}) do
-                route.getInputs=function() return pack(slot) end
-                route.getIndexForIO=function() return 1 end
-                route.isInHandCraftCraft=function() return true end
-            end
-            food.getOutputs=function() return pack(out) end
-            jar.getOutputs=food.getOutputs
-            ration.getOutputs=function() return {size=function() return 0 end} end
-            mealLevel=mode=="full" and 3 or 0
-            local parent,recipes,amounts=Menu:new(),Menu:new(),Menu:new()
-            parent.getSubMenu=function(_,id) return id==1 and recipes or amounts end
-            parent:addOption("Localized cooking",nil,nil).subOption=1
-            local standard=recipes:addOption("Localized Open",chosen,ISInventoryPaneContextMenu.OnNewCraft)
-            standard.param1,standard.param2,standard.param3=r,mode=="wrong-player" and 1 or 0,false
-            standard.notAvailable=mode=="disabled"
-            local both=mode=="amount-and-plain" and chosen:getOpeningRecipe()~=nil
-            if both then
-                parent:addOption("Localized Open & Eat",nil,nil).subOption=2
-                local row=amounts:addOption("All",{chosen},ISInventoryPaneContextMenu.onEatItems)
-                row.param3=r
-            end
-            local rows=mode=="not-selected" and {decoy} or {chosen}
-            Menus.inventoryMenu(0,parent,rows);Menus.inventoryMenu(0,parent,rows)
-            assert(recipes.options[1]==standard and standard.onSelect==ISInventoryPaneContextMenu.OnNewCraft)
-            local supported=mode=="plain" or mode=="multiplayer" or mode=="unmapped-mp" or mode=="amount-and-plain"
-            assert(#recipes.options==(supported and not both and 2 or 1),name..":"..mode)
-            assert(#amounts.options==(both and 2 or 0))
-            if supported then
-                local added=both and amounts.options[2] or recipes.options[2]
-                local drinkIntent=name~="CannedPeaches" and name~="CannedTomato"
-                if mode=="unmapped-mp" and name~="Pop" then
-                    assert(added.notAvailable and not added.onSelect and added.toolTip.description:find(drinkIntent and "choose Drink" or "choose Eat",1,true))
-                else
-                    assert(added.name==(drinkIntent and "Open and Drink Til Full" or "Open and Eat Til Full"))
-                    f.app.tillFull=function(_,list,kind,recipe,container)
-                        assert(#list==1 and list[1]==chosen and recipe==r and container==source)
-                        assert(kind==((name=="Pop" or name=="WaterRationCan") and "fluid" or (drinkIntent and "drinkFood" or "food")));return true
-                    end
-                    assert(added.onSelect(added.target))
-                end
-            end
-        end
-    end
-    ISInventoryPane,getScriptManager,CraftRecipeManager,InputFlag,MoodleType,isClient=oldPane,oldManager,oldCraft,oldFlags,oldMoodle,oldClient
-    ResourceType=oldResource
-    ISInventoryPaneContextMenu.OnNewCraft,ISInventoryPaneContextMenu.onEatItems=oldNew,oldEat
-end)
-test("opened stock Food drinks retain the Food callback while selecting thirst even from the loot pane",function(f)
-    local prev=ISInventoryPane;ISInventoryPane={getActualItems=function(rows) return rows end}
-    ISInventoryPaneContextMenu.onEatItems=function() end
-    local opened=item(f.crate);opened.getCustomMenuOption=function() return getText("ContextMenu_Drink") end
-    local parent,amount=Menu:new(),Menu:new();parent.getSubMenu=function() return amount end
-    parent:addOption("Localized stock Drink",nil,nil).subOption=1
-    local row=amount:addOption("All",{opened},ISInventoryPaneContextMenu.onEatItems)
-    f.preferences.tillFullEnabled=true;Menus.inventoryMenu(0,parent,{opened});Menus.inventoryMenu(0,parent,{opened})
-    assert(#amount.options==2 and amount.options[1]==row and amount.options[2].name=="Til Full")
-    f.app.tillFull=function(_,list,kind,recipe,source)
-        assert(#list==1 and list[1]==opened and kind=="drinkFood" and not recipe and source==f.crate);return true
-    end
-    assert(amount.options[2].onSelect(amount.options[2].target));ISInventoryPane=prev
-end)
-test("native ground Drink binds its real world wrapper only to the selected floor item", function(f)
-    local oldPane = ISInventoryPane
-    ISInventoryPane = {getActualItems = function(rows) return rows end}
-    ISInventoryPaneContextMenu.onDrinkFluid = function() end
-    f.preferences.tillFullEnabled=true
-    local floor = container("floor",false)
-    local chosen,other = item(floor),item(floor)
-    local function world(value)
-        return {classes={IsoWorldInventoryObject=true},getItem=function() return value end}
-    end
-    local owner,foreign = world(chosen),world(other)
-    f.app.tillFull = function(_,items,kind,recipe,source)
-        assert(kind=="fluid" and not recipe and source==floor and #items==1 and items[1]==chosen)
-        f.groundConsumed = true;return true
-    end
-    for _, mode in ipairs({"pane","world","foreign","mismatch","stale"}) do
-        local parent,amounts=Menu:new(),Menu:new()
-        parent.getSubMenu=function() return amounts end
-        local root=parent:addOption("Drink",nil,nil);root.subOption=1
-        local native=amounts:addOption("All",mode=="foreign" and foreign or owner, ISInventoryPaneContextMenu.onDrinkFluid)
-        native.param4=mode=="mismatch" and other or (mode=="foreign" and other or chosen)
-        if mode=="stale" then chosen.source=nil end
-        if mode=="pane" then Menus.inventoryMenu(0,parent,{chosen})
-        else Menus.worldMenu(0,parent,{owner},false) end
-        local added=amounts.options[2]
-        if mode=="pane" or mode=="world" then
-            f.groundConsumed=false
-            assert(added and added.onSelect(added.target) and f.groundConsumed)
-        else assert(not added) end
-    end
-    ISInventoryPane=oldPane
-end)
-
-local function pourFixture(f)
-    local old={ISInventoryPane,FluidContainer,FluidUtil,getActivatedMods,getTexture}
-    ISInventoryPane={getActualItems=function(rows)
-        local flat,seen={},{}
-        local function push(candidate)
-            if not seen[candidate] then seen[candidate]=true;flat[#flat+1]=candidate end
-        end
-        for _,row in ipairs(rows) do
-            if row.items then for i=2,#row.items do push(row.items[i]) end
-            else push(row) end
-        end
-        return flat
-    end}
-    FluidContainer={CanTransfer=function(from,to) return from~=to end}
-    FluidUtil={roundTransfer=function(n) return n end}
-    getActivatedMods=function() return {contains=function(_,id) return f.legacy and id=="PourIntoContainer" end} end
-    getTexture=function(key)
-        if f.noDropIcon and key=="Item_WaterDrop" then return nil end
-        return old[5](key)
-    end
-    local function restore()
-        ISInventoryPane,FluidContainer,FluidUtil,getActivatedMods,getTexture=old[1],old[2],old[3],old[4],old[5]
-    end
-    local function putIn(container_)
-        container_.contents={}
-        function container_:isLockedToCharacter() return false end
-        function container_:getItems()
-            return {size=function() return #self.contents end,get=function(_,i) return self.contents[i+1] end}
-        end
-        function container_:contains(candidate)
-            for _,entry in ipairs(self.contents) do if entry==candidate then return true end end
-            return false
-        end
-    end
-    local milk={}
-    local function vessel(c,id,kind,name,capacity,amount)
-        local i=item(c,kind);i.name=name
-        i.getID=function() return id end
-        i.isSealed=function() return false end
-        local fluid={amount=amount}
-        function fluid:getAmount() return self.amount end
-        function fluid:getCapacity() return capacity end
-        function fluid:getFreeCapacity() return capacity-self.amount end
-        function fluid:getOwner() return i end
-        function fluid:canPlayerEmpty() return true end
-        function fluid:createFluidSample()
-            return {size=function() return self.amount>0 and 1 or 0 end,
-                getFluid=function() return milk end,getPercentage=function() return 1 end,release=function() end}
-        end
-        function i:getFluidContainer() return fluid end
-        c.contents[#c.contents+1]=i
-        return i,fluid
-    end
-    putIn(f.inventory);putIn(f.crate)
-    local ready,pouch=bag(f,true,"Field Bag");putIn(pouch)
-    f.inventory.contents[#f.inventory.contents+1]=ready
-    function f.player:getPrimaryHandItem() return ready end
-    f.lootPage.getIsVisible=function() return f.visible~=false end
-    f.inventoryPage.getIsVisible=function() return true end
-    for _,page in ipairs({f.inventoryPage,f.lootPage}) do
-        page.inventoryPane.player=0
-        page.inventoryPane.getIsVisible=page.getIsVisible
-        page.inventoryPane.itemslist={}
-    end
-    f.app.world.consumptionSource=function(_,i,c) return c==f.crate and i.source==c end
-    f.app.world.pourShelfAnchor=function(_,c) return c==f.crate and {} or nil end
-    local a=vessel(f.inventory,10,"Base.Milk","Milk",2,1.5)
-    local b=vessel(f.inventory,11,"Base.Bottle","Bottle",1,0)
-    local d=vessel(pouch,12,"Base.Bottle","Bottle",2,0)
-    local shelf=vessel(f.crate,13,"Base.Milk","Shelf Milk",2,1)
-    local shelfTarget=vessel(f.crate,14,"Base.Bottle","Shelf Bottle",.5,0)
-    local calls={}
-    f.app.startPour=function(_,source,targets,options,receiver)
-        calls[#calls+1]={source=source,targets=targets,options=options,receiver=receiver}
-        return true
-    end
-    return a,b,d,shelf,shelfTarget,calls,restore,vessel
-end
-
-local function pourDestination(menu,item_)
-    for _,value in ipairs(menu.options) do if value.itemForTexture==item_ and value.name:find("|",1,true) then return value end end
-end
-
-test("Pour Into renders a separate native-spanning menu and dispatches one frozen Fill All",function(f)
-    local src,main,equipped,_,_,calls,restore=pourFixture(f)
-    local ok,err=pcall(function()
-        f.preferences.pourEquippedFirst=true
-        f.preferences.pourMostRoomFirst=true
-        local parent=Menu:new()
-        local nativeChild=Menu:new()
-        local vanilla=parent:addOption("Fluid",nil,function() end)
-        parent:addSubMenu(vanilla,nativeChild)
-        local rows={src}
-        Menus.inventoryMenu(0,parent,rows)
-        assert(parent.options[1]==vanilla and vanilla.child==nativeChild and #nativeChild.options==0)
-        local root=needed(parent,"Pour Into")
-        Menus.inventoryMenu(0,parent,rows)
-        local occurrences=0
-        for _,o in ipairs(parent.options) do if o.name=="Pour Into" then occurrences=occurrences+1 end end
-        assert(occurrences==1 and needed(parent,"Pour Into")==root)
-        assert(root.child and icon(root)=="Item_WaterDrop")
-        local branded=needed(needed(parent,"LootBox").child,"Pour Into")
-        assert(branded.child and branded.child~=root.child and icon(branded)=="Item_WaterDrop")
-        local m,e=pourDestination(root.child,main),pourDestination(root.child,equipped)
-        assert(m and e and m.name=="0% | 0.0L / 1.0L" and e.name=="0% | 0.0L / 2.0L")
-        assert(m.itemForTexture==main and e.itemForTexture==equipped and not m.iconTexture and not e.iconTexture)
-        assert(m.toolTip.description:find("Bottle | Main inventory",1,true)
-            and e.toolTip.description:find("Bottle | Field Bag",1,true))
-        local fill=needed(root.child,"Fill All")
-        assert(icon(fill))
-        rows[1]=main; rows[2]=equipped -- callbacks must not re-flatten new UI rows
-        fill.onSelect(fill.target);fill.onSelect(fill.target)
-        local mirrored=needed(branded.child,"Fill All")
-        mirrored.onSelect(mirrored.target)
-        assert(#calls==1 and calls[1].source.item==src and #calls[1].targets==2)
-        assert(calls[1].targets[1].item==equipped and calls[1].targets[2].item==main)
-        assert(calls[1].options.pourFillScope=="equipped-first" and calls[1].options.pourFillOrder=="largest-first"
-            and calls[1].options.pourRoute=="fill-all")
-        assert(not package.loaded["Fluids/ISFluidTransferAction"],"native actions must remain lazy at menu render")
-    end)
-    restore();assert(ok,err)
-end)
-
-test("Pour Into shows exact target icon and compact fill data; identical row text keeps separate destinations",function(f)
-    local src,_,equipped,_,_,calls,restore,vessel=pourFixture(f)
-    local ok,err=pcall(function()
-        local a=vessel(f.inventory,16,"Base.Canteen","Canteen",1,.6)
-        local b=vessel(equipped:getContainer(),17,"Base.Canteen","Canteen",1,.6)
-        local c=vessel(f.inventory,18,"Base.Canteen","Canteen",1,.6)
-        local tiny=vessel(f.inventory,19,"Base.CartOn","Carton",.5,.003)
-        local function render()
-            local parent=Menu:new();Menus.inventoryMenu(0,parent,{src})
-            return needed(parent,"Pour Into").child,needed(needed(parent,"LootBox").child,"Pour Into").child
-        end
-        local main,mirror=render()
-        local labels={
-            [a]="Canteen | Main inventory #1",
-            [b]="Canteen | Field Bag",
-            [c]="Canteen | Main inventory #2",
-        }
-        for _,child in ipairs({main,mirror}) do
-            for _,entry in ipairs({a,b,c}) do
-                local row=assert(pourDestination(child,entry))
-                assert(row.name=="60% | 0.6L / 1.0L" and row.itemForTexture==entry and not row.iconTexture)
-                assert(row.toolTip.description:find(labels[entry],1,true))
-                assert(row.target.targets[1].item==entry and #row.target.targets==1)
-            end
-            local little=assert(pourDestination(child,tiny))
-            assert(little.name=="1% | 0.003L / 0.5L","small real increments must not round away the litres")
-        end
-        assert(#calls==0,"building both mirrored menus must not pour")
-        for _,entry in ipairs({a,b,c}) do
-            local child=render()
-            local row=assert(pourDestination(child,entry))
-            assert(row.onSelect(row.target))
-            assert(calls[#calls].targets[1].item==entry and #calls[#calls].targets==1 and calls[#calls].options.pourRoute=="single")
-        end
-    end)
-    restore();assert(ok,err)
-end)
-
-test("Pour Into keeps third-party entries and localizes first-party placement with missing texture fallback",function(f)
-    local src,main,_,_,_,calls,restore=pourFixture(f)
-    local ok,err=pcall(function()
-        f.noDropIcon=true
-        for _,mode in ipairs({"legacy","foreign","ellipsis"}) do
-            local parent=Menu:new()
-            f.legacy=mode=="legacy"
-            local foreign=mode~="legacy" and parent:addOption(mode=="ellipsis" and "Pour into ..." or "Pour Into",nil,function() f.foreignPour=true end)
-            Menus.inventoryMenu(0,parent,{src})
-            assert(option(parent,"Pour Into")== (mode=="foreign" and foreign or nil))
-            if foreign then foreign.onSelect(foreign.target);assert(f.foreignPour) end
-            local root=needed(needed(parent,"LootBox").child,"Pour Into")
-            assert(root.itemForTexture==src and icon(needed(root.child,"Fill All")))
-            local target=assert(pourDestination(root.child,main))
-            target.onSelect(target.target)
-            assert(calls[#calls].source.item==src and #calls[#calls].targets==1 and calls[#calls].targets[1].item==main)
-        end
-    end)
-    restore();assert(ok,err)
-end)
-
-test("Pour Into rejects two real selections and hidden loot; shortcut flags and loot opt-in stay exact",function(f)
-    local src,main,_,shelf,target,calls,restore=pourFixture(f)
-    local ok,err=pcall(function()
-        local function render(rows)
-            local p=Menu:new();Menus.inventoryMenu(0,p,rows);return option(p,"Pour Into")
-        end
-        assert(not render({{items={src,src,main}}}))
-        assert(not render({src,main}))
-        f.preferences.contextMenus=false;assert(not render({src}))
-        f.preferences.contextMenus=true
-        f.preferences.inventoryShortcuts=false;assert(not render({src}))
-        f.preferences.inventoryShortcuts=true
-        f.visible=false;assert(not render({shelf}))
-        f.visible=true
-        local menu=assert(render({shelf})).child;assert(not pourDestination(menu,target))
-        f.preferences.pourLootToLoot=true
-        menu=assert(render({shelf})).child
-        local targetOption=assert(pourDestination(menu,target)); targetOption.onSelect(targetOption.target)
-        assert(#calls==1 and calls[1].source.item==shelf and calls[1].targets[1].item==target
-            and calls[1].options.pourLootToLoot==true)
-    end)
-    restore();assert(ok,err)
-end)
-
-test("unstacked shelf milk lists the exact two same-name empty buckets only when allowed",function(f)
-    local _,main,_,milk,other,calls,restore=pourFixture(f)
-    local ok,err=pcall(function()
-        milk.name="Animal's Milk (Bucket)"
-        main.name,other.name="Empty Bucket","Empty Bucket"
-        f.app.world.name=function(_,c) return c==f.crate and "Kitchen Shelf" or nil end
-        local function openMilk()
-            local parent=Menu:new()
-            Menus.inventoryMenu(0,parent,{milk})
-            return needed(parent,"Pour Into")
-        end
-        local defaults=openMilk()
-        assert(defaults.toolTip.description:find("Animal's Milk (Bucket)",1,true))
-        assert(defaults.toolTip.description:find("1.000 L available",1,true))
-        assert(pourDestination(defaults.child,main) and not pourDestination(defaults.child,other))
-        f.preferences.pourLootToLoot=true
-        local both=openMilk()
-        local a,b=assert(pourDestination(both.child,main)),assert(pourDestination(both.child,other))
-        assert(a~=b and a.name=="0% | 0.0L / 1.0L" and b.name=="0% | 0.0L / 0.5L")
-        assert(a.toolTip.description:find("Empty Bucket | Main inventory",1,true)
-            and b.toolTip.description:find("Empty Bucket | Displayed Kitchen Shelf",1,true))
-        b.onSelect(b.target)
-        assert(#calls==1 and calls[1].source.item==milk and calls[1].targets[1].item==other)
-    end)
-    restore();assert(ok,err)
-end)
-
-test("oven and other loot sources explain missing targets without enabling loot-to-loot",function(f)
-    local carried,main,equipped,milk,ovenTarget,calls,restore=pourFixture(f)
-    local ok,err=pcall(function()
-        f.app.world.name=function(_,c) return c==f.crate and "Oven" or nil end
-        local kind=f.crate.getType
-        f.crate.getType=function() return "stove" end
-        local m,e=main:getFluidContainer(),equipped:getFluidContainer()
-        m.amount,e.amount=m:getCapacity(),e:getCapacity()
-        local inMain=carried:getFluidContainer()
-        inMain.amount=inMain:getCapacity()
-        local function open()
-            local parent=Menu:new()
-            Menus.inventoryMenu(0,parent,{milk})
-            local root=needed(parent,"Pour Into")
-            local branded=needed(needed(parent,"LootBox").child,"Pour Into")
-            return root,branded
-        end
-        local top,branded=open()
-        assert(top.notAvailable and branded.notAvailable and not top.child and not top.onSelect)
-        assert(top.toolTip.description:find("loot-to-loot",1,true) and #calls==0)
-        f.preferences.pourLootToLoot=true
-        top,branded=open()
-        assert(not top.notAvailable and pourDestination(top.child,ovenTarget))
-        assert(pourDestination(branded.child,ovenTarget))
-        f.preferences.pourLootToLoot=false
-        m.amount=0
-        top=open()
-        assert(pourDestination(top.child,main) and not pourDestination(top.child,ovenTarget))
-        f.app.world.pourShelfAnchor=function() return nil end
-        assert(open().toolTip.description:find("out of reach",1,true))
-        f.app.world.consumptionSource=function() return false end
-        assert(open().toolTip.description:find("cannot pour from here",1,true))
-        f.crate.getType=kind
-    end)
-    restore();assert(ok,err)
-end)
-
-local function stockPourRow(pane,key,representative,...)
-    pane.itemindex=pane.itemindex or {}
-    pane.collapsed=pane.collapsed or {}
-    local row={invPanel=pane,name=key,items={representative,...}}
-    pane.itemindex[key],pane.collapsed[key]=row,true
-    pane.itemslist[#pane.itemslist+1]=row
-    return row
-end
-
-test("loot Fill From on an exact receiver lists allowed donors and shares one frozen click",function(f)
-    local carried,empty,bagged,shelfDonor,receiver,calls,restore=pourFixture(f)
-    local ok,err=pcall(function()
-        f.preferences.pourMainOnly=true -- a batch policy cannot hide an explicit bagged donor
-        bagged:getFluidContainer().amount=.75
-        local anchor={f.crate}
-        f.app.world.pourShelfAnchor=function(_,c) if c==f.crate then return anchor end end
-        local function open(rows)
-            local parent=Menu:new();Menus.inventoryMenu(0,parent,rows or {receiver})
-            local branded=needed(parent,"LootBox").child
-            return option(parent,"Fill From"),option(branded,"Fill From"),option(parent,"Pour Into")
-        end
-        local items={receiver}
-        local top,mirror,forward=open(items)
-        assert(top and mirror and not forward and not top.notAvailable and #top.child.options==2)
-        for _,root in ipairs({top,mirror}) do
-            local donor=assert(pourDestination(root.child,bagged))
-            assert(donor.name:find("Field Bag",1,true) and donor.name:find("0.75L",1,true))
-            assert(not pourDestination(root.child,shelfDonor) and not pourDestination(root.child,empty))
-            assert(not option(root.child,"Fill All") and not option(root.child,"Fill from All"))
-        end
-        items[1]=empty
-        local chosen=assert(pourDestination(mirror.child,bagged))
-        assert(#calls==0 and chosen.onSelect(chosen.target))
-        local other=assert(pourDestination(top.child,carried));other.onSelect(other.target)
-        assert(#calls==1 and calls[1].source.item==bagged and calls[1].receiver==receiver
-            and #calls[1].targets==1 and calls[1].targets[1].item==receiver and calls[1].targets[1].pourAnchor==anchor
-            and calls[1].options.pourRoute=="portable-fill-from")
-        f.preferences.pourLootToLoot=true;receiver:getFluidContainer().amount=.1
-        top,mirror,forward=open()
-        assert(top and forward and pourDestination(top.child,shelfDonor))
-        local from=assert(pourDestination(top.child,shelfDonor));from.onSelect(from.target)
-        local again=needed(forward.child,"Fill All");again.onSelect(again.target)
-        assert(#calls==2 and calls[2].source.item==shelfDonor and calls[2].targets[1].item==receiver)
-        assert(not open({receiver,shelfDonor}),"a mixed selection cannot fill a guessed receiver")
-        local row=stockPourRow(f.lootPage.inventoryPane,"Shelf stack",receiver,receiver,shelfDonor)
-        assert(not open({row}),"expand multiple physical members before choosing a receiver")
-        receiver:getFluidContainer().amount=.5;assert(not open())
-        receiver:getFluidContainer().amount=0
-        local parent=Menu:new();local foreign=parent:addOption("Fill from ...",nil,function() end)
-        Menus.inventoryMenu(0,parent,{receiver})
-        assert(needed(parent,"Fill from ...")==foreign and not option(parent,"Fill From")
-            and needed(needed(parent,"LootBox").child,"Fill From").child)
-        f.visible=false;assert(not open());f.visible=true
-        f.app.world.pourShelfAnchor=function() return nil end;assert(not open())
-    end)
-    restore();assert(ok,err)
-end)
-
-test("a visible composite loot section authorizes only the actual clicked holder",function(f)
-    local carried,main,_,milk,_,calls,restore,vessel=pourFixture(f)
-    local ok,err=pcall(function()
-        local pane=f.lootPage.inventoryPane
-        local oven=f.crate
-        pane.inventory=f.inventory -- UI retains an unrelated backing holder
-        local button={inventory=oven}
-        f.lootPage.backpacks={button}
-        local row=stockPourRow(pane,"Milk",milk,milk)
-        pane.items={row}
-        pane.itemindex.Milk={} -- overwritten by the last rendered group
-        local function open(rows)
-            local parent=Menu:new()
-            Menus.inventoryMenu(0,parent,rows)
-            return option(parent,"Pour Into")
-        end
-        local generic=assert(open({row}))
-        assert(pourDestination(generic.child,main))
-        local section={index=1,container=oven,button=button,folded=false}
-        pane.ninvSections,pane.ninvSectionOf,pane.ninvCombinedBuilt={section},{[oven]=section},false
-        row.ninvSection=1
-        -- A retained section allows restoration after borrowing its last item.
-        pane.items={}
-        assert(require("LootBox/Pour").displayed(0,oven)==oven)
-        assert(not open({row}),"stale row not currently rendered")
-        pane.items={row}
-        local grouped=assert(open({row}))
-        local picked=assert(pourDestination(grouped.child,main))
-        picked.onSelect(picked.target)
-        assert(calls[1].source.container==oven)
-        row.items={milk,milk,carried}
-        assert(not open({row}),"a merged cross-holder row is not a single stack")
-        row.items={milk,milk}
-        section.folded=true
-        pane.items={}
-        assert(not open({row}) and not open({milk}))
-        assert(require("LootBox/Pour").displayed(0,oven)==nil)
-        section.folded=false
-        pane.items={row}
-        f.lootPage.backpacks={}
-        assert(not open({row}) and not open({milk}),"view cannot authorize a detached native holder")
-    end)
-    restore();assert(ok,err)
-end)
-
-test("collapsed native source picks the least filled eligible exact vessel and freezes it",function(f)
-    local src,main,_,_,_,calls,restore,vessel=pourFixture(f)
-    local ok,err=pcall(function()
-        local pane=f.inventoryPage.inventoryPane
-        local small=vessel(f.inventory,30,"Base.Milk","Milk",1,.4)
-        local winner,winnerFluid=vessel(f.inventory,25,"Base.Milk","Milk",10,2)
-        local higherId=vessel(f.inventory,26,"Base.Milk","Milk",10,2)
-        local sealed=vessel(f.inventory,21,"Base.Milk","Milk",10,.01)
-        sealed.isSealed=function() return true end
-        local empty=vessel(f.inventory,20,"Base.Milk","Milk",1,0)
-        local incompatible,incompatibleFluid=vessel(f.inventory,22,"Base.Milk","Milk",10,.02)
-        FluidContainer.CanTransfer=function(from,to) return from~=to and from~=incompatibleFluid end
-        local row=stockPourRow(pane,"Milk",main,empty,sealed,incompatible,higherId,small,winner,src)
-        local function render(items)
-            local menu=Menu:new()
-            local stockMenu=Menu:new()
-            local stock=menu:addOption("Fluid",nil,function() end)
-            menu:addSubMenu(stock,stockMenu)
-            Menus.inventoryMenu(0,menu,items)
-            assert(stock.child==stockMenu and #stockMenu.options==0)
-            return option(menu,"Pour Into")
-        end
-        assert(not render({row,main}),"mixed selection is not a single stack")
-        assert(not render({{name=row.name,invPanel=pane,items=row.items}}),"unregistered row is not native")
-        pane.collapsed.Milk=false
-        assert(not render({row}),"expanded group is not permission to pick a sibling")
-        assert(not render({empty}),"expanded singleton must stay exact")
-        local exact=assert(render({small}))
-        assert(exact.toolTip.description:find("0.400 L available",1,true))
-        pane.collapsed.Milk=true
-        local root=assert(render({row}))
-        assert(root.toolTip.description:find("2.000 L available",1,true))
-        local fill=needed(root.child,"Fill All")
-        winnerFluid.amount=0
-        row.items={main,small}
-        fill.onSelect(fill.target)
-        assert(#calls==1 and calls[1].source.item==winner,"click must retain exact preview even after change")
-    end)
-    restore();assert(ok,err)
-end)
-
-test("collapsed source skips unreadable mixture and never reselects on click",function(f)
-    local src,main,_,_,_,calls,restore,vessel=pourFixture(f)
-    local ok,err=pcall(function()
-        local bad,badFluid=vessel(f.inventory,21,"Base.Milk","Milk",2,.1)
-        local winner,fluid=vessel(f.inventory,22,"Base.Milk","Milk",2,.5)
-        local sampled,badSampled,unreadable=0,0,false
-        local sample=fluid.createFluidSample
-        function fluid:createFluidSample()
-            sampled=sampled+1
-            if not unreadable then return sample(self) end
-        end
-        function badFluid:createFluidSample() badSampled=badSampled+1 end
-        local stock=stockPourRow(f.inventoryPage.inventoryPane,"Milk",bad,bad,winner,src)
-        local menu=Menu:new();Menus.inventoryMenu(0,menu,{stock})
-        local root=needed(menu,"Pour Into")
-        assert(root.toolTip.description:find("0.500 L available",1,true))
-        assert(sampled==1 and badSampled==1,"sample each candidate mixture once within this menu")
-        local direct=assert(pourDestination(root.child,main))
-        unreadable=true
-        direct.onSelect(direct.target)
-        assert(#calls==1 and calls[1].source.item==winner,"never substitute after menu capture")
-        assert(sampled==1 and badSampled==1,"menu callback must not rebuild the captured plan")
-    end)
-    restore();assert(ok,err)
-end)
-
-test("collapsed source moves past native-compatible targets whose mixtures cannot be captured",function(f)
-    local src,main,_,_,_,calls,restore,vessel=pourFixture(f)
-    local ok,err=pcall(function()
-        local first,firstFluid=vessel(f.inventory,21,"Base.Milk","Milk",2,.1)
-        local second,secondFluid=vessel(f.inventory,22,"Base.Milk","Milk",2,.2)
-        local badTarget,targetFluid=vessel(f.inventory,30,"Base.Bottle","Bottle",2,.25)
-        local mainFluid=main:getFluidContainer()
-        local srcFluid=src:getFluidContainer()
-        local sampled,targetSampled={},0
-        for _,fluid in ipairs({firstFluid,secondFluid,srcFluid}) do
-            local sample=fluid.createFluidSample
-            function fluid:createFluidSample()
-                sampled[self]=(sampled[self] or 0)+1
-                return sample(self)
-            end
-        end
-        function targetFluid:createFluidSample() targetSampled=targetSampled+1 end
-        FluidContainer.CanTransfer=function(from,to)
-            if from==firstFluid or from==secondFluid then return to==targetFluid end
-            return from==srcFluid and to==mainFluid
-        end
-        local row=stockPourRow(f.inventoryPage.inventoryPane,"Milk",first,first,second,src)
-        local menu=Menu:new();Menus.inventoryMenu(0,menu,{row})
-        local root=needed(menu,"Pour Into")
-        assert(root.toolTip.description:find("1.500 L available",1,true))
-        assert(targetSampled==1,"cache a failed mixture capture across candidate plans")
-        for _,n in pairs(sampled) do assert(n==1,"never resample a mixture within one menu") end
-        assert(not pourDestination(root.child,badTarget))
-        local fill=needed(root.child,"Fill All")
-        fill.onSelect(fill.target)
-        assert(#calls==1 and calls[1].source.item==src and #calls[1].targets==1 and calls[1].targets[1].item==main)
-    end)
-    restore();assert(ok,err)
-end)
-
-test("visible native destination stack renders one direct least-filled row but Fill All retains each vessel",function(f)
-    local src,main,equipped,_,_,calls,restore,vessel=pourFixture(f)
-    local ok,err=pcall(function()
-        local fuller=vessel(f.inventory,16,"Base.Bottle","Bottle",5,.3)
-        local large=vessel(f.inventory,18,"Base.Bottle","Bottle",10,.2)
-        local mainFluid=main:getFluidContainer()
-        mainFluid.amount=.1 -- smaller absolute amount, larger fill percentage
-        stockPourRow(f.inventoryPage.inventoryPane,"Bottle",main,main,fuller,large)
-        local function render()
-            local menu=Menu:new();Menus.inventoryMenu(0,menu,{src})
-            return needed(menu,"Pour Into").child
-        end
-        local menu=render()
-        assert(not pourDestination(menu,main) and not pourDestination(menu,fuller))
-        local direct=assert(pourDestination(menu,large))
-        assert(not direct.child and pourDestination(menu,equipped),"same name in another holder is independent")
-        assert(direct.name=="2% | 0.2L / 10.0L" and direct.toolTip.description:find("3 compatible vessels in this stack",1,true))
-        direct.onSelect(direct.target)
-        assert(#calls==1 and #calls[1].targets==1 and calls[1].targets[1].item==large)
-        local fill=needed(render(),"Fill All")
-        fill.onSelect(fill.target)
-        assert(#calls[2].targets==4)
-        assert(calls[2].targets[1].item==main and calls[2].targets[2].item==fuller
-          and calls[2].targets[3].item==large and calls[2].targets[4].item==equipped)
-        f.preferences.pourEquippedFirst=true
-        f.preferences.pourMostRoomFirst=true
-        fill=needed(render(),"Fill All");fill.onSelect(fill.target)
-        assert(#calls[3].targets==4 and calls[3].targets[1].item==equipped and calls[3].targets[2].item==large
-          and calls[3].targets[3].item==fuller and calls[3].targets[4].item==main)
-    end)
-    restore();assert(ok,err)
-end)
-
-test("exact fixture world hook keeps own pane source and world workflows without inferring a vehicle or sibling compartment", function(f)
-    local bridge = require "LootBox/ContainerWorldMenu"
-    local prior, pick = bridge.current, IsoObjectPicker.Instance.PickVehicle
-    local parent, owner, other = Menu:new(), fixtureObject(f, f.crate), container("freezer", false)
-    local objects = {owner}
-    owner.getContainerCount = function()return 2 end
-    owner.getContainerByIndex = function(_, i)return i==0 and f.crate or other end
-    bridge.current = function(index, menu, targets)
-        if index==0 and menu==parent and targets==objects then return other end
-    end
-    IsoObjectPicker.Instance.PickVehicle = function()error("no world-space mouse in pane context")end
-    local ok, err = pcall(function()
-        Menus.worldMenu(0, parent, objects, false)
-        assert(not option(parent,"LootBox"),"synthetic world event must not duplicate the pane's LootBox group")
-        Menus.containerMenu(0, parent, other, objects)
-        local sub = needed(parent, "LootBox").child
-        assert(count(parent,"LootBox")==1 and count(sub,"Open LootBox")==1 and count(sub,"Loot contents (Smart Load)")==1)
-        assert(not option(sub,"Remember this vehicle") and needed(sub,"Clean and delete"))
-        click(sub,"Loot contents (Smart Load)"); assert(f.quick.request.sourceContainer==other)
-    end)
-    bridge.current, IsoObjectPicker.Instance.PickVehicle = prior, pick
-    assert(ok,err)
-end)
-
-assert(#failures == 0, table.concat(failures, "\n"))
-print(passed .. " menu and guide integration cases passed (native rendering and App boundaries are doubles)")
-
+print(passed .. " contextual menu cases passed (native menu and engine doubles)")

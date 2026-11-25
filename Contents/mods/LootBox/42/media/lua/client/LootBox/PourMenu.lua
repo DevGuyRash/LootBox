@@ -1,255 +1,209 @@
 local Pour = require "LootBox/Pour"
 local Inventory = require "LootBox/PourInventory"
 local Stacks = require "LootBox/PourStacks"
-
+local Rows = require "LootBox/FluidRows"
+local Log = require "LootBox/Log"
 local WorldMenu = require "LootBox/WorldFluidMenu"
 local MountedMenu = require "LootBox/MountedDispenserMenu"
 
 local Menu = {}
-local marker = {}
+local DROP = "Item_WaterDrop"
+local RELATION = {same=1,empty=2,mixes=4}
+local SCOPE = {main=1,equipped=2,carried=3,loot=4}
 
-local function hasFluid(item)
-    if not item or not item.getFluidContainer then return false end
-    if item:getFluidContainer() then return true end
-    local ground=item.getWorldItem and item:getWorldItem()
-    return ground and ground:getFluidContainer() ~= nil
-end
-
-local function already(menu)
-    for _,o in ipairs(menu.options or {}) do
-        -- The native pool clears/reassigns target even when reusing an option.
-        if o.target==marker and (o.name=="Pour Into" or o.name=="Fill From") then return true end
+-- Most right-clicked items hold no liquid; find that out before anything else.
+local function anyFluid(items)
+    for _,row in ipairs(items or {}) do
+        if instanceof(row,"InventoryItem") then
+            if Inventory.hasFluid(row) then return true end
+        elseif type(row)=="table" then
+            for _,item in ipairs(row.items or {}) do if Inventory.hasFluid(item) then return true end end
+        end
     end
     return false
 end
 
-local function otherTitle(parent,title)
-    for _,o in ipairs(parent.options or {}) do
-        if type(o.name)=="string" and o.target~=marker then
-            local name=o.name:lower():gsub("[%s%.]+$","")
-            if name==title then return true end
-        end
-    end
+-- A mod that already owns this top-level entry keeps it; ours joins LootBox.
+local function host(ctx,title)
+    if Rows.claimed(ctx.parent,title) then return ctx.branded() end
+    local mods=title=="Pour Into" and getActivatedMods and getActivatedMods()
+    if mods and (mods:contains("PourIntoContainer") or mods:contains("\\PourIntoContainer")) then return ctx.branded() end
+    return ctx.parent
 end
 
-local function otherPourMenu(parent)
-    if otherTitle(parent,"pour into") then return true end
-    local mods=getActivatedMods and getActivatedMods()
-    return mods and (mods:contains("PourIntoContainer") or mods:contains("\\PourIntoContainer"))
+-- "Water Bottle (Water), 0.6 / 1 L", or "Water Bottle, 0.6 / 1 L (mixes with Water)"
+local function kind(e,relation)
+    local name,liquid=Inventory.vesselName(e),Inventory.liquid(e.fluid)
+    if not liquid or relation=="mixes" then return name end
+    return name.." ("..liquid..")"
+end
+local function title(e,relation,contents)
+    local text=kind(e,relation)..", "..Inventory.litres(e.amount).." / "..Inventory.litres(e.capacity).." L"
+    if relation=="mixes" then text=text.." (mixes with "..(contents or "other liquid")..")" end
+    return text
 end
 
-local function builtinIcon(option, key, fallback)
-    if not option then return end
-    option.iconTexture=getTexture(key)
-    option.itemForTexture=not option.iconTexture and fallback or nil
-end
-
-local function entrances(parent,branded,render)
-    if not otherPourMenu(parent) then render(parent) end
-    render(branded)
-end
-
-local function unavailable(parent,branded,item,tooltip,reason)
-    entrances(parent,branded,function(host)
-        local root=host:addOption("Pour Into",marker,nil)
-        if not root then return end
-        root.notAvailable=true
-        builtinIcon(root,"Item_WaterDrop",item)
-        tooltip(root,"Pour Into",reason)
-    end)
-    return true
-end
-
-local function liters(amount)
-    -- Preserve native three-decimal precision; a whole number still reads as 1.0L.
-    return (string.format("%.3f",amount):gsub("0+$",""):gsub("%.$",".0"))
-end
-
-local function destinationText(entry)
-    local percent=math.floor(math.min(1,entry.amount/entry.capacity)*100+0.5)
-    return string.format("%d%% | %sL / %sL",percent,liters(entry.amount),liters(entry.capacity))
-end
-
-local function run(pick)
-    if pick.click.used then return nil,"Reopen the inventory menu to start another pour." end
-    pick.click.used=true
-    local app,err=pick.app.get(pick.index)
-    local ok
-    if app==pick.instance then
+local function startPour(ctx,source,targets,route,receiver)
+    return function(id)
         local options={}
-        for k,v in pairs(pick.prefs) do options[k]=v end
-        options.pourRoute=pick.route
-        ok,err=app:startPour(pick.source,pick.targets,options,pick.receiver)
+        for key,value in pairs(ctx.options) do options[key]=value end
+        options.pourRoute,options.interaction=route,id
+        return ctx.app:startPour(source,targets,options,receiver)
     end
-    if not ok then
-        local reason=(pick.receiver and "Fill From: " or "Pour Into: ")..tostring(err or "The selected vessels are no longer available.")
-        local p=getSpecificPlayer(pick.index)
-        if p and HaloTextHelper and HaloTextHelper.addBadText then HaloTextHelper.addBadText(p,reason)
-        else print("[LootBox] "..reason) end
-    end
-    return ok,err
 end
 
-local function fillFrom(host,plan,index,instance,options,app,click,tooltip,world)
-    if otherTitle(host,"fill from") then return end
-    local dst=plan.target
-    local root=host:addOption("Fill From",marker,nil)
-    if not root then return end
-    builtinIcon(root,"Item_WaterDrop",dst.item)
-    if #plan.donors==0 and #plan.fixtures==0 then
-        root.notAvailable=true
-        local help="No compatible source with liquid. Carry a donor or stand beside a usable fixture, then reopen this menu."
-        if not options.pourLootToLoot then help=help.." Enable loot-to-loot to use another vessel in this same loot container." end
-        tooltip(root,"Fill From",help)
-        return
+-- One row per distinguishable destination; identical vessels in one place share.
+local function destinations(ctx,source,targets,batchAllowed)
+    local rows,same={},{}
+    local function all(group)
+        local entries={}
+        for _,row in ipairs(group) do for _,e in ipairs(row.entries) do entries[#entries+1]=e end end
+        local fill=batchAllowed and Inventory.batch(entries,ctx.options) or {}
+        if #fill<2 then return nil end
+        return {title="All ("..#fill..")",texture=DROP,tip="Fills these one after another until the source is empty.",
+            start=startPour(ctx,source,fill,"fill-all")}
     end
-    local help="Fill "..dst.label.." ("..destinationText(dst)..") from one exact source."
-    if plan.truncated then help=help.." Inventory scan limit reached; only verified individual sources are shown." end
-    tooltip(root,"Fill From",help)
-    local child=ISContextMenu:getNew(host)
-    host:addSubMenu(root,child)
-    WorldMenu.addLootSources(child,world,plan.fixtures,dst)
-    local counts={}
-    for _,e in ipairs(plan.donors) do counts[e.label]=(counts[e.label] or 0)+1 end
-    for _,e in ipairs(plan.donors) do
-        local name=e.label
-        if counts[name]>1 then name=name.." #"..tostring(e.id) end
-        local ok,liquid=pcall(function() return e.fluid:getUiName() end)
-        if ok and type(liquid)=="string" and liquid~="" and not name:find(liquid,1,true) then name=name.." ("..liquid..")" end
-        local title=name.." | "..liters(e.amount).."L"
-        local row=child:addOption(title,{app=app,click=click,index=index,instance=instance,source=e,
-            targets={dst},receiver=dst.item,prefs=options,route="portable-fill-from"},run)
-        if row then
-            row.iconTexture,row.itemForTexture=nil,e.item
-            tooltip(row,"Fill From",name.." ("..destinationText(e).."). Destination: "..dst.label..". Uses only these two vessels.")
+    for _,e in ipairs(targets) do
+        local name=title(e,e.relation,Inventory.liquid(e.fluid))
+        local key=name.."\n"..tostring(e.place)
+        local row=same[key]
+        if row then row.entries[#row.entries+1]=e;row.count=row.count+1
+        else
+            row={title=name,kind=kind(e,e.relation),relation=e.relation,scope=e.scope,place=e.place,id=e.id,item=e.item,
+                entries={e},count=1,all=all,tip="From "..source.label.." to "..e.label..".",
+                start=startPour(ctx,source,{e},"single")}
+            same[key]=row
+            rows[#rows+1]=row
         end
     end
+    Rows.disambiguate(rows)
+    for _,row in ipairs(rows) do
+        local every=row.count>1 and all({row})
+        if every then
+            row.children={every,{title="One",item=row.item,tip=row.tip,start=row.start}}
+            row.title=row.title.." ("..row.count..")"
+        end
+    end
+    return rows
 end
 
--- Do not change stock Fluid or replace callbacks installed by another mod.
--- When migrating with the legacy provider enabled, put ours under LootBox.
-function Menu.add(index,parent,branded,items,instance,prefs,tooltip)
-    if already(parent) or already(branded) then return end
-    if #items==1 and instanceof(items[1],"InventoryItem") and not hasFluid(items[1]) then return end
-    local members=Stacks.selection(items,index)
-    if not members or #members==0 then return end
-    local anyFluid
-    for _,member in ipairs(members) do if hasFluid(member) then anyFluid=true;break end end
-    if not anyFluid then return end
-    local options=Pour.options(prefs)
+local function ordered(rows)
+    table.sort(rows,function(a,b)
+        local ra,rb=RELATION[a.relation] or 3,RELATION[b.relation] or 3
+        if ra~=rb then return ra<rb end
+        local sa,sb=SCOPE[a.scope] or 5,SCOPE[b.scope] or 5
+        if sa~=sb then return sa<sb end
+        if a.title~=b.title then return a.title<b.title end
+        return (a.id or 0)<(b.id or 0)
+    end)
+    return rows
+end
+
+local function pourInto(ctx,plan,anchors,mounted)
+    local source=plan.source
+    local rows=destinations(ctx,source,plan.targets,not plan.truncated)
+    for _,row in ipairs(MountedMenu.rows(ctx,mounted,source)) do rows[#rows+1]=row end
+    for _,row in ipairs(WorldMenu.pourRows(ctx,anchors,source)) do rows[#rows+1]=row end
+    ordered(rows)
+    if #plan.fill>=2 then
+        table.insert(rows,1,{title="Pour into all ("..#plan.fill..")",
+            texture="media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",item=source.item,
+            tip="Only empty vessels and those with the same liquid, in your fill order.",
+            start=startPour(ctx,source,plan.fill,"fill-all")})
+    end
+    local tip=title(source).." | "..tostring(source.place)
+    if #ctx.members>1 then tip=tip..". Pours from the least filled vessel of this stack." end
+    return Rows.add(ctx,host(ctx,"Pour Into"),"Pour Into",DROP,source.item,tip,rows)
+end
+
+local function fillFrom(ctx,inverse,anchors)
+    local targets=inverse and inverse.targets or {}
+    if #targets==0 then return false end
+    local first=targets[1]
+    local rows={}
+    for _,donor in ipairs(inverse.donors) do
+        local e=donor.source
+        local receiver=first.scope=="loot" and first.item or nil
+        local route=receiver and "portable-fill-from" or "carried-fill-from"
+        local row
+        if #targets==1 then
+            local target=donor.targets[1]
+            row={title=title(e,target.relation,Inventory.liquid(target.fluid)),relation=target.relation,
+                start=startPour(ctx,e,{target},route,receiver)}
+        else
+            local fill=not inverse.truncated and Inventory.batch(donor.targets,ctx.options) or {}
+            if #fill>0 then
+                local one={title="Fill one",item=fill[1].item,tip="Fills "..fill[1].label..".",start=startPour(ctx,e,{fill[1]},route)}
+                row={title=title(e),relation=fill[1].relation,children={one}}
+                if #fill>1 then
+                    table.insert(row.children,1,{title="Fill all ("..#fill..")",texture=DROP,
+                        tip="One after another until the source is empty.",start=startPour(ctx,e,fill,route)})
+                end
+            end
+        end
+        if row then
+            row.kind,row.scope,row.place,row.id,row.item=kind(e,row.relation),e.scope,e.place,e.id,e.item
+            row.tip="From "..e.label.."."
+            rows[#rows+1]=row
+        end
+    end
+    Rows.disambiguate(rows)
+    local fixtures=first.scope=="loot" and WorldMenu.lootRows(ctx,anchors,first) or WorldMenu.fillRows(ctx,anchors,targets)
+    for _,row in ipairs(fixtures) do rows[#rows+1]=row end
+    ordered(rows)
+    local tip=#targets==1 and title(first).." | "..tostring(first.place) or #targets.." selected vessels with room"
+    return Rows.add(ctx,host(ctx,"Fill From"),"Fill From",DROP,first.item,tip,rows)
+end
+
+local function add(given)
+    if not anyFluid(given.items) then return false end
+    local index=given.playerIndex
+    local members=Stacks.selection(given.items,index)
+    if not members or #members==0 then return false end
+    local app=given.app
+    local player=getSpecificPlayer(index)
     local holder=members[1]:getContainer()
     local viewed=Pour.displayed(index,holder)
-    local snapshot=Inventory.snapshot(getSpecificPlayer(index),instance.world,holder,viewed)
-    -- Forward and inverse entrances share one click and the physical holder
-    -- captured here, including an explicit section of a combined loot view.
-    local app,click=require "LootBox/App",{}
-    local checkedAnchor,anchor=false,nil
+    local ctx={playerIndex=index,player=player,parent=given.parent,branded=given.branded,app=app,tooltip=given.tooltip,
+        interaction=given.interaction,origin="menu.item",options=Pour.options(given.preferences),members=members,click={},
+        snapshot=Inventory.snapshot(player,app.world,holder,viewed)}
+    -- A shelf vessel must be returnable to the place it was clicked in.
+    local checked,anchor=false,nil
     local function pin(e)
         if e.scope~="loot" or e.container:getType()=="floor" then return true end
-        if not checkedAnchor then anchor=instance.world:pourShelfAnchor(e.container);checkedAnchor=true end
+        if not checked then anchor=app.world:pourShelfAnchor(e.container);checked=true end
         e.pourAnchor=anchor
         return anchor~=nil
     end
-    local inverse
-    if #members==1 and viewed and holder==viewed then
-        inverse=Inventory.fillFrom(snapshot,members[1],options)
-        if inverse and not pin(inverse.target) then inverse=nil end
+    local anchors=WorldMenu.fixtures(player)
+    local mounted
+    local function mountedTargets(e)
+        mounted=mounted or MountedMenu.nearby(index,app)
+        return MountedMenu.targets(mounted,e,app.world)
     end
-    -- Empty carried vessels still need Fill From even when they cannot pour.
-    local worldOK,world=pcall(WorldMenu.inventory,index,parent,branded,members,snapshot,instance,options,tooltip)
-    if not worldOK then world=nil end
-    if inverse then
-        local ok,fixtures=pcall(WorldMenu.lootSources,world,inverse.target,click)
-        inverse.fixtures=ok and fixtures or {}
-        fillFrom(parent,inverse,index,instance,options,app,click,tooltip,world)
-        fillFrom(branded,inverse,index,instance,options,app,click,tooltip,world)
-    end
-    local mounted=MountedMenu.nearby(index,instance)
-    local function mountedTargets(e) return MountedMenu.targets(mounted,e,instance.world) end
-    -- A collapsed row delegates the choice; an expanded individual never does.
-    local plan,reason
-    if #members==1 then plan,reason=Inventory.plan(snapshot,members[1],options,true)
-    else plan,reason=Inventory.choose(snapshot,members,options,function(e) return #WorldMenu.destinations(world,e)>0 or #mountedTargets(e)>0 end) end
-    if not plan then
-        -- For an exact non-empty loot row explain a source failure rather than
-        -- leaving an ambiguous invisible shortcut. Never authorize the row.
-        if #members==1 and viewed and holder==viewed then
-            local candidate=members[1]
-            local ok,hasContents=pcall(function()
-                local fluid=candidate:getFluidContainer()
-                if not fluid then
-                    local world=candidate:getWorldItem()
-                    fluid=world and world:getFluidContainer()
-                end
-                return fluid and fluid:getAmount()>0
-            end)
-            if ok and hasContents then
-                return unavailable(parent,branded,candidate,tooltip,reason or "That vessel cannot pour from here.")
-            end
-        end
-        return inverse~=nil or nil
-    end
-    local item=plan.source.item
-    if not pin(plan.source) then
-        return unavailable(parent,branded,item,tooltip,"The selected storage is out of reach or cannot return this vessel. Move closer or carry the source.")
-    end
-    local targets,fill=plan.targets,plan.fill
-    local fixtures=WorldMenu.destinations(world,plan.source)
-    local mountedJugs=mountedTargets(plan.source)
 
-    local source=string.format("%s | %.3f L available",plan.source.label,plan.source.amount)
-    if #members>1 then
-        local ok,fluidName=pcall(function() return plan.source.fluid:getUiName() end)
-        if ok and type(fluidName)=="string" and fluidName~="" then source=source.." | "..fluidName end
-        source=source..string.format(" (%.1f%% full; least-filled eligible vessel in this stack)",
-            100*plan.source.amount/plan.source.capacity)
+    local inverse=Inventory.fillFrom(ctx.snapshot,members,ctx.options)
+    for _,target in ipairs(inverse and inverse.targets or {}) do if not pin(target) then inverse=nil;break end end
+    for _,donor in ipairs(inverse and inverse.donors or {}) do for _,target in ipairs(donor.targets) do pin(target) end end
+
+    -- A collapsed row delegates the choice; an expanded individual never does.
+    local plan,why
+    if #members==1 then plan,why=Inventory.plan(ctx.snapshot,members[1],ctx.options)
+    else
+        plan,why=Inventory.choose(ctx.snapshot,members,ctx.options,function(e)
+            return #WorldMenu.pourRows(ctx,anchors,e)>0 or #mountedTargets(e)>0
+        end)
     end
-    local groups=Stacks.targets({targets=targets},index)
-    local function render(host)
-        local root=host:addOption("Pour Into",marker,nil)
-        if not root then return end
-        builtinIcon(root,"Item_WaterDrop",item)
-        if #targets==0 and #fixtures==0 and #mountedJugs==0 then
-            root.notAvailable=true
-            local help="No compatible destination with space. Carry an empty or compatible vessel."
-            if plan.source.scope=="loot" and not options.pourLootToLoot then
-                help=help.." Enable loot-to-loot in LootBox settings to use targets in this same loot pane."
-            end
-            tooltip(root,"Pour Into",source..". "..help)
-            return
-        end
-        tooltip(root,"Pour Into",source)
-        local child=ISContextMenu:getNew(host)
-        host:addSubMenu(root,child)
-        local function choice(title,list,route)
-            return child:addOption(title,{app=app,click=click,index=index,instance=instance,source=plan.source,
-                targets=list,prefs=options,route=route},run)
-        end
-        if #fill>0 then
-            local batch=choice("Fill All",fill,"fill-all")
-            builtinIcon(batch,"media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",item)
-            local order=options.pourFillScope=="main-only" and "main inventory only" or
-                options.pourFillScope=="equipped-first" and "equipped first" or "main inventory first"
-            tooltip(batch,"Fill All",string.format("%s. %d destination(s), %s; %s room left first within each group.",
-                source,#fill,order,options.pourFillOrder=="largest-first" and "most" or "least"))
-        end
-        WorldMenu.addTargets(child,world,fixtures,plan.source,click)
-        MountedMenu.addTargets(child,mountedJugs,index,instance,plan.source,click,tooltip)
-        -- A direct stack entry binds one exact vessel; Fill All uses the whole list.
-        for _,group in ipairs(groups) do
-            local e=group.entry
-            local row=choice(destinationText(e),{e},"single")
-            if row then
-                row.iconTexture,row.itemForTexture=nil,e.item
-                local detail=group.count>1 and (" Uses the least-filled of "..group.count.." compatible vessels in this stack.") or ""
-                tooltip(row,"Pour Into",source..". Destination: "..e.label.."."..detail.." Starts one native pour.")
-            end
-        end
-    end
-    -- The two entrances share the same frozen plan and one dispatch latch.
-    -- Never replace a different mod's top-level action.
-    entrances(parent,branded,render)
-    return true
+    if plan and not pin(plan.source) then plan,why=nil,"storage-unreachable" end
+    -- Both go directly after the game's Fluid entry, so the last one is first.
+    local filled=fillFrom(ctx,inverse,anchors)
+    local poured=plan and pourInto(ctx,plan,anchors,mountedTargets(plan.source)) or false
+    Log.trace(nil,"MENU","menu","fluid","vessel",Log.item(members[1],player),"selected",#members,"vessels",#ctx.snapshot.entries,
+        "truncated",ctx.snapshot.truncated,"fixtures",#anchors,"pourInto",poured,"why",not poured and why or nil,
+        "targets",plan and #plan.targets or 0,"fillFrom",filled,"donors",inverse and #inverse.donors or 0)
+    return filled or poured
 end
+
+function Menu.add(ctx) return Log.guard("PourMenu.add",add,ctx)==true end
 
 return Menu

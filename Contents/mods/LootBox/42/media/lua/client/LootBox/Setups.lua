@@ -3,9 +3,8 @@ local Setups = {}
 Setups.defaults = { pourLootToLoot = false, pourMainOnly = false, pourEquippedFirst = false, pourMostRoomFirst = false,
     autoDrinkEquipped = false, autoConsumeCarried = false, autoConsumeNested = false, autoConsumeRiskyOpen = false,
     tillFullEnabled = true, tillFullBothNeeds = false, contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
-    vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true,
-    confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
-    smartTakeAllContainers = true, matchingTransferButtons = true, showQuickProgress = false, rememberLastSetup = true, showTips = true,
+    vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true, confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
+    smartTakeAllContainers = true, matchingTransferButtons = true, jobBar = true, rememberLastSetup = true, detailedLog = true,
     condenseButton = true, condenseRebalance = false, condenseUseUnequipped = false, condenseNested = false }
 
 local scopes = { inventory = true, container = true, lootPane = true, reach = true, room = true,
@@ -41,18 +40,18 @@ local function boolean(value, default)
     if type(value) == "boolean" then return value end
 end
 
+-- Unknown or damaged entries fall back to their default. Returns what was repaired.
 function Setups.preferences(value)
-    if type(value) ~= "table" then return nil, "Invalid saved interface preferences" end
-    local result = {}
+    local result, repaired = {}, {}
+    if type(value) ~= "table" then value, repaired = {}, { "document" } end
     for key, entry in pairs(value) do
-        if Setups.defaults[key] == nil or type(entry) ~= "boolean" then
-            return nil, "Unknown or invalid interface preference: " .. tostring(key)
-        end
+        if Setups.defaults[key] == nil or type(entry) ~= "boolean" then repaired[#repaired + 1] = tostring(key) end
     end
     for key, default in pairs(Setups.defaults) do
-        if value[key] == nil then result[key] = default else result[key] = value[key] end
+        if type(value[key]) == "boolean" then result[key] = value[key] else result[key] = default end
     end
-    return result
+    table.sort(repaired)
+    return result, repaired
 end
 
 function Setups.request(value)
@@ -102,48 +101,37 @@ function Setups.request(value)
 end
 
 function Setups.name(value)
-    if type(value) ~= "string" then return nil, "Give this setup a name" end
+    if type(value) ~= "string" then return nil, "Give this preset a name" end
     local result = value:gsub("^%s+", ""):gsub("%s+$", "")
     if #result == 0 or #result > 80 or result:find("[%z\1-\31]") then
-        return nil, "Use a setup name between 1 and 80 characters without control characters"
+        return nil, "Use a name between 1 and 80 characters without control characters"
     end
     return result
 end
 
+-- Keep every readable preset. Returns the document and what was dropped.
 function Setups.document(value)
-    if type(value) ~= "table" then return nil, "Invalid saved setups document" end
-    local nextId = value.nextId == nil and 1 or value.nextId
-    local presets = value.presets == nil and {} or value.presets
-    if not integer(nextId) or nextId < 1 or type(presets) ~= "table" or #presets > MAX_PRESETS then
-        return nil, "Invalid saved setups document"
+    local result, dropped, seen = { nextId = 1, presets = {} }, {}, {}
+    if type(value) ~= "table" then return result, { "unreadable presets" } end
+    if integer(value.nextId) and value.nextId >= 1 then result.nextId = value.nextId end
+    for _, preset in pairs(type(value.presets) == "table" and value.presets or {}) do
+        local suffix = type(preset) == "table" and type(preset.id) == "string" and tonumber(preset.id:match("^setup:(%d+)$"))
+        local name = suffix and Setups.name(preset.name)
+        local setup, why
+        if name then setup, why = Setups.request(preset.setup) end
+        if setup and integer(suffix) and suffix >= 1 and not seen[preset.id] and #result.presets < MAX_PRESETS then
+            seen[preset.id] = true
+            result.presets[#result.presets + 1] = { id = preset.id, name = name, setup = setup, order = suffix }
+            if suffix >= result.nextId then result.nextId = suffix + 1 end
+        else dropped[#dropped + 1] = tostring(name or "preset") .. ": " .. tostring(why or "invalid or duplicate identity") end
     end
-    local result, seen, count = { nextId = nextId, presets = {} }, {}, 0
-    for index in pairs(presets) do
-        if not integer(index) or index < 1 or index > #presets then return nil, "Saved setups must form a dense list" end
-        count = count + 1
-    end
-    if count ~= #presets then return nil, "Saved setups must form a dense list" end
-    for _, preset in ipairs(presets) do
-        if type(preset) ~= "table" or type(preset.id) ~= "string" then return nil, "Invalid saved setup identity" end
-        local suffix = tonumber(preset.id:match("^setup:(%d+)$"))
-        if not suffix or suffix < 1 or suffix >= nextId or not integer(suffix)
-            or preset.id ~= "setup:" .. tostring(suffix) or seen[preset.id] then
-            return nil, "Invalid or reused saved setup identity"
-        end
-        local name, err = Setups.name(preset.name)
-        if not name then return nil, err end
-        local setup
-        setup, err = Setups.request(preset.setup)
-        if not setup then return nil, err end
-        result.presets[#result.presets + 1] = { id = preset.id, name = name, setup = setup }
-        seen[preset.id] = true
-    end
+    table.sort(result.presets, function(a, b) return a.order < b.order end)
+    for _, preset in ipairs(result.presets) do preset.order = nil end
     if value.lastSetup ~= nil then
-        local setup, err = Setups.request(value.lastSetup)
-        if not setup then return nil, err end
-        result.lastSetup = setup
+        local setup, why = Setups.request(value.lastSetup)
+        if setup then result.lastSetup = setup else dropped[#dropped + 1] = "last setup: " .. tostring(why) end
     end
-    return result
+    return result, dropped
 end
 
 function Setups.add(document, name, request, id)
@@ -157,9 +145,9 @@ function Setups.add(document, name, request, id)
         for _, preset in ipairs(document.presets) do
             if preset.id == id then preset.name, preset.setup, found = name, setup, true; break end
         end
-        if not found then return nil, "Saved setup is no longer available" end
+        if not found then return nil, "That preset no longer exists" end
     else
-        if #document.presets >= MAX_PRESETS then return nil, "Keep at most 32 saved setups; update or remove one first" end
+        if #document.presets >= MAX_PRESETS then return nil, "Keep at most 32 presets; update or remove one first" end
         if document.nextId >= MAX_ID then return nil, "Saved setup identity limit reached" end
         id = "setup:" .. tostring(document.nextId)
         document.nextId = document.nextId + 1

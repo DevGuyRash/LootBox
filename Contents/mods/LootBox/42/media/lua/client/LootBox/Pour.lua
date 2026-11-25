@@ -1,10 +1,10 @@
 local Inventory = require "LootBox/PourInventory"
+local Log = require "LootBox/Log"
 
 local Pour = {}
 Pour.__index = Pour
-local function sameAmount(a,b)
-    return type(a)=="number" and type(b)=="number" and math.abs(a-b)<=math.max(.000001,math.min(.00025,math.max(math.abs(a),math.abs(b))*.00005))
-end
+-- Litres are Java floats that a pour rounds every frame (see PourNative).
+local function sameAmount(a,b) return type(a)=="number" and type(b)=="number" and math.abs(a-b)<=.005 end
 function Pour.options(p)
     return {pourLootToLoot=p.pourLootToLoot==true,
         pourFillScope=p.pourMainOnly and "main-only" or p.pourEquippedFirst and "equipped-first" or "main-first",
@@ -20,38 +20,36 @@ local function loanable(entry)
 end
 local Actor = require "LootBox/PourActor"
 local function slot(e) return {selected=e,live=e,signature=e.pourSignature or (e.amount>0 and Inventory.mix(e))} end
-function Pour.capture(entry)
-    if entry.amount>0 then entry.pourSignature=Inventory.mix(entry);return entry.pourSignature~=nil end
-    return true
-end
 local function held(slot_) return slot_ and slot_.borrowed end
 
-local function traceScope(entry)
+local function scopeOf(entry)
     if not entry then return "none" end
-    if entry.scope == "loot" then
-        return (entry.groundSquare or entry.groundAnchor) and "ground" or "loot"
-    end
-    return entry.scope == "main" and "main" or entry.scope == "equipped" and "equipped" or "carried"
+    if entry.scope=="loot" then return (entry.groundSquare or entry.groundAnchor) and "ground" or "loot" end
+    return entry.scope
 end
-
-local function traceRoute(options)
-    local route = options.pourRoute
-    if route == "single" or route == "fill-all" or route == "portable-fill-from" then return route end
-    return "portable"
+local function describe(entry,player)
+    return "{"..Log.item(entry.item,player).." scope="..scopeOf(entry).." place="..tostring(entry.place)
+        ..string.format(" litres=%.5f/%.5f",entry.amount or 0,entry.capacity or 0).." relation="..tostring(entry.relation).."}"
 end
 
 -- Only snapshots from this click may be used. A new target is never discovered
 -- after a native action, and a display label is never an inventory identity.
 function Pour.new(player,world,source,targets,options,read,clickedReceiver)
+    local id=options and options.interaction or Log.intent("pour","Pour "..tostring(source and source.label),player)
+    local function refuse(check,reason,...)
+        Log.warn(id,"REFUSED","op","pour-start","check",check,"reason",reason,...)
+        return nil,reason
+    end
     if not source or not targets or #targets<1 or #targets>512 or type(read)~="function" then
-        return nil,"Choose at least one exact destination."
+        return refuse("selection","Choose at least one exact destination.","targets",targets and #targets)
     end
     if clickedReceiver and (#targets~=1 or not targets[1] or targets[1].item~=clickedReceiver
-        or targets[1].scope~="loot") then return nil,"The selected receiver changed." end
+        or targets[1].scope~="loot") then return refuse("receiver","The selected receiver changed.","targets",#targets) end
     local seen, frozen = {[source.id]=true}, {}
     for _,e in ipairs(targets) do
         if not e or seen[e.id] or not Inventory.legalScope(source,e,options,clickedReceiver) then
-            return nil,"The chosen destinations changed."
+            return refuse("destination-scope","The chosen destinations changed.","target",e and describe(e,player),
+                "duplicate",e and seen[e.id]==true,"sourceScope",scopeOf(source),"lootToLoot",options.pourLootToLoot)
         end
         seen[e.id],frozen[#frozen+1]=true,slot(e)
     end
@@ -61,14 +59,27 @@ function Pour.new(player,world,source,targets,options,read,clickedReceiver)
     local anchor=origin and origin.pourAnchor
     if shelf and shelf:getType()~="floor" then
         if not anchor and not clickedReceiver then anchor=world:pourShelfAnchor(shelf) end
-        if not anchor or not world:pourShelfReachable(shelf,anchor) then return nil,"The selected storage moved or closed." end
+        if not anchor or not world:pourShelfReachable(shelf,anchor) then
+            return refuse("storage-unreachable","The selected storage moved or closed.","shelf",Log.container(shelf,player),
+                "anchored",anchor~=nil,"player",Log.player(player))
+        end
     end
     local Fluid, Move = require "LootBox/PourNative", require "LootBox/PourMove"
+    Log.info(id,"START","op","pour","route",options.pourRoute,"source",describe(source,player),"targets",#targets,
+        "fillScope",options.pourFillScope,"fillOrder",options.pourFillOrder,"lootToLoot",options.pourLootToLoot,
+        "container",Log.container(source.container,player),"shelf",shelf and Log.container(shelf,player) or nil,
+        "player",Log.player(player))
+    for index,e in ipairs(targets) do
+        if index>40 then Log.trace(id,"TARGET","more",#targets-40);break end
+        Log.trace(id,"TARGET","n",index,"vessel",describe(e,player),"container",Log.container(e.container,player))
+    end
     return setmetatable({player=player, world=world, source=slot(source), targets=frozen, read=read, options=options,
         shelf=shelf,anchor=anchor,inPlaceGround=inPlaceGround,expected=source.amount, index=1,count=0,liters=0,
-        move=Move.new(player), pour=Fluid.new(player), state="running", name="Pour Into"}, Pour)
+        interaction=id,startedAt=getTimestampMs(),move=Move.new(player,id), pour=Fluid.new(player,id),
+        state="running", name="Pour Into"}, Pour)
 end
 
+-- Whether work may go on, or the reason it may not.
 function Pour:allowed()
     local prefs, pane = self.read(self.shelf)
     if not prefs then return false,"Pour controls or the current context are unavailable." end
@@ -111,17 +122,13 @@ end
 function Pour:finish(state, reason)
     if not self:isBusy() then return end
     self.state,self.reason=state,reason
-    -- Log only the stock adapter/controller's fixed reason, before appending
-    -- any exact item names, locations or IDs for the player's local UI.
-    pcall(function()
-        local diagnostic=self.endReason or self.cancelDiagnostic or reason or "Reason unavailable."
-        local nextTarget = self.target or self.targets[self.index] or self.targets[#self.targets]
-        local context = string.format("route=%s mode=%s source=%s target=%s destinations=%d",
-            traceRoute(self.options),isClient and isClient() and "MP" or "SP",
-            traceScope(self.source.selected),traceScope(nextTarget and nextTarget.selected),#self.targets)
-        print(string.format("[LootBox] action=pour event=terminal state=%s nativeSubmitted=%s completed=%d confirmedLitres=%.3f phase=%s %s reason=%s",
-            state,tostring(self.launched==true),self.count,self.liters,self.stopPhase or self.phase or "prepare",context,diagnostic))
-    end)
+    local diagnostic=self.endReason or self.cancelDiagnostic or reason or "Reason unavailable."
+    local active=self.target or self.targets[self.index] or self.targets[#self.targets]
+    local emit=state=="finished" and Log.info or Log.warn
+    emit(self.interaction,"END","op","pour","state",state,"reason",diagnostic,"phase",self.stopPhase or self.phase or "prepare",
+        "vessels",self.count,"of",#self.targets,"litres",self.liters,"submitted",self.launched==true,
+        "elapsedMs",getTimestampMs()-self.startedAt,"source",Log.item(self.source.live.item,self.player),
+        "target",active and Log.item(active.live.item,self.player) or nil,"player",Log.player(self.player))
     -- The active target may have been retired. Audit every original lease,
     -- not just the current target, including an unconfirmed in-flight move.
     local remaining, places = {}, {main=0, original=0, unknown=0}
@@ -132,20 +139,22 @@ function Pour:finish(state, reason)
         -- of an otherwise identified vessel. A pending native receipt is
         -- different: a local replica alone cannot resolve a disputed loan.
         if not s.uncertain and self.moving~=s then
-            local ok,known,live=pcall(Inventory.accessible,self.player,self.world,s.live,self.shelf,true)
-            if ok and known then
+            local known,live=Log.guard("Pour.finish",Inventory.accessible,self.player,self.world,s.live,self.shelf,true)
+            if known then
                 if live.container==self.player:getInventory() then place,where="main","confirmed in main inventory"
                 elseif live.container==s.selected.container then place,where="original","confirmed in original displayed storage" end
             end
         end
         places[place]=places[place]+1
         remaining[#remaining+1]=s.selected.label.." [ID "..tostring(s.selected.id).."]: "..where
+        Log.warn(self.interaction,"VESSEL-LEFT","vessel",Log.item(s.live.item,self.player),"place",place,
+            "uncertain",s.uncertain==true,"moving",self.moving==s)
     end
     report(self.source)
     for _,e in ipairs(self.targets) do report(e) end
     if #remaining>0 then self.reason=(self.reason or "Stopped.").." Vessel locations: "..table.concat(remaining,"; ").."." end
     if self.launched and not self.silent and PZActionCompletionHUD then
-        pcall(function()
+        Log.guard("Pour.card",function()
             local note = ""
             if places.main>0 then note=note.."In main inventory: "..places.main..". " end
             if places.unknown>0 then note=note.."Location unconfirmed: "..places.unknown..". Check Current job. " end
@@ -174,22 +183,27 @@ function Pour:accessible(s,refresh)
     local ok,entry=Inventory.accessible(self.player,self.world,s.live,self.shelf,refresh)
     -- Amounts legitimately evolve through stock pours. Capacity was part of
     -- the selected fill ratio and maximum volume; never silently increase it.
-    if not ok or not sameAmount(entry.capacity,s.selected.capacity) then return false end
+    if not ok then return false,entry end
+    if not sameAmount(entry.capacity,s.selected.capacity) then
+        return false,string.format("capacity: %.5f selected, %.5f now",s.selected.capacity,entry.capacity)
+    end
     return true,entry
 end
 local function safeToMove(self,item)
-    return item:isFavorite()==false and self.world:protected(item)==false
+    local protected,reason=self.world:protected(item)
+    return item:isFavorite()==false and protected==false,reason
 end
 
 -- A lease can be returned only while its exact replica, volume, mixture and
 -- protections still match. A changed target is not permission to move it back.
 function Pour:unchanged(s)
     local ok,entry=self:accessible(s)
-    if not ok then return false end
+    if not ok then return false,entry end
     local amount=s==self.source and self.expected or s.settledAmount or s.selected.amount
     local mix=s.signature
     if s.hasSettled then mix=s.settledMix end
-    return sameAmount(entry.amount,amount) and (amount==0 or Inventory.sameMix(entry,mix))
+    if not sameAmount(entry.amount,amount) then return false,string.format("litres: %.5f expected, %.5f now",amount,entry.amount) end
+    return entry.amount==0 or Inventory.sameMix(entry,mix),"mixture-changed"
 end
 
 local function idle(player)
@@ -200,11 +214,19 @@ end
 -- Failed/changed work never advances to a new target. If the player is still
 -- idle, offer each other unchanged shelf loan ONE ordinary return, target
 -- before source. Cancellation, foreign work or lost visibility start no moves.
-function Pour:unwind(reason,blocked)
+function Pour:unwind(reason,blocked,check)
     self.stopPhase=self.stopPhase or self.phase or "prepare"
+    if reason~=self.endReason then
+        Log.warn(self.interaction,"STOPPED","phase",self.stopPhase,"reason",reason,"check",check,
+            "vessel",blocked and Log.item(blocked.live.item,self.player) or nil)
+    end
     self.endReason=self.endReason or reason
     if blocked then blocked.noReturn=true end
-    if not self:allowed() or not idle(self.player) then self:finish("cancelled",self.endReason);return end
+    local allowed,why=self:allowed()
+    if not allowed or not idle(self.player) then
+        Log.trace(self.interaction,"NO-RETURN","reason",why or "queue-busy")
+        self:finish("cancelled",self.endReason);return
+    end
     for _,s in ipairs({self.target or false,self.source}) do
         if held(s) and not s.noReturn then
             s.noReturn=true
@@ -217,19 +239,30 @@ end
 function Pour:transfer(s,returning)
     self.phase=(s==self.source and "source-" or "target-")..(returning and "return" or "pickup")
     local p,original=self.player,s.selected
-    if not loanable(original) or not self:allowed() or not self:unchanged(s) or not safeToMove(self,s.live.item) then
-        self:unwind("The original location or vessel is no longer available.",s);return
+    local check=not loanable(original) and "not-loanable"
+    if not check then
+        local ok,why=self:allowed()
+        if ok then ok,why=self:unchanged(s) end
+        if ok then ok,why=safeToMove(self,s.live.item);why=not ok and "protected: "..tostring(why) end
+        check=not ok and why
     end
+    if check then self:unwind("The original location or vessel is no longer available.",s,check);return end
     if original.groundAnchor and not self.groundMove then
-        self.move=require("LootBox/PourGround").new(p)
+        self.move=require("LootBox/PourGround").new(p,self.interaction)
         self.groundMove=true -- all loans in a captured floor pane use this route
     end
     local from=s.live.container
     local to=returning and original.container or p:getInventory()
     self.moving,self.returning=s,returning
     local ok,why=self.move:start(s.live.item,from,to,function(phase,item)
-        if not self:allowed() then return false end
-        if phase=="admit" then return self:unchanged(s) and safeToMove(self,item) end
+        local allowed,why=self:allowed()
+        if not allowed then return false,why end
+        if phase=="admit" then
+            local same,check=self:unchanged(s)
+            if not same then return false,check end
+            local movable,protection=safeToMove(self,item)
+            return movable,not movable and "protected: "..tostring(protection) or nil
+        end
         return true -- receipt may precede the mirrored remove/add
     end,original.groundAnchor)
     if not ok then self.moving,self.returning=nil,nil;self:unwind(why or "The game refused to move this vessel.",s);return end
@@ -250,6 +283,7 @@ function Pour:tickMove()
     end
     local holder=returning and s.selected.container or self.player:getInventory()
     local fresh=Inventory.rebind(self.player,self.world,s.selected,item,holder,self.shelf)
+    Log.trace(self.interaction,"LOAN",returning and "returned" or "borrowed",Log.item(item,self.player),"recognised",fresh~=nil)
     if not fresh then
         s.uncertain=true
         self:unwind("The received vessel did not match the selected item.",s);return
@@ -272,7 +306,9 @@ function Pour:tickFluid()
     local a,b=self:accessible(self.source,true)
     local c,d=self:accessible(self.target,true)
     if not a or not c or not sameAmount(b.amount,self.expected-amount) or not sameAmount(d.amount,self.targetStart+amount) then
-        self:unwind("The exact vessels no longer match the confirmed amounts.");return
+        self:unwind("The exact vessels no longer match the confirmed amounts.",nil,not a and b or not c and d
+            or string.format("source %.5f expected, %.5f now; target %.5f expected, %.5f now; tolerance .005",
+                self.expected-amount,b.amount,self.targetStart+amount,d.amount));return
     end
     self.count,self.expected,self.source.live,self.target.live=self.count+1,b.amount,b,d
     if held(self.target) then
@@ -285,16 +321,24 @@ function Pour:step()
     if not self:isBusy() then return end
     if not self.cancelReason then
         local allowed, reason=self:allowed()
-        if not allowed then self:cancel(nil,reason);return end
+        if not allowed then
+            Log.warn(self.interaction,"STOPPED","phase",self.phase or "prepare","reason",reason,"player",Log.player(self.player))
+            self:cancel(nil,reason);return
+        end
     end
     if self.move:isBusy() then self:tickMove();return end
     if self.pour:isBusy() then self:tickFluid();return end
     if self.cancelReason then self:finish("cancelled",self.cancelReason);return end
-    if not idle(self.player) then self:cancel(nil,"Another action was active.");return end
+    if not idle(self.player) then
+        Log.warn(self.interaction,"STOPPED","reason","queue-busy","queue",Log.queue(self.player))
+        self:cancel(nil,"Another action was active.");return
+    end
     if self.endReason then self:unwind(self.endReason);return end
     local valid,src=self:accessible(self.source)
-    if not valid or not sameAmount(src.amount,self.expected)
-        or (src.amount>0 and not Inventory.sameMix(src,self.source.signature)) then self:unwind("The selected source changed.",self.source);return end
+    local changed=not valid and src or not sameAmount(src.amount,self.expected)
+        and string.format("litres: %.5f expected, %.5f now",self.expected,src.amount)
+        or src.amount>0 and not Inventory.sameMix(src,self.source.signature) and "mixture-changed"
+    if changed then self:unwind("The selected source changed.",self.source,changed);return end
     self.source.live=src
     if self.index>#self.targets or FluidUtil.roundTransfer(self.expected)<=0 then
         if held(self.source) then self:transfer(self.source,true);return end
@@ -302,9 +346,12 @@ function Pour:step()
     end
     self.target=self.targets[self.index]
     local ready,dst=self:accessible(self.target)
-    if not ready or not sameAmount(dst.amount,self.target.selected.amount) or (dst.amount>0 and not Inventory.sameMix(dst,self.target.signature))
-        or not Inventory.compatible(src,dst) then
-        self:unwind("A selected destination changed; no further pour was requested.",self.target);return
+    changed=not ready and dst or not sameAmount(dst.amount,self.target.selected.amount)
+        and string.format("litres: %.5f selected, %.5f now",self.target.selected.amount,dst.amount)
+        or dst.amount>0 and not Inventory.sameMix(dst,self.target.signature) and "mixture-changed"
+        or not Inventory.compatible(src,dst) and "game-refuses-transfer"
+    if changed then
+        self:unwind("A selected destination changed; no further pour was requested.",self.target,changed);return
     end
     self.target.live=dst
     if loanable(self.source.selected) and not held(self.source) then self:transfer(self.source,false);return end
@@ -313,22 +360,26 @@ function Pour:step()
     local checkedMix
     self.phase="fluid"
     local ok,why=self.pour:start(src.item,dst.item,nil,function(_,_,phase)
-        if not self:allowed() then return false end
+        local allowed,why=self:allowed()
+        if not allowed then return false,why end
         local post=phase=="observe"
         local sok,sn=self:accessible(self.source,post)
         local tok,tn=self:accessible(self.target,post)
-        if not sok or not tok then return false end
+        if not sok then return false,"source: "..tostring(sn) end
+        if not tok then return false,"target: "..tostring(tn) end
         if phase=="admit" then
             return sameAmount(sn.amount,self.expected) and sameAmount(tn.amount,self.targetStart)
-                and Inventory.sameMix(sn,self.source.signature) and (tn.amount==0 or Inventory.sameMix(tn,self.target.signature))
+                and Inventory.sameMix(sn,self.source.signature) and (tn.amount==0 or Inventory.sameMix(tn,self.target.signature)),
+                string.format("contents: source %.5f expected, %.5f now; target %.5f expected, %.5f now, or a mixture changed",
+                    self.expected,sn.amount,self.targetStart,tn.amount)
         end
         local ms=getTimestampMs()
         if not checkedMix or ms-checkedMix>=500 then
-            if sn.amount>0 and not Inventory.sameMix(sn,self.source.signature) then return false end
+            if sn.amount>0 and not Inventory.sameMix(sn,self.source.signature) then return false,"source-mixture" end
             -- Once stock has mixed the target its recipe may legitimately differ.
             -- Before any actual gain, its originally chosen mixture still must match.
-            if tn.amount>0 and sameAmount(tn.amount,self.targetStart)
-                and not Inventory.sameMix(tn,self.target.signature) then return false end
+            if tn.amount>0 and tn.amount<=self.targetStart
+                and not Inventory.sameMix(tn,self.target.signature) then return false,"target-mixture" end
             checkedMix=ms
         end
         return true
@@ -338,8 +389,9 @@ end
 
 function Pour:tick()
     if not self:isBusy() then return end
-    local ok=pcall(self.step,self)
+    local ok,err=pcall(self.step,self)
     if not ok then
+        Log.fault(self.interaction,"Pour.step",err,"phase",self.phase,"index",self.index)
         self:cancel(nil,"Pour stopped because a game binding changed.")
         if not self.move:isBusy() and not self.pour:isBusy() then self:finish("failed","Pour stopped because a game binding changed.") end
     end

@@ -3,6 +3,7 @@
 local Actor=require "LootBox/PourActor"
 local OpenFull=require "LootBox/OpenFull"
 local Receipt=require "LootBox/CreatedItemReceipt"
+local Log=require "LootBox/Log"
 local Result={}
 Result.__index=Result
 local QUIET, PICKUP_WAIT, MAX_FLOOR = 200,2000,512
@@ -11,6 +12,7 @@ local function integer(n) return finite(n) and n==math.floor(n) end
 local function attempt(f,...)
     local ok,a,b=pcall(f,...)
     if ok then return a,b end
+    Log.fault(nil,"OpenResult",a)
     return false,"The stock opening or receiving inventory could not be inspected"
 end
 
@@ -135,6 +137,7 @@ local function subscribe(self)
             self.resultID=args.itemId
             return true
         end)
+        if not ok then Log.fault(nil,"OpenResult.notice",accepted) end
         if not ok or not accepted then self.eventProblem="The stock can-result notice was missing context or conflicted" end
     end
     self.event,self.listener=event,listener

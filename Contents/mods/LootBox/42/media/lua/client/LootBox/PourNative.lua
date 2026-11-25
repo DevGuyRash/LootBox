@@ -1,8 +1,10 @@
 local Actor = require "LootBox/PourActor"
-local PourNative = {}
+local Log = require "LootBox/Log"
+local PourNative = {TOLERANCE = .005}
 PourNative.__index = PourNative
 local SETTLE, MOVE_MAX = 7000, 120000
 
+local function litres(n) return type(n) == "number" and string.format("%.5f",n) or n end
 local function finite(n) return type(n) == "number" and n == n and math.abs(n) < math.huge end
 local function fluidOf(item)
     local direct=item:getContainer()
@@ -18,6 +20,10 @@ local function fluidOf(item)
     end
     return item:getFluidContainer(),item
 end
+
+-- Fluid amounts are Java floats: every frame of a stock pour rounds both
+-- vessels, so litres only ever agree within a few millilitres.
+function PourNative.tolerance(amount) return math.min(PourNative.TOLERANCE, amount*.25) end
 
 -- One stock-rounded amount for both menu previews and action admission.
 function PourNative.transferAmount(have, free, requested)
@@ -49,7 +55,10 @@ end
 
 function PourNative.inspect(source, target, requested)
     local ok, result, reason = pcall(inspect,source,target,requested)
-    if not ok then return nil, "The game did not expose this fluid transfer." end
+    if not ok then
+        Log.fault(nil,"PourNative.inspect",result)
+        return nil, "The game did not expose this fluid transfer."
+    end
     return result,reason
 end
 
@@ -132,23 +141,24 @@ local function sameAddress(a,b)
     return true
 end
 
-local function actorSafe(player)
-    return not Actor.blocked(player)
-end
-
+-- Returns the live pair, or nil and the check that failed.
 local function livePair(self,s, phase)
-    if isServer() or isClient() ~= s.mp or not self.player:isLocalPlayer()
-        or self.player:isDead() or self.player:isAsleep() or not actorSafe(self.player) then return nil end
+    if isServer() or isClient() ~= s.mp then return nil,nil,"session" end
+    local blocked = Actor.blocked(self.player)
+    if blocked then return nil,nil,"player: "..blocked end
     if s.source:getID() ~= s.sourceID or s.target:getID() ~= s.targetID
-        or s.source:getFullType() ~= s.sourceType or s.target:getFullType() ~= s.targetType then return nil end
+        or s.source:getFullType() ~= s.sourceType or s.target:getFullType() ~= s.targetType then return nil,nil,"vessel-identity" end
     local a,aOwner = fluidOf(s.source)
     local b,bOwner = fluidOf(s.target)
     if not a or not b or a == b or aOwner ~= s.sourceOwner or bOwner ~= s.targetOwner
-        or a:getOwner() ~= aOwner or b:getOwner() ~= bOwner then return nil end
-    if phase ~= "observe" and (a ~= s.sourceFluid or b ~= s.targetFluid) then return nil end
-    if not sameAddress(address(self.player,s.source,aOwner),s.sourceAddress)
-        or not sameAddress(address(self.player,s.target,bOwner),s.targetAddress) then return nil end
-    if s.validate and s.validate(s.source,s.target,phase) ~= true then return nil end
+        or a:getOwner() ~= aOwner or b:getOwner() ~= bOwner then return nil,nil,"fluid-owner" end
+    if phase ~= "observe" and (a ~= s.sourceFluid or b ~= s.targetFluid) then return nil,nil,"fluid-component" end
+    if not sameAddress(address(self.player,s.source,aOwner),s.sourceAddress) then return nil,nil,"source-location" end
+    if not sameAddress(address(self.player,s.target,bOwner),s.targetAddress) then return nil,nil,"target-location" end
+    if s.validate then
+        local allowed,check = s.validate(s.source,s.target,phase)
+        if allowed ~= true then return nil,nil,check or "caller-guard" end
+    end
     return a,b
 end
 
@@ -158,6 +168,7 @@ end
 
 local function quantities(s,a,b)
     local loss, gain = s.sourceBefore-a:getAmount(), b:getAmount()-s.targetBefore
+    s.loss,s.gain = loss,gain
     if not finite(loss) or not finite(gain) or loss < -s.epsilon or gain < -s.epsilon
         or loss > s.amount+s.epsilon or gain > s.amount+s.epsilon then return nil end
     return loss,gain
@@ -167,13 +178,28 @@ local function paired(s,loss,gain)
     if loss and loss > 0 and gain > 0 and closeEnough(s,loss,gain) then return math.min(loss,gain) end
 end
 
-local function protected(self,s,phase)
-    local ok,a,b = pcall(livePair,self,s,phase)
-    if ok then return a,b end
+local function refused(s,check)
+    s.lastCheck = check
+    return false
 end
 
-function PourNative.new(player)
-    return setmetatable({player=player},PourNative)
+local function stopped(s,reason)
+    s.check = s.check or s.lastCheck
+    s.reason = s.reason or reason
+end
+
+local function protected(self,s,phase)
+    local ok,a,b,check = pcall(livePair,self,s,phase)
+    if not ok then
+        Log.fault(self.interaction,"PourNative.livePair",a)
+        check,a,b = "lua-error",nil,nil
+    end
+    if not a then s.lastCheck = check end
+    return a,b
+end
+
+function PourNative.new(player,interaction)
+    return setmetatable({player=player,interaction=interaction},PourNative)
 end
 
 function PourNative:isBusy() return self.active ~= nil end
@@ -181,25 +207,36 @@ function PourNative:isBusy() return self.active ~= nil end
 function PourNative:start(source,target,requested,validate,allowProjectedEndpoint)
     if self.active then return nil,"A fluid transfer is already active." end
     local s, reason = PourNative.inspect(source,target,requested)
-    if not s then return nil,reason end
+    if not s then
+        Log.warn(self.interaction,"REFUSED","op","pour","check","stock-transfer","reason",reason,
+            "source",Log.item(source,self.player),"target",Log.item(target,self.player),"requested",requested)
+        return nil,reason
+    end
     local player, q = self.player,queueFor(self.player)
-    if isServer() or not emptyQueue(player,q) then return nil,"Finish the current action before pouring." end
+    if isServer() or not emptyQueue(player,q) then
+        Log.warn(self.interaction,"REFUSED","op","pour","check","queue-busy","queue",Log.queue(player))
+        return nil,"Finish the current action before pouring."
+    end
     s.source,s.target,s.validate,s.mp=source,target,validate,isClient()
-    s.epsilon = math.min(s.amount*.15, math.max(.000001, math.max(s.sourceBefore,s.targetBefore,s.amount)*.0000002))
+    s.epsilon = PourNative.tolerance(s.amount)
+    s.startedAt = getTimestampMs()
     s.lastLoss,s.lastGain=0,0
     s.sourceID,s.targetID,s.sourceType,s.targetType=source:getID(),target:getID(),source:getFullType(),target:getFullType()
     local ok, started = pcall(function()
         s.sourceAddress=address(player,source,s.sourceOwner)
         s.targetAddress=address(player,target,s.targetOwner)
-        if not s.sourceAddress or not s.targetAddress or (s.sourceOwner ~= source and s.targetOwner ~= target)
-            or not protected(self,s,"admit") then return false end
+        if not s.sourceAddress or not s.targetAddress then return refused(s,"unreachable-vessel") end
+        if s.sourceOwner ~= source and s.targetOwner ~= target then return refused(s,"two-ground-vessels") end
+        if not protected(self,s,"admit") then return false end
         require "Fluids/ISFluidContainer"
         require "Fluids/ISFluidUtil"
         require "Fluids/ISFluidTransferAction"
         local a,b=ISFluidContainer:new(s.sourceFluid),ISFluidContainer:new(s.targetFluid)
         local action=ISFluidTransferAction:new(player,a,a:getFluidObject(),b,b:getFluidObject(),s.amount)
         if not action or not action.isValid or not action.update or not action.complete
-            or not action.perform or not action.stop or not action.forceStop or not action.waitToStart then return false end
+            or not action.perform or not action.stop or not action.forceStop or not action.waitToStart then
+            return refused(s,"stock-action-shape")
+        end
         s.action=action
         local valid,update,complete,perform,stop=action.isValid,action.update,action.complete,action.perform,action.stop
         local function allowed(phase)
@@ -209,22 +246,24 @@ function PourNative:start(source,target,requested,validate,allowProjectedEndpoin
             if not src or not dst then return false end
             local queue=queueFor(player)
             if queue.current == action then
-                if #queue.queue ~= 1 or queue.queue[1] ~= action then return false end
+                if #queue.queue ~= 1 or queue.queue[1] ~= action then return refused(s,"foreign-action-queued") end
             elseif not ((phase == "admit" and emptyQueue(player,queue))
-                or (phase == "complete" and not s.mp and s.performed and finishingQueue(player,queue,s))) then return false end
+                or (phase == "complete" and not s.mp and s.performed and finishingQueue(player,queue,s))) then
+                return refused(s,"not-current-action")
+            end
             local loss,gain=quantities(s,src,dst)
-            if not loss then return false end
+            if not loss then return refused(s,"amounts-out-of-range") end
             if phase == "admit" or not s.preflight then
-                if not closeEnough(s,loss,0) or not closeEnough(s,gain,0) then return false end
+                if not closeEnough(s,loss,0) or not closeEnough(s,gain,0) then return refused(s,"changed-before-start") end
             elseif s.mp then
-                if loss+s.epsilon < s.lastLoss or gain+s.epsilon < s.lastGain then return false end
+                if loss+s.epsilon < s.lastLoss or gain+s.epsilon < s.lastGain then return refused(s,"amounts-went-back") end
                 s.lastLoss,s.lastGain=loss,gain
             elseif not closeEnough(s,loss,s.lastLoss) or not closeEnough(s,gain,s.lastGain) then
-                return false
+                return refused(s,"changed-between-frames")
             end
             local total=paired(s,loss,gain)
             local finished=total and closeEnough(s,total,s.amount)
-            if not finished and (not src:canPlayerEmpty() or not dst:canPlayerEmpty()) then return false end
+            if not finished and (not src:canPlayerEmpty() or not dst:canPlayerEmpty()) then return refused(s,"vessel-sealed") end
             if total then s.latestPaired=total end
             -- The two stock MP fluid mirrors can arrive separately. A
             -- terminal side makes native CanTransfer false even though the
@@ -240,12 +279,16 @@ function PourNative:start(source,target,requested,validate,allowProjectedEndpoin
         function action:canMergeAction() return false end
         function action:isValid()
             local good,finished,endpointPending=allowed(member(queueFor(player),action) and "active" or "admit")
-            return good and (finished or endpointPending or valid(self))
+            if good and not (finished or endpointPending or valid(self)) then good=refused(s,"stock-isValid") end
+            -- The engine stops an invalid action; this is why it will.
+            if not good then s.check=s.check or s.lastCheck end
+            return good
         end
         function action:waitToStart()
             local good=allowed("active")
-            if not good or not valid(self) then
-                s.reason="Fluid transfer was interrupted before it could start."
+            if good and not valid(self) then good=refused(s,"stock-isValid") end
+            if not good then
+                stopped(s,"Fluid transfer was interrupted before it could start.")
                 self:forceStop()
                 -- Java checks waitToStart before creating the stock MP request.
                 return true
@@ -261,21 +304,30 @@ function PourNative:start(source,target,requested,validate,allowProjectedEndpoin
             if loss and (paired(s,loss,gain) or closeEnough(s,loss,0) and closeEnough(s,gain,0)) then
                 s.lastLoss,s.lastGain=loss,gain
                 s.latestPaired=paired(s,loss,gain) or s.latestPaired
-            else s.reason="Fluid amounts changed outside the native pour." end
+            else
+                s.lastCheck="loss-and-gain-differ"
+                stopped(s,"Fluid amounts changed outside the native pour.")
+            end
         end
         function action:update()
             local good,finished,endpointPending=allowed("active")
-            if not good or not s.preflight then s.reason="Fluid transfer interrupted."; self:forceStop(); return end
-            if finished or endpointPending then return end
+            if not good or not s.preflight then stopped(s,"Fluid transfer interrupted."); self:forceStop(); return end
+            -- Within tolerance is not done: the last millilitres are still
+            -- poured while the game accepts the pair.
+            if (finished or endpointPending) and not valid(self) then return end
             update(self)
             if not s.mp then afterNative() end
         end
         function action:complete()
             if s.mp then return true end
             local good,finished=allowed("complete")
-            if not good or not s.preflight then s.reason="Fluid transfer interrupted."; return false end
-            if finished then return true end
-            if not valid(self) then s.reason="The game stopped accepting this fluid pair."; return false end
+            if not good or not s.preflight then stopped(s,"Fluid transfer interrupted."); return false end
+            if not valid(self) then
+                if finished then return true end
+                s.lastCheck="stock-isValid"
+                stopped(s,"The game stopped accepting this fluid pair.")
+                return false
+            end
             local result=complete(self)
             afterNative()
             return result
@@ -283,11 +335,12 @@ function PourNative:start(source,target,requested,validate,allowProjectedEndpoin
         function action:perform()
             local queue=queueFor(player)
             if queue.current ~= self then
-                s.reason=s.reason or "Fluid transfer was no longer current."
+                s.lastCheck="not-current-action"
+                stopped(s,"Fluid transfer was no longer current.")
                 return
             end
             if s.preflight and allowed("active") then s.performed=true; s.performAt=getTimestampMs()
-            else s.reason=s.reason or "Fluid transfer interrupted." end
+            else stopped(s,"Fluid transfer interrupted.") end
             local foreign={}
             for _,entry in ipairs(queue.queue) do
                 if entry ~= self then foreign[#foreign+1]=entry end
@@ -300,7 +353,9 @@ function PourNative:start(source,target,requested,validate,allowProjectedEndpoin
             return result
         end
         function action:stop()
-            s.reason=s.reason or "Fluid transfer was interrupted."
+            -- Not stopped by one of our checks: the engine or the player did it.
+            if not s.reason and not s.check then s.lastCheck="stock-stop" end
+            stopped(s,"Fluid transfer was interrupted.")
             local queue=queueFor(player)
             if queue.current ~= action then return end
             local foreign={}
@@ -318,16 +373,42 @@ function PourNative:start(source,target,requested,validate,allowProjectedEndpoin
         local duration=finite(action.maxTime) and math.max(0,action.maxTime) or 0
         s.deadline=getTimestampMs()+math.min(MOVE_MAX,math.max(30000, duration*120))
         self.active=s
+        Log.trace(self.interaction,"OP","op","pour","litres",litres(s.amount),"tolerance",litres(s.epsilon),
+            "source",Log.item(source,player),"sourceLitres",litres(s.sourceBefore),
+            "target",Log.item(target,player),"targetLitres",litres(s.targetBefore),"targetFree",litres(s.targetFluid:getFreeCapacity()),
+            "duration",duration,"queue",Log.queue(player))
         ISTimedActionQueue.add(action)
-        return member(q,action) or s.performed
+        return member(q,action) or s.performed or refused(s,"not-queued")
     end)
-    if not ok or not started then self.active=nil; return nil,"The stock fluid action could not start." end
+    if not ok or not started then
+        self.active=nil
+        if not ok then Log.fault(self.interaction,"PourNative.start",started) end
+        Log.warn(self.interaction,"REFUSED","op","pour","check",ok and s.lastCheck or "lua-error",
+            "source",Log.item(source,player),"target",Log.item(target,player),"litres",s.amount,
+            "queue",Log.queue(player),"player",Log.player(player))
+        return nil,"The stock fluid action could not start."
+    end
     return true,nil,s.amount
+end
+
+-- Expected against observed litres on both sides, however the pour ended.
+local function settle(self,s,ok,reason,amount)
+    self.active=nil
+    pcall(quantities,s,s.sourceFluid,s.targetFluid)
+    local emit = ok and Log.trace or Log.warn
+    emit(self.interaction,"OP-END","op","pour","ok",ok,"check",not ok and (s.check or s.lastCheck) or nil,"reason",reason,
+        "expectedLitres",litres(s.amount),"confirmedLitres",litres(amount),"tolerance",litres(s.epsilon),
+        "sourceBefore",litres(s.sourceBefore),"sourceLost",litres(s.loss),
+        "targetBefore",litres(s.targetBefore),"targetGained",litres(s.gain),
+        "lastLost",litres(s.lastLoss),"lastGained",litres(s.lastGain),"elapsedMs",getTimestampMs()-s.startedAt,
+        "player",not ok and Log.player(self.player) or nil)
+    return ok,reason,amount
 end
 
 function PourNative:cancel()
     local s=self.active
     if not s or s.reason then return true end
+    s.check=s.check or "cancelled"
     s.reason="Fluid transfer cancelled."
     local q=queueFor(self.player)
     if q.current == s.action and s.action.action then
@@ -347,33 +428,36 @@ function PourNative:poll()
         if s.deferredTail then return nil end
     end
     if member(q,s.action) then
-        if not s.reason and (now >= s.deadline or #q.queue ~= 1 or not protected(self,s,"active")) then self:cancel() end
+        if not s.reason then
+            local check = now >= s.deadline and "deadline" or #q.queue ~= 1 and "foreign-action-queued"
+                or not protected(self,s,"active") and s.lastCheck
+            if check then s.check=check; self:cancel() end
+        end
         return nil
     end
     if s.reason or not s.performed or not emptyQueue(self.player,q) then
-        self.active=nil
-        return false,s.reason or "Fluid transfer was interrupted.",s.latestPaired or 0
+        s.lastCheck = s.lastCheck or not s.performed and "never-performed" or "foreign-action-queued"
+        return settle(self,s,false,s.reason or "Fluid transfer was interrupted.",s.latestPaired or 0)
     end
     local a,b=protected(self,s,"observe")
-    if not a or not b then self.active=nil; return false,"The exact vessels are no longer available.",0 end
+    if not a or not b then return settle(self,s,false,"The exact vessels are no longer available.",0) end
     local loss,gain=quantities(s,a,b)
     local observed=paired(s,loss,gain)
     if not loss or loss+s.epsilon < s.lastLoss or gain+s.epsilon < s.lastGain then
-        self.active=nil
-        return false,"Vessel amounts changed outside the native pour.",s.latestPaired or 0
+        s.lastCheck="amounts-went-back"
+        return settle(self,s,false,"Vessel amounts changed outside the native pour.",s.latestPaired or 0)
     end
     if now <= s.performAt+SETTLE and observed and closeEnough(s,observed,s.amount) then
-        self.active=nil
-        return true,nil,observed
+        return settle(self,s,true,nil,observed)
     end
     if now < s.performAt+SETTLE then
         s.lastLoss,s.lastGain=loss,gain
         s.latestPaired=observed or s.latestPaired
         return nil
     end
-    self.active=nil
-    return false,(s.latestPaired and "The game poured only part of the requested amount."
-        or "The game did not confirm matching fluid changes in both vessels."),s.latestPaired or 0
+    s.lastCheck="not-mirrored-in-time"
+    return settle(self,s,false,s.latestPaired and "The game poured only part of the requested amount."
+        or "The game did not confirm matching fluid changes in both vessels.",s.latestPaired or 0)
 end
 
 return PourNative

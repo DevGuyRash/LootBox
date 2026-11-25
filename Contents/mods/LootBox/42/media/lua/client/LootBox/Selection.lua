@@ -1,7 +1,7 @@
 require "ISUI/ISInventoryPane"
 require "ISUI/ISTextBox"
 
-local W = require "LootBox/Widgets"
+local K = require "LootBox/UIKit"
 local Selection = {}
 local panes = setmetatable({}, { __mode = "k" })
 local dialogs = {}
@@ -226,8 +226,8 @@ function AmountBox:refreshDescription()
     local text = self.selectionTarget.itemName .. "\nChoose 1-" .. tostring(self.selectionTarget.maxCount)
         .. " items.\nThen drag or right-click the highlighted items."
     if self.selectionError then text = text .. "\n" .. self.selectionError end
-    W.setText(self.description, text)
-    local bodyHeight = math.min(self.description:getScrollHeight(), math.max(80, getCore():getScreenHeight() - 230))
+    self.description:set(text)
+    local bodyHeight = math.min(self.description:measure(self.description.width), math.max(80, getCore():getScreenHeight() - 230))
     self.description:setHeight(bodyHeight)
     self.entry:setY(self.description.y + bodyHeight + 10)
     self.yes:setY(self.entry:getBottom() + 10)
@@ -271,8 +271,9 @@ function Selection.open(target)
     box.selectionTarget, box.selectionError = target, problem
     box:initialise()
     box.yes.onclick, box.no.onclick = AmountBox.onChoice, AmountBox.onChoice
-    box.backgroundColor, box.borderColor = W.color("base"), W.color("border")
-    box.description = W.text(box, 11, box:titleBarHeight() + 10, box.width - 22, 80, "")
+    box.backgroundColor, box.borderColor = K.color("glass"), K.color("line", 0.22)
+    box.description = K.text(box, "", "text")
+    K.place(box.description, 11, box:titleBarHeight() + 10, box.width - 22, 80)
     box:refreshDescription()
     box:setOnlyNumbers(true)
     box:setValidateFunction(box, AmountBox.validate)
