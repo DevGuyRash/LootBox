@@ -31,7 +31,7 @@ lua5.1 tests/integration/pour-move.lua "$STOCK_MEDIA_LUA_DIR"
 
 Stock Build 42 dropped vessels transfer their fluid component to the world object and pour in place. The separate item-owned Ground fallback uses the stock inventory transfer and the stock Place Item timed action. Run `lua5.1 tests/integration/pour-ground.lua` for native-authority doubles and optionally supply the pinned stock `ISDropWorldItemAction.lua` path. These cases cover an exact original square and placement pose, native pickup ACK, delayed projection, owned-queue cancellation, and blocked or ambiguous returns. Multiplayer placement observes the world and inventory mirrors; stock provides no per-placement acknowledgement to this local wrapper. A real ordinary client/server repeat is still required.
 
-The fluid lane exercises the same constructor, SP completion and MP delayed-field observation as the [stock B42.22 action](https://github.com/Project-Zomboid-Community-Modding/ProjectZomboid-Vanilla-Lua/blob/3b21e63fe4905a0a300a4021d05d01a9bb534729/shared/Fluids/ISFluidTransferAction.lua). It is not a dedicated-server or UI playthrough. Use the [Pour Into acceptance plan](pour-acceptance.md) on licensed stock client/server and clean default LuaBuddy installations before claiming those player paths work.
+The fluid lane exercises the same constructor, SP completion and MP delayed-field observation as the [stock B42.22 action](https://github.com/Project-Zomboid-Community-Modding/ProjectZomboid-Vanilla-Lua/blob/3b21e63fe4905a0a300a4021d05d01a9bb534729/shared/Fluids/ISFluidTransferAction.lua).
 
 ## Native interpreter and file APIs
 
@@ -328,11 +328,6 @@ For a release, replay these against the exact packaged files in a disposable sav
 3. In SP, watch one nested pure-water bottle enter main, a real stock sip, and a return to its exact original parent. Try walking, starting another action, dropping the parent before an outbound/return transfer, and filling the source bag before return. No unrelated action or item may be lost.
 4. With the can and regular opener in main, validate one stock opening action and only its own edible output. No knife opening with the risk switch off. When enabled, remove the opener, provide an eligible sharp tool and adjacent legal surface; confirm the game owns injury/tool wear and no walk is queued. Never use a production save to test this.
 5. In multiplayer confirm server-observed food/non-water beverage changes and no duplicate drink. For nested pure water require the same bottle ID, correct type, verified prior parent, real stock transactions in both directions, and both a matching volume drop and thirst improvement before returning. For cans verify ordinary safe and opted-in risky recipes on the server, exact can removed, no automatically chained bite, and a separate ready-food choice only after native completion plus input removal. Test interruption and delayed or missing acknowledgement. Do not claim server results from client logs alone.
-
-### Multiplayer carried-supply boundary
-
-The portable lane models the public Build 42.22.2 server/client contracts separately, including native transfer Done versus Rejected, late remove/add packets that can reconstruct the item with the same ID, item/stat delivery in either order, lost acknowledgements, option changes, foreign actions, and unsafe or ambiguous inputs. It does not simulate a second water sip or create server inventory. Stock handcraft binds the one selected can and tool in manual mode with an eat percentage of zero. The stock acknowledgement does not include an output ID: the automation requires native completion and absence of the exact original ID from carried inventory, then ends the craft without counting food. A later hunger assessment may choose ready-to-eat food under the normal policy. These fixtures are not a two-process multiplayer gameplay pass.
-
 
 ## 0.9.16 active-container mouse input and scoped world picking
 
