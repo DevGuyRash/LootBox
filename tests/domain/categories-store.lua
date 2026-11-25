@@ -4,6 +4,8 @@ end
 
 local Categories = require "LootBox/Categories"
 local Store = require "LootBox/Store"
+-- The file doubles below belong to the store alone.
+require("LootBox/Log").warn = function() end
 local originalReader, originalWriter = getFileReader, getFileWriter
 local originalExecutionMarker = LootBoxStoreExecutionMarker
 local disk, fault, lastWritten, openHandles = {}, nil, nil, 0
@@ -290,14 +292,92 @@ case("Unreadable existing storage reports an error instead of fresh settings", f
     same(assert(Store.load("LootBox/categories")), { name = "Existing value" })
 end)
 
-case("Entirely damaged existing saves are not silently overwritten", function()
+case("Entirely damaged saves are reported, kept as a backup and then replaced", function()
     equal(Store.save("LootBox/categories", { name = "First" }), true)
     equal(Store.save("LootBox/categories", { name = "Second" }), true)
-    local before = {}
-    for path in pairs(disk) do disk[path] = "damaged"; before[path] = "damaged" end
+    disk["LootBox/categories.a.txt"], disk["LootBox/categories.b.txt"] = "damaged one", "damaged two"
     rejected(Store.load("LootBox/categories"))
-    rejected(Store.save("LootBox/categories", { name = "Overwrite" }))
-    same(disk, before)
+    local _, _, metadata = Store.load("LootBox/categories")
+    equal(metadata.damaged, true)
+    equal(Store.save("LootBox/categories", { name = "Replacement" }), true)
+    local backup = disk["LootBox/categories.damaged.txt"]
+    assert(backup:find("damaged one", 1, true) and backup:find("damaged two", 1, true))
+    same(assert(Store.load("LootBox/categories")), { name = "Replacement" })
+    equal(Store.save("LootBox/categories", { name = "Next" }), true)
+    same(assert(Store.load("LootBox/categories")), { name = "Next" })
+end)
+
+case("Damaged saves are never replaced when the backup cannot be written", function()
+    equal(Store.save("LootBox/categories", { name = "First" }), true)
+    disk["LootBox/categories.a.txt"] = "damaged"
+    fault = { kind = "open-write" }
+    rejected(Store.save("LootBox/categories", { name = "Replacement" }))
+    fault = nil
+    same(disk, { ["LootBox/categories.a.txt"] = "damaged" })
+end)
+
+case("Two different saves of one generation are both backed up and superseded", function()
+    equal(Store.save("LootBox/categories", { name = "One" }), true)
+    local first = disk["LootBox/categories.a.txt"]
+    disk = {}
+    equal(Store.save("LootBox/categories", { name = "Two" }), true)
+    disk["LootBox/categories.b.txt"] = first
+    rejected(Store.load("LootBox/categories"))
+    equal(Store.save("LootBox/categories", { name = "Three" }), true)
+    same(assert(Store.load("LootBox/categories")), { name = "Three" })
+    assert(disk["LootBox/categories.damaged.txt"]:find(first, 1, true))
+end)
+
+case("Saving unchanged data writes nothing", function()
+    equal(Store.save("LootBox/categories", { name = "Camp", labels = { "native:Food" } }), true)
+    local text = disk["LootBox/categories.a.txt"]
+    lastWritten = nil
+    equal(Store.save("LootBox/categories", { labels = { "native:Food" }, name = "Camp" }), true)
+    equal(lastWritten, nil)
+    equal(Store.save("LootBox/categories", { name = "Moved" }), true)
+    equal(lastWritten, "LootBox/categories.b.txt")
+    equal(disk["LootBox/categories.a.txt"], text, "The previous save stays as the fallback")
+    disk["LootBox/categories.b.txt"] = "damaged meanwhile"
+    equal(Store.save("LootBox/categories", { name = "Moved" }), true)
+    same(assert(Store.load("LootBox/categories")), { name = "Moved" })
+end)
+
+case("Salvage keeps every usable category and says what was lost", function()
+    local graph, notes = Categories.salvage({
+        { id = "custom:good", name = "Good", types = { "Base.Nails" }, includes = { "native:Food" } },
+        { id = "custom:gone", name = "Uses a missing one", types = { "Base.Rope" }, includes = { "custom:missing" } },
+        { id = "custom:a", name = "A", types = { "Base.Axe", "Base.Axe", 4 }, includes = { "custom:b" } },
+        { id = "custom:b", name = "B", types = { "Base.Bow" }, includes = { "custom:a" } },
+        { id = "custom:good", name = "Second copy" },
+        { id = "native:bad", name = "Wrong kind" },
+        "not a category",
+        { id = "custom:unnamed", name = " ", types = { "Base.Cup" } },
+    })
+    equal(#graph:list(), 5)
+    equal(graph:matches("custom:good", item("Base.Apple", "native:Food")), true)
+    equal(graph:matches("custom:gone", item("Base.Rope", "native:Material")), true)
+    equal(graph:matches("custom:a", item("Base.Bow", "native:Weapon")), true, "One direction of a cycle survives")
+    equal(graph:matches("custom:b", item("Base.Axe", "native:Weapon")), false)
+    equal(graph:matches("custom:unnamed", item("Base.Cup", "native:Material")), true)
+    -- missing include, duplicate type, non-text type, cycle, duplicate ID, wrong ID, not a table, no name
+    equal(#notes, 8)
+    local clean, none = Categories.salvage({ { id = "custom:good", name = "Good" } })
+    equal(#clean:list(), 1)
+    equal(#none, 0)
+    local empty, lost = Categories.salvage("damaged")
+    equal(#empty:list(), 0)
+    equal(#lost, 1)
+end)
+
+case("Salvage follows long chains without recursion", function()
+    local definitions = { { id = "custom:1", name = "1", types = { "Base.Nails" } } }
+    for index = 2, 1200 do
+        definitions[index] = { id = "custom:" .. index, name = tostring(index), includes = { "custom:" .. (index - 1) } }
+    end
+    definitions[1].includes = { "custom:1200" }
+    local graph, notes = Categories.salvage(definitions)
+    equal(#graph:list(), 1200)
+    equal(#notes, 1)
 end)
 
 case("Separate world and player paths keep independent preferences", function()

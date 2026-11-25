@@ -325,6 +325,9 @@ end }
 ISUnlockVehicleDoor = { new = function(_, character, part)
     return action(character, "unlock", function() part.door.locked = false end)
 end }
+ISLockVehicleDoor = { new = function(_, character, part)
+    return action(character, "lock", function() part.door.locked = true end)
+end }
 ISOpenVehicleDoor = { new = function(_, character, vehicle, part)
     return action(character, "open", function() part.door.open = true end)
 end }
@@ -400,6 +403,8 @@ local function vehicle()
         function result:getDoor() return self.door end
         function result.door:isLocked() return self.locked end
         function result.door:isOpen() return self.open end
+        function result.door:isLockBroken() return self.lockBroken == true end
+        function result:getArea() return self.id end
         return result
     end
     value.driver, value.trunk = part("DoorFrontLeft", false), part("TrunkDoor", true)
@@ -408,7 +413,11 @@ local function vehicle()
     function value:getPartCount() return 1 end
     function value:getPartByIndex() return { getItemContainer = function() return true end } end
     function value:getPassengerDoor() return self.driver end
-    function value:getPartById(id) return id == "TrunkDoor" and self.trunk or nil end
+    function value:getPartById(id) return id == "TrunkDoor" and self.trunk or id == "DoorFrontLeft" and self.driver or nil end
+    function value:isInArea() return self.away ~= true end
+    function value:canLockDoor(part, character)
+        return not part.door.locked and (character.vehicle == self or self.noKey ~= true or part == self.driver)
+    end
     function value:getMaxPassengers() return 1 end
     function value:isAnyDoorLocked() return self.driver.door.locked end
     function value:isTrunkLocked() return self.trunk.door.locked end
@@ -776,6 +785,107 @@ case("Vehicle preparation unlocks storage and restores the original outside stat
     equal(actor:getVehicle(), nil)
     equal(selected.trunk.door.locked, false)
     equal(selected.driver.door.open, false)
+end)
+
+local function run(adapter, actor, limit)
+    local result, reason, code
+    for _ = 1, limit or 60 do
+        local queue = queues[actor]
+        if queue and queue.current then queue.current:complete() end
+        result, reason, code = adapter:poll()
+        clock = clock + 10
+        if not adapter:isBusy() then break end
+    end
+    return result, reason, code
+end
+
+case("Unlocked parts are reported and locked again in place with the key", function()
+    local actor, selected = player(), vehicle()
+    selected.driver.door.locked = true
+    local adapter, operation = Native.new(actor), { kind = "vehicle", vehicle = selected }
+    assert(adapter:begin(operation))
+    equal(run(adapter, actor), true)
+    equal(selected.driver.door.locked, false); equal(selected.trunk.door.locked, false)
+    local ids = {}
+    for _, entry in ipairs(operation.unlocked) do equal(entry.vehicle, selected); ids[#ids + 1] = entry.partId end
+    equal(table.concat(ids, ","), "DoorFrontLeft,TrunkDoor")
+    selected.trunk.door.open = true
+    assert(adapter:begin({ kind = "vehicle", vehicle = selected, relock = ids }))
+    equal(run(adapter, actor), true)
+    equal(selected.driver.door.locked, true); equal(selected.trunk.door.locked, true)
+    equal(selected.trunk.door.open, false, "An open door is closed before it is locked")
+    equal(actor:getVehicle(), nil)
+end)
+
+case("Without a key the trunk is locked from the driver seat and the driver door last", function()
+    local actor, selected = player(), vehicle()
+    selected.noKey, selected.trunk.door.locked = true, false
+    local adapter = Native.new(actor)
+    assert(adapter:begin({ kind = "vehicle", vehicle = selected, relock = { "DoorFrontLeft", "TrunkDoor" } }))
+    local result, reason = run(adapter, actor)
+    equal(result, true, reason)
+    equal(selected.trunk.door.locked, true); equal(selected.driver.door.locked, true)
+    equal(actor:getVehicle(), nil)
+end)
+
+case("A broken lock and an already locked part need no work", function()
+    local actor, selected = player(), vehicle()
+    selected.driver.door.lockBroken = true
+    local adapter = Native.new(actor)
+    assert(adapter:begin({ kind = "vehicle", vehicle = selected, relock = { "DoorFrontLeft", "TrunkDoor" } }))
+    equal(run(adapter, actor), true)
+    equal(selected.driver.door.locked, false)
+end)
+
+case("A seated player gets one typed answer for every kind of walk", function()
+    local actor, far = player(), square(9, 9)
+    actor.vehicle = {}
+    local crate, object = container("crate", far), { getSquare = function() return far end }
+    crate.parent = object
+    for _, operation in ipairs({ { kind = "approach", container = crate }, { kind = "approach", square = far },
+        { kind = "approach", location = { x = 9, y = 9, z = 0 } } }) do
+        local accepted, reason, code = Native.new(actor):begin(operation)
+        equal(accepted, nil); includes(reason, "Get out of the vehicle"); equal(code, "seated")
+    end
+    equal(Native.new(actor):reachable(crate), false)
+    equal(Native.new(actor):reachable(actor.inventory), true)
+end)
+
+case("A failed path is reported as unreachable", function()
+    local actor, far = player(), square(9, 9)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({ kind = "approach", square = far }))
+    local current = queues[actor].current
+    current.onFail(); current:reject()
+    local result, reason, code
+    for _ = 1, 30 do clock = clock + 100; result, reason, code = adapter:poll(); if result ~= nil then break end end
+    equal(result, false); includes(reason, "No path"); equal(code, "unreachable")
+end)
+
+case("Time that passes without ticks does not use up an operation's deadline", function()
+    local actor, destination = player(), container("crate", square(0, 0))
+    local selected = item(51, actor.inventory)
+    local adapter = Native.new(actor)
+    assert(adapter:begin({ kind = "transfer", item = selected, source = actor.inventory, destination = destination }))
+    clock = 120001
+    adapter:extend(120001)
+    equal(adapter:poll(), nil)
+    queues[actor].current:complete()
+    equal(adapter:poll(), true)
+    adapter:extend(1000)
+end)
+
+case("The pause trigger is named for the log", function()
+    for flag, trigger in pairs({ aimInput = "aim", aiming = "aim", attacking = "attack", shoving = "shove", dead = "death", asleep = "sleep" }) do
+        local actor = player()
+        actor[flag] = true
+        local _, _, found = Native.new(actor):takeoverReason()
+        equal(found, trigger)
+    end
+    local actor = player()
+    actor.movementInput, actor.running = true, true
+    local _, _, found = Native.new(actor):takeoverReason()
+    equal(found, "run")
 end)
 
 case("Cancel keeps polling vehicle restoration and exposes an unavailable original seat", function()
@@ -1159,7 +1269,7 @@ case("A genuine path failure stays a failure even when foreign work arrives", fu
     local done, reason, code = adapter:poll()
     equal(done, false)
     includes(reason, "path")
-    equal(code, nil)
+    equal(code, "unreachable")
     equal(operation.travel, nil)
     equal(queues[actor].current, foreign)
     equal(foreign.stops, nil)

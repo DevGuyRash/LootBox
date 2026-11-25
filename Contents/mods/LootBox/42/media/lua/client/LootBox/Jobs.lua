@@ -234,7 +234,7 @@ end
 
 -- A preview never changes the running job. options.interaction logs the plan under that number.
 function Jobs:preview(request, options)
-    local interaction = options and options.interaction
+    local interaction = options and options.interaction or type(request) == "table" and request.interaction or nil
     local plan, err = self:buildPlan(request)
     if not plan then
         if interaction then Log.info(interaction, "PLAN-REFUSED", "reason", err, "request", Log.request(request), "player", Log.player(self.player)) end
@@ -476,7 +476,8 @@ function Jobs:start(plan, options)
         Log.info(options and options.interaction, "START-REFUSED", "reason", reason, "player", Log.player(self.player))
         return nil, reason
     end
-    self:bindInteraction(options, reviewed.request.shortcutIntent or reviewed.action or "transfer")
+    self:bindInteraction({interaction = options and options.interaction or reviewed.request.interaction},
+        reviewed.request.shortcutIntent or reviewed.action or "transfer")
     self:logPlan(self.interaction, reviewed)
     self.reviews, self.previews, self.recoveryRequired = {}, {}, nil
     self.completion = {startedAt = now(), movedWeight = 0}

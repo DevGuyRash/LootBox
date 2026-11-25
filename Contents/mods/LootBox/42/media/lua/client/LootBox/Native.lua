@@ -328,7 +328,7 @@ local function observeAction(self, state)
     state.actionGoneAt = state.actionGoneAt or now()
     if state.stepStopped and state.op.kind == "transfer" and isClient()
         and now() - state.actionGoneAt < 2000 then return nil end
-    if state.pathFailed then return false, "No path to the destination" end
+    if state.pathFailed then return false, "No path to the destination", "unreachable" end
     if state.stepStopped then
         if state.stepYielded then return false, "Waiting for your movement or queued action to finish", "yielded" end
         return false, "The game stopped the native action before completing it"
@@ -999,11 +999,11 @@ local function poll(self, state)
         return finish(self, state, false, state.yieldReason or reason, "yielded")
     end
     if observed == false then
-        state.failure = state.failure or reason
+        if not state.failure then state.failure, state.failureCode = reason, code end
         state.action = nil
     end
     if state.failure then
-        if state.op.kind ~= "vehicle" then return finish(self, state, false, state.failure) end
+        if state.op.kind ~= "vehicle" then return finish(self, state, false, state.failure, state.failureCode) end
         if foreign then return nil end
         if not state.restoring then
             state.restoring = true

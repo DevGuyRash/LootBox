@@ -213,6 +213,15 @@ function Graph:matchesFilter(filter, descriptor)
     return false
 end
 
+-- IDs of the custom categories this item belongs to.
+function Graph:customMatches(descriptor)
+    local result, labels = {}, labelSet(descriptor)
+    for _, definition in ipairs(self.definitions) do
+        if matches(self, definition.id, descriptor, labels, {}) then result[#result + 1] = definition.id end
+    end
+    return result
+end
+
 function Graph:list()
     local result = {}
     for index, definition in ipairs(self.definitions) do result[index] = copyDefinition(definition) end
