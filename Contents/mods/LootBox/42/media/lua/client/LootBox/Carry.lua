@@ -1,5 +1,6 @@
 local Log = require "LootBox/Log"
 local call = require "LootBox/Safe"
+local Sort = require "LootBox/Sort"
 
 local Carry = {}
 Carry.__index = Carry
@@ -100,27 +101,67 @@ function Carry.new(player, world)
     return setmetatable({player = player, world = world, attempted = {}}, Carry)
 end
 
-function Carry:next(records, incomingWeight, revision)
-    if incomingWeight ~= nil and incomingWeight <= 0 then return nil end
-    revision = revision or 0
-    local player, world = self.player, self.world
-    local remaining, equippedFree = math.max(0, incomingWeight or 0), 0
-    local candidates, seen = {}, {}
-    for _, record in ipairs(records or {}) do
-        local item = record.item
-        if item and not seen[item] then
-            seen[item] = true
-            if bag(item) then
-                candidates[#candidates + 1] = item
-                if call(player, "isEquipped", item) then
-                    local container = call(item, "getInventory")
-                    equippedFree = equippedFree + math.max(0, (call(container, "getEffectiveCapacity", player) or 0)
-                        - (call(container, "getCapacityWeight") or 0))
-                end
-            elseif incomingWeight == nil and not world:owns(call(item, "getContainer")) then
-                remaining = remaining + math.max(0, call(item, "getUnequippedWeight") or 0)
+local function storage(item, container, free)
+    local largest, accepts = call(item, "getMaxItemSize") or 0, {}
+    return {free = free, reduction = math.max(0, math.min(1, (call(item, "getWeightReduction") or 0) / 100)),
+        accepts = function(load)
+            if accepts[load.kind] == nil then
+                accepts[load.kind] = (largest <= 0 or load.weight <= largest) and call(container, "isItemAllowed", load.item) == true
+            end
+            return accepts[load.kind] and load.item ~= item
+        end}
+end
+
+-- The weight these bags would take off the load, the best bag filled first, and what is left over.
+local function relief(bags, loads)
+    local free, total, left = {}, 0, 0
+    Sort(bags, function(entry) return -entry.reduction end)
+    for index, entry in ipairs(bags) do free[index] = entry.free end
+    for _, load in ipairs(loads) do
+        local placed = false
+        for index, entry in ipairs(bags) do
+            if not placed and load.weight <= free[index] and entry.accepts(load) then
+                free[index], total, placed = free[index] - load.weight, total + load.weight * entry.reduction, true
             end
         end
+        if not placed then left = left + load.weight end
+    end
+    return total, left
+end
+
+-- The next bag worth preparing. records are the bags there are, work is what is still to be carried.
+function Carry:next(records, work, revision)
+    if #work == 0 then return nil end
+    revision = revision or 0
+    local player, world = self.player, self.world
+    local loads, total, candidates, worn, seen = {}, 0, {}, {}, {}
+    for index, item in ipairs(work) do
+        local weight = math.max(0, call(item, "getUnequippedWeight") or 0)
+        loads[index] = {item = item, weight = weight, kind = tostring(call(item, "getFullType")) .. ":" .. weight}
+        total = total + weight
+    end
+    Sort(loads, function(load) return -load.weight end)
+    for _, record in ipairs(records or {}) do
+        local item = record.item
+        if bag(item) and not seen[item] then
+            seen[item] = true
+            candidates[#candidates + 1] = item
+            if call(player, "isEquipped", item) then
+                local container = call(item, "getInventory")
+                worn[item] = storage(item, container,
+                    math.max(0, (call(container, "getEffectiveCapacity", player) or 0) - (call(container, "getCapacityWeight") or 0)))
+            end
+        end
+    end
+    -- What the load gains from the other worn bags, and with this one as well.
+    local function gain(item, added)
+        local others = {}
+        for _, candidate in ipairs(candidates) do
+            if worn[candidate] and candidate ~= item then others[#others + 1] = worn[candidate] end
+        end
+        local before, left = relief(others, loads)
+        others[#others + 1] = added
+        return relief(others, loads) - before, left
     end
     local best, bestScore
     for _, item in ipairs(candidates) do
@@ -145,31 +186,28 @@ function Carry:next(records, incomingWeight, revision)
                 local container = call(target, "getInventory")
                 local capacity = call(container, "getEffectiveCapacity", player) or 0
                 local free = math.max(0, capacity - contents)
-                local reduction = math.max(0, math.min(1, (call(target, "getWeightReduction") or 0) / 100))
+                local added = storage(target, container, free)
                 local replacePrimary = ItemTag and ItemTag.REPLACE_PRIMARY and call(target, "hasTag", ItemTag.REPLACE_PRIMARY)
-                local benefit = reduction * (math.min(remaining, free) + (own and contents or 0))
+                local kept = own and contents * added.reduction or 0
                 local cost = (own and 0.15 or 0.5) + distance / 8
-                if contents <= capacity and (free > 0 or own and contents > 0) and reduction > 0 and not replacePrimary and benefit > cost then
+                -- The most it could gain, before asking the game about every item.
+                if contents <= capacity and not replacePrimary and kept + added.reduction * math.min(total, free) > cost then
+                    local benefit, left = gain(item, added)
+                    benefit = benefit + kept
                     local slot = Carry.wornSlot(target)
                     local available = slot and Carry.slotAvailable(player, slot, item)
-                    if available then
-                        local score = benefit - cost + 1000
-                        if not bestScore or score > bestScore then
-                            best = {kind = "gear", item = item, source = source, mode = "wear", slot = tostring(slot),
-                                variant = target ~= item and tostring(call(target, "getFullType")) or nil}
-                            bestScore = score
-                        end
-                    elseif target == item and not call(player, "isEquipped", item) and (equippedFree < remaining or contents > 0) then
-                        for _, mode in ipairs({"secondary", "primary"}) do
-                            if Carry.handAvailable(player, mode, item) then
-                                local score = benefit - cost
-                                if not bestScore or score > bestScore then
-                                    best = {kind = "gear", item = item, source = source, mode = mode}
-                                    bestScore = score
-                                end
-                                break
-                            end
-                        end
+                    local mode
+                    if available then mode = "wear"
+                    elseif target == item and not call(player, "isEquipped", item) and (left > 0 or contents > 0) then
+                        mode = Carry.handAvailable(player, "secondary", item) and "secondary"
+                            or Carry.handAvailable(player, "primary", item) and "primary"
+                    end
+                    local score = benefit - cost + (available and 1000 or 0)
+                    if mode and benefit > cost and (not bestScore or score > bestScore) then
+                        best = {kind = "gear", item = item, source = source, mode = mode, slot = available and tostring(slot) or nil,
+                            variant = target ~= item and tostring(call(target, "getFullType")) or nil}
+                        best.why = string.format("takes %.1f off a load of %.1f", benefit, total)
+                        bestScore = score
                     end
                 end
             end

@@ -296,10 +296,10 @@ function Jobs:buildPlan(request)
     for _, warning in ipairs(scan.warnings or {}) do table.insert(plan.warnings, warning) end
     local preparesBags = false
     if request.destination.kind == "inventory" then
-        local incoming = 0
+        local incoming = {}
         for _, record in ipairs(scan.items or {}) do
             if not self.world:owns(record.source) and matchesSelection(self.graph, request, record.descriptor, record.item, self.player)
-                and not self.world:protected(record.item) then incoming = incoming + weight(record.item) end
+                and not self.world:protected(record.item) then incoming[#incoming + 1] = record.item end
         end
         preparesBags = Carry.new(self.player, self.world):next(self.world:gearRecords(plan.sources), incoming) ~= nil
     end
@@ -1052,25 +1052,35 @@ function Jobs:carryStep()
         elseif task.kind == "discover" then sources[#sources + 1] = task.container end
     end
     for _, record in ipairs(execution.records) do sources[#sources + 1] = record.source end
+    local inventory, selected, work = self.plan.request.destination.kind == "inventory", {}, {}
+    for _, byId in pairs(execution.work) do for _, byType in pairs(byId) do for _, record in pairs(byType) do
+        if not record.settled then
+            selected[self.world:itemId(record.item) or record.item] = true
+            if not self.world:owns(record.item:getContainer()) and not self.world:protected(record.item) then work[#work + 1] = record.item end
+        end
+    end end end
+    -- A bag that is itself to be moved, or is in one, must reach its destination. Wearing it is that when it is for the player.
+    local function cargo(item)
+        while item do
+            if selected[self.world:itemId(item) or item] then return true end
+            local holder = item:getContainer()
+            item = holder and holder:getContainingItem()
+        end
+        return false
+    end
     local records = {}
     for _, record in ipairs(self.world:gearRecords(sources)) do
-        -- A bag being hauled is cargo; equipping it would keep it from its destination.
-        local hauled = self.hauled[self.world:itemId(record.item) or record.item]
-        if not hauled or hauled.delivered then records[#records + 1] = record end
+        if inventory or not cargo(record.item) then records[#records + 1] = record end
     end
-    local incoming = 0
-    for _, byId in pairs(execution.work) do for _, byType in pairs(byId) do for _, record in pairs(byType) do
-        if not record.settled and not self.world:owns(record.item:getContainer())
-            and not self.world:protected(record.item) then incoming = incoming + weight(record.item) end
-    end end end
     local revision = execution.capacityRevision
-    local op = self.carry:next(records, incoming, revision)
+    local op = self.carry:next(records, work, revision)
     if not op then
         execution.phase = execution.afterCarry or "source"
         self.view.reason = "Carrying bags are ready. Continuing the selected job."
         return
     end
     self.view.reason = "Preparing carrying bags before collecting the next load."
+    Log.trace(self.interaction, "BAG", "item", Log.item(op.item, self.player), "mode", op.mode, "variant", op.variant, "why", op.why, "items", #work)
     local oldInventory = op.item:getInventory()
     self:action(op, function(ok, reason, code)
         local replacement = self.carry:complete(op, ok, code, revision)
@@ -1088,7 +1098,13 @@ function Jobs:carryStep()
                             local item = sourceItem(record, currentInventory)
                             if item then record.item, record.source = item, currentInventory end
                         end
-                        if self.world:owns(record.source) then record.sourceAnchor = self.world:sourceAnchor(record.source) end
+                        if self.world:owns(record.source) then
+                            record.sourceAnchor = self.world:sourceAnchor(record.source)
+                            if inventory and not record.settled then
+                                record.settled = true
+                                self:recordMove(record)
+                            end
+                        end
                     end
                 end
             end

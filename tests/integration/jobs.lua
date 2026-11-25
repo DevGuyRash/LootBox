@@ -2355,8 +2355,8 @@ test("bag preparation keeps capacity-dependent selected items in the preview ins
     item(f.source, "Base.Plank", 2)
     local Carry = require "LootBox/Carry"
     local previous = Carry.next
-    Carry.next = function(_, _, incoming)
-        assert(incoming == 4)
+    Carry.next = function(_, _, work)
+        assert(#work == 2)
         return {kind = "gear"}
     end
     local plan = assert(f.jobs:preview(request("inventory")))

@@ -47,7 +47,7 @@ local function remove(values, value)
 end
 
 local function fixture()
-    local f = {now = 0, ops = {}, visits = {}, squares = {}, nextId = 0, reads = {}, blocked = {}, deleted = {}}
+    local f = {now = 0, ops = {}, visits = {}, squares = {}, nextId = 0, reads = {}, blocked = {}, deleted = {}, wearing = {}}
     active = f
     local function square(x, y, z)
         local key = x .. ":" .. y .. ":" .. (z or 0)
@@ -133,7 +133,20 @@ local function fixture()
     function player:getY() return f.at.y + 0.5 end
     function player:getZ() return f.at.z end
     function player:getVehicle() return nil end
-    function player:isEquipped(item) return item == f.worn end
+    function player:isEquipped(item) return item == f.worn or f.wearing[item] ~= nil end
+    function player:getWornItems()
+        local worn = {}
+        for item, slot in pairs(f.wearing) do
+            worn[#worn + 1] = {getItem = function() return item end, getLocation = function() return slot end}
+        end
+        local result = list(worn)
+        function result:contains(item) return f.wearing[item] ~= nil end
+        function result:getBodyLocationGroup()
+            return {size = function() return 1 end, isMultiItem = function() return false end, isExclusive = function() return false end,
+                getLocationByIndex = function() return {getId = function() return "base:Back" end} end}
+        end
+        return result
+    end
     function player:getPrimaryHandItem() return nil end
     function player:getSecondaryHandItem() return nil end
     function player:isDead() return false end
@@ -159,7 +172,18 @@ local function fixture()
         function item:isEquipped() return self.wornByCorpse == true or self == f.worn end
         function item:getAttachedSlot() return self.attached or -1 end
         function item:isUnwanted() return false end
-        if options.bag then item.inside = f.container("bag"); item.inside.bag = item end
+        if options.class then item.class = options.class end
+        if options.bag then
+            item.inside = f.container("bag")
+            item.inside.bag, item.inside.capacity = item, options.capacity or 1000
+            function item:IsInventoryContainer() return true end
+            function item:getWeightReduction() return options.reduction or 0 end
+            function item:getMaxItemSize() return options.largest or 0 end
+            function item:getContentsWeight() return self.inside:getCapacityWeight() end
+            function item:canBeEquipped() return options.wear end
+            function item:isFakeEquipped() return options.keyRing == true and self.container == f.inventory end
+            function item.inside:isItemAllowed(value) return not options.accepts or options.accepts(value) end
+        end
         if source then source.items[#source.items + 1] = item end
         return item
     end
@@ -241,6 +265,11 @@ local function fixture()
             op.destination.items[#op.destination.items + 1], op.item.container = op.item, op.destination
             op.resultItem = op.item
             if f.onTransfer then f.onTransfer(op) end
+            return true
+        elseif op.kind == "gear" then
+            assert(op.mode == "wear" and remove(op.source.items, op.item))
+            f.inventory.items[#f.inventory.items + 1], op.item.container = op.item, f.inventory
+            f.wearing[op.item], op.resultItem = op.slot, op.item
             return true
         elseif op.kind == "trash" then
             for _, item in ipairs(op.container.items) do
@@ -432,6 +461,164 @@ case("sorting looks for labelled storage once per plan and once per delivery", f
     local status = f.finish()
     assert(status.done == 40 and #target.items == 40)
     assert(looked <= 4, "One trip discovered " .. looked .. " times")
+end)
+
+case("put away does not unpack a kit that is already in storage for its contents", function(f)
+    local medical, box = f.crate(f.square(5, 0), "medical"), f.crate(f.square(8, 0), "box")
+    f.state.containerLabels[assert(f.world:key(medical))] = {"native:Medical"}
+    local kit = f.item(medical, "Base.FirstAidKit", {bag = true, category = "Container"})
+    local packed = f.item(kit.inside, "Base.Bandage", {category = "Medical"})
+    local loose = f.item(box, "Base.Bandage", {category = "Medical"})
+    local status = f.run(f.request({kind = "labels", labels = {}}, {includeBags = true}))
+    assert(status.done == 1 and medical:contains(loose) and kit.inside:contains(packed), status.reason)
+end)
+
+case("put away prefers where the same thing is, then the closest label, then the nearest", function(f)
+    local id = "custom:ammo"
+    f.graph = assert(Categories.new({{id = id, name = "Ammo", types = {"Base.Nails"}, includes = {}}}))
+    f.world.graph, f.jobs.graph = f.graph, f.graph
+    local near, custom, tagged, holding = f.crate(f.square(3, 0), "near"), f.crate(f.square(6, 0), "custom"),
+        f.crate(f.square(9, 0), "tagged"), f.crate(f.square(12, 0), "holding")
+    local function label(crate, value) f.state.containerLabels[assert(f.world:key(crate))] = {value} end
+    label(near, "native:Material"); label(custom, id); label(tagged, "custom:mine"); label(holding, "native:Material")
+    f.item(holding, "Base.Glue")
+    local glue, nails, screws, named = f.item(f.inventory, "Base.Glue"), f.item(f.inventory, "Base.Nails"),
+        f.item(f.inventory, "Base.Screws"), f.item(f.inventory, "Base.Nails")
+    f.state.itemLabels[tostring(named.id)] = {"custom:mine"}
+    local status = f.run(f.request({kind = "labels", labels = {}}, {scope = "inventory"}))
+    assert(status.state == "finished" and status.done == 4, status.reason)
+    assert(holding:contains(glue) and custom:contains(nails) and near:contains(screws) and tagged:contains(named))
+end)
+
+case("an item already carried in a bag labelled for it is put away", function(f)
+    local source = f.crate(f.square(5, 0), "source")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.wearing[pack] = "base:Back"
+    f.state.containerLabels[assert(f.world:key(pack.inside))] = {"native:Food"}
+    f.world:_observe(pack.inside)
+    local soup = f.item(source, "Base.Soup", {category = "Food"})
+    local status = f.run(f.request({kind = "labels", labels = {}}))
+    assert(status.state == "finished" and status.done == 1 and status.skipped == 0 and pack.inside:contains(soup), status.reason)
+end)
+
+case("a bag being hauled is never worn to carry the rest", function(f)
+    local source, target = f.crate(f.square(5, 0), "source"), f.crate(f.square(20, 0), "target"); f.roomSquares[3] = nil
+    local bag = f.item(source, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    for _ = 1, 3 do f.item(source, "Base.Plank", {weight = 3}) end
+    local status = f.run(f.request({kind = "container", ref = target}))
+    assert(status.state == "finished" and status.done == 4 and status.skipped == 0 and #target.items == 4, status.reason)
+    assert(target:contains(bag) and not f.wearing[bag])
+end)
+
+case("a bag inside a hauled bag is not taken out and worn", function(f)
+    local source, target = f.crate(f.square(5, 0), "source"), f.crate(f.square(20, 0), "target"); f.roomSquares[3] = nil
+    local outer = f.item(source, "Base.Duffel", {bag = true})
+    local inner = f.item(outer.inside, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.item(source, "Base.Plank", {weight = 9})
+    local status = f.run(f.request({kind = "container", ref = target}))
+    assert(status.state == "finished" and status.done == 2 and outer.inside:contains(inner) and not f.wearing[inner], status.reason)
+end)
+
+case("taking everything counts a bag that was put on, and what is in it, as taken", function(f)
+    local source = f.crate(f.square(5, 0), "source")
+    local bag = f.item(source, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    local inside, plank = f.item(bag.inside, "Base.Soup"), f.item(source, "Base.Plank", {weight = 9})
+    local status = f.run(f.request({kind = "inventory"}, {includeBags = true}))
+    assert(status.state == "finished" and status.done == 3 and status.skipped == 0, status.reason)
+    assert(f.wearing[bag] and bag.inside:contains(inside) and bag.inside:contains(plank) and #source.items == 0)
+end)
+
+case("no bag is put on for things it cannot hold", function(f)
+    local source, target = f.crate(f.square(5, 0), "source"), f.crate(f.square(20, 0), "target"); f.roomSquares[3] = nil
+    local strap = f.item(f.inventory, "Base.AmmoStrap", {bag = true, wear = "base:Back", reduction = 85, accepts = function() return false end})
+    f.item(source, "Base.Plank", {weight = 3})
+    assert(f.run(f.request({kind = "container", ref = target})).state == "finished" and not f.wearing[strap])
+    local small = f.item(f.inventory, "Base.Holster", {bag = true, wear = "base:Back", reduction = 85, largest = 1.3})
+    f.item(source, "Base.Plank", {weight = 3})
+    assert(f.run(f.request({kind = "container", ref = target})).state == "finished" and not f.wearing[small])
+    local useful = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 60})
+    f.item(source, "Base.Plank", {weight = 3})
+    assert(f.run(f.request({kind = "container", ref = target})).state == "finished" and f.wearing[useful])
+    assert(#target.items == 3)
+end)
+
+case("loot goes into worn bags only, unless the settings add others", function(f)
+    local source = f.crate(f.square(5, 0), "source")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, reduction = 60, capacity = 1})
+    f.wearing[pack] = "base:Back"
+    local loot = f.item(f.inventory, "Base.LootBag", {bag = true, reduction = 90})
+    local pouch = f.item(pack.inside, "Base.Pouch", {bag = true, weight = 0})
+    f.item(loot.inside, "Base.Nails"); f.item(pouch.inside, "Base.Screws", {weight = 0})
+    local first, second = f.item(source), f.item(source)
+    assert(f.run(f.request({kind = "inventory"})).done == 2)
+    assert(pack.inside:contains(first) and f.inventory:contains(second) and #loot.inside.items == 1 and #pouch.inside.items == 1)
+    f.world.preference = function(key) return key == "condenseUseUnequipped" end
+    local third = f.item(source)
+    assert(f.run(f.request({kind = "inventory"})).done == 1 and loot.inside:contains(third))
+    f.world.preference = function(key) return key == "condenseNested" end
+    local fourth = f.item(source, "Base.Screws", {weight = 0})
+        assert(f.run(f.request({kind = "inventory"})).done == 1 and pouch.inside:contains(fourth))
+end)
+
+case("a key goes on a key ring or stays in main inventory, where the game looks for it", function(f)
+    local source = f.crate(f.square(5, 0), "source")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, reduction = 85})
+    f.wearing[pack] = "base:Back"
+    local key = f.item(source, "Base.CarKey", {class = "Key"})
+    assert(f.run(f.request({kind = "inventory"})).done == 1 and f.inventory:contains(key))
+    local ring = f.item(f.inventory, "Base.KeyRing", {bag = true, reduction = 85, keyRing = true, capacity = 1,
+        accepts = function(value) return value.class == "Key" end})
+    local other = f.item(source, "Base.HouseKey", {class = "Key"})
+    assert(f.run(f.request({kind = "inventory"})).done == 1 and ring.inside:contains(other))
+    local target, hauled = f.crate(f.square(20, 0), "target"), f.item(source, "Base.CarKey", {class = "Key", weight = 2})
+    f.onTransfer = function(op) assert(op.destination ~= pack.inside) end
+    assert(f.run(f.request({kind = "container", ref = target}, {scope = "container", sourceContainer = source})).done == 1 and target:contains(hauled))
+end)
+
+case("a bag labelled for one thing takes nothing else from a loot run", function(f)
+    local source = f.crate(f.square(5, 0), "source")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, reduction = 85})
+    f.wearing[pack] = "base:Back"
+    f.state.containerLabels[assert(f.world:key(pack.inside))] = {"native:Food"}
+    local soup, saw = f.item(source, "Base.Soup", {category = "Food"}), f.item(source, "Base.Saw", {category = "Tool"})
+    assert(f.run(f.request({kind = "inventory"})).done == 2)
+    assert(pack.inside:contains(soup) and f.inventory:contains(saw))
+end)
+
+case("preparing bags reads each container once however many items it holds", function(f)
+    local source = f.crate(f.square(5, 0), "source")
+    for _ = 1, 300 do f.item(source, nil, {weight = 0.1}) end
+    local plan = assert(f.jobs:preview(f.request({kind = "inventory"})))
+    local reads, items = 0, source.getItems
+    function source:getItems() reads = reads + 1; return items(self) end
+    assert(f.jobs:start(plan))
+    f.now = f.now + 50
+    f.jobs:tick()
+    assert(reads <= 2, "Read the crate " .. reads .. " times in one tick")
+end)
+
+local function condense(f, options)
+    local plan = assert(f.jobs:previewCondense(options))
+    if #plan.moves == 0 then return plan.condense, plan end
+    assert(f.jobs:start(plan))
+    return f.finish(), plan
+end
+
+case("Condense keeps keys where the game looks and other things out of a labelled bag", function(f)
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, reduction = 85})
+    f.wearing[pack] = "base:Back"
+    local key, saw, soup = f.item(f.inventory, "Base.CarKey", {class = "Key"}), f.item(f.inventory, "Base.Saw", {category = "Tool"}),
+        f.item(f.inventory, "Base.Soup", {category = "Food"})
+    f.state.containerLabels[assert(f.world:key(pack.inside))] = {"native:Food"}
+    condense(f)
+    assert(pack.inside:contains(soup) and f.inventory:contains(saw) and f.inventory:contains(key))
+    f.state.containerLabels[assert(f.world:key(pack.inside))] = nil
+    condense(f)
+    assert(pack.inside:contains(saw) and f.inventory:contains(key))
+    local ring = f.item(f.inventory, "Base.KeyRing", {bag = true, reduction = 85, keyRing = true, capacity = 1,
+        accepts = function(value) return value.class == "Key" end})
+    condense(f)
+    assert(ring.inside:contains(key))
 end)
 
 case("loot is not picked up for a destination that has no room left for it", function(f)
