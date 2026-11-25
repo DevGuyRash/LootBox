@@ -44,27 +44,56 @@ function Act.blocked(player)
     if trade and trade:isVisible() then return "Finish trading first" end
 end
 
--- Runs a stock callback that resets the queue without losing what else is in
--- it: the player's own actions, and follow-ups of ours that must still happen.
-local function sparing(self, callback, action, ...)
-    local queue, spared = queueOf(self.player), {}
-    if queue.current ~= action then return callback(action, ...) end
-    for _, entry in ipairs(queue.queue) do
-        if entry ~= action and (not self.owned[entry] or self.keep[entry]) then spared[#spared + 1] = entry end
+-- Stock stop resets the whole queue, and after the player moves or aims the
+-- engine clears what was started inside it too. What must survive waits here
+-- until the player is free.
+local spared = {}
+
+function Act.spare(player, keeps)
+    local queue, held = queueOf(player), spared[player]
+    for index = 1, #queue.queue do
+        local entry = queue.queue[index]
+        if entry ~= queue.current and keeps(entry) then
+            held = held or { since = Clock.now() }
+            held[#held + 1] = entry
+        end
     end
-    for _, entry in ipairs(spared) do queue:removeFromQueue(entry) end
-    local ok, result = pcall(callback, action, ...)
-    for _, entry in ipairs(spared) do if not queued(queue, entry) then queue:addToQueue(entry) end end
-    if not ok then error(result, 0) end
-    return result
+    spared[player] = held
+    for _, entry in ipairs(held or {}) do queue:removeFromQueue(entry) end
+end
+
+-- The player's own movement, aim, fight or death ends their queue, as ever.
+function Act.yields(player) return Act.moving(player) or Act.blocked(player) ~= nil end
+
+function Act.restore()
+    for player, held in pairs(spared) do
+        if player:isDead() or Clock.now() - held.since >= Act.LIMIT_MS then spared[player] = nil
+        elseif Act.idle(player) and not Act.yields(player) then
+            spared[player] = nil
+            local queue = queueOf(player)
+            for _, entry in ipairs(held) do queue:addToQueue(entry) end
+        end
+    end
+end
+
+function Act.holding(player) return spared[player] ~= nil end
+
+local function waiting(self)
+    for _, entry in ipairs(spared[self.player] or {}) do if self.owned[entry] then return true end end
+    return false
+end
+
+local function spare(self)
+    local yields = Act.yields(self.player)
+    Act.spare(self.player, function(entry) return self.keep[entry] or not self.owned[entry] and not yields end)
 end
 
 local function allowed(self, phase)
     if self.problem then return false end
     if not self.allow then return true end
-    local ok, why, check = Log.guard("Act.allow", self.allow, phase, self.action)
+    local ok, why = Log.guard("Act.allow", self.allow, phase, self.action)
     if ok then return true end
-    self.problem, self.check = why or "The game or your selection changed", check
+    self.problem = why or "The game or your selection changed"
     return false
 end
 
@@ -77,34 +106,36 @@ local function hook(self, action)
             self.problem = self.problem or Act.blocked(self.player) or Act.moving(self.player) and "You moved"
                 or "The game stopped the action"
         end
-        return sparing(self, stop, stopping, ...)
+        spare(self)
+        return stop(stopping, ...)
     end
 end
 
 -- The action that does the work. It is checked at the last moment before the
 -- game commits to it (in multiplayer: before the request is sent).
-local function hookMain(self, action)
+local function hookMain(self, action, lasting)
     local wait, start, perform, valid = action.waitToStart, action.start, action.perform, action.isValid
-    action.waitToStart = function(waiting, ...)
-        if not allowed(self, "start") then waiting:forceStop(); return true end
-        if wait(waiting, ...) ~= false then return true end
-        if not valid(waiting) then
-            self.problem = self.problem or "The game refused the action"
-            waiting:forceStop()
-            return true
-        end
+    local function refuse()
+        self.problem = self.problem or "The game refused the action"
+        self:cancel(self.problem)
+        return true
+    end
+    action.isValid = function(...) return valid(...) or lasting ~= nil and self.started == true and lasting() end
+    action.waitToStart = function(...)
+        if not allowed(self, "start") then return refuse() end
+        if wait(...) ~= false then return true end
+        if not valid(...) then return refuse() end
         return false
     end
-    action.start = function(starting, ...)
+    action.start = function(...)
         self.started = true
-        local result = start(starting, ...)
-        if self.onStart then Log.guard("Act.onStart", self.onStart, starting) end
-        return result
+        return start(...)
     end
-    action.perform = function(performing, ...)
-        self.performed, self.performedAt = true, Clock.now()
-        if self.onPerform then Log.guard("Act.onPerform", self.onPerform, performing) end
-        return perform(performing, ...)
+    action.perform = function(...)
+        -- The game also "performs" a bite whose food vanished before it began.
+        if self.started then self.performed, self.performedAt = true, Clock.now()
+        else self.problem = self.problem or "The item is gone" end
+        return perform(...)
     end
 end
 
@@ -113,14 +144,15 @@ end
 --   main     main(action): which of them does the work; default the first
 --   allow    allow(phase, action), phase "start" or "run"; false, reason stops it
 --   keepAfter  what is queued behind it must happen even if the work stops
---   onStart, onPerform, limitMs
+--   lasting    finishing can make the game call the action invalid an instant
+--              before it ends (a drained bottle); lasting() says it may go on
+--   limitMs
 function Act.run(player, opts)
     if not Act.idle(player) then return nil, "Finish the current action first", "busy" end
     local blocked = Act.blocked(player)
     if blocked then return nil, blocked, "blocked" end
     local self = setmetatable({ player = player, op = opts.op, interaction = opts.interaction, allow = opts.allow, owned = {}, keep = {},
-        onStart = opts.onStart, onPerform = opts.onPerform, startedAt = Clock.now(),
-        limit = opts.limitMs or Act.LIMIT_MS }, Act)
+        startedAt = Clock.now(), limit = opts.limitMs or Act.LIMIT_MS }, Act)
     -- The game may start the first action inside the call that queues it, so
     -- each is taken in hand on its way there.
     local add = ISTimedActionQueue.add
@@ -132,7 +164,7 @@ function Act.run(player, opts)
             hook(self, action)
             if not after and (not opts.main or opts.main(action)) then
                 self.action = action
-                hookMain(self, action)
+                hookMain(self, action, opts.lasting)
             end
         end
         return add(action)
@@ -173,6 +205,8 @@ function Act:cancel(reason)
     end
     if current and self.owned[current] and not self.keep[current] and not self.stopSent and current.action then
         self.stopSent = true
+        -- The game drops an unstarted action without stopping it, then resets the queue.
+        if not current:isStarted() then spare(self) end
         current:forceStop()
     end
 end
@@ -180,14 +214,16 @@ end
 -- nil while any of it is queued, then true, or false and the reason.
 function Act:poll()
     local queue = queueOf(self.player)
-    local busy = false
+    local busy = waiting(self)
     for action in pairs(self.owned) do if queued(queue, action) then busy = true; break end end
     if busy then
         if self.performed then
             -- Follow-ups are the game's own; do not wait on them for ever.
             if Clock.now() - self.performedAt < self.limit then return nil end
         else
-            if Clock.now() - self.startedAt >= self.limit then self:cancel("The action took too long")
+            local blocked = Act.blocked(self.player)
+            if blocked then self:cancel(blocked)
+            elseif Clock.now() - self.startedAt >= self.limit then self:cancel("The action took too long")
             elseif self.problem or not allowed(self, "run") then self:cancel(self.problem) end
             return nil
         end
@@ -195,10 +231,9 @@ function Act:poll()
     local ok = self.performed == true
     local why = not ok and (self.problem or "The action ended early") or nil
     local emit = ok and Log.trace or Log.warn
-    emit(self.interaction, "OP-END", "op", self.op, "ok", ok, "reason", why, "check", not ok and self.check or nil,
-        "started", self.started == true, "stopped", self.stopped == true, "elapsedMs", Clock.now() - self.startedAt,
+    emit(self.interaction, "OP-END", "op", self.op, "ok", ok, "reason", why, "started", self.started == true, "stopped", self.stopped == true, "elapsedMs", Clock.now() - self.startedAt,
         "player", not ok and Log.player(self.player) or nil)
-    return ok, why, self.check
+    return ok, why
 end
 
 return Act

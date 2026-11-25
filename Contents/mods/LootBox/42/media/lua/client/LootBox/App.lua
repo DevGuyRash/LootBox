@@ -720,6 +720,7 @@ function Instance:adopt(controller)
     self.consumption = controller
     controller:tick()
     if not controller:isBusy() and controller.state ~= "finished" then return nil, controller.reason end
+    controller.adopted = true
     return true
 end
 
@@ -862,6 +863,7 @@ function App.tick()
     if escapeDown and not App.escapeDown then App.onKeyStartPressed(Keyboard.KEY_ESCAPE) end
     App.escapeDown = escapeDown
     local stamp = getTimestampMs()
+    require("LootBox/Act").restore()
     for _, instance in pairs(sessions) do
         local consumption = instance.consumption
         if consumption then

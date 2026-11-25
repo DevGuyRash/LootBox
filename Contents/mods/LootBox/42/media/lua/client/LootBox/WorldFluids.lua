@@ -99,7 +99,6 @@ local function normalized(mix)
     for _,ratio in pairs(mix) do total=total+ratio end
     if math.abs(total-1)<=.00001 then return mix end
 end
-W.normalized=normalized
 
 -- What a fill from this fixture delivers, and the component that feeds it.
 local function recipe(a)

@@ -207,20 +207,79 @@ for _, mp in ipairs({ false, true }) do
         assert(Game.run(start({ favorite }, 'food')).count == 1, 'an explicit choice may be a favorite')
     end)
 
-    case('aiming stops it and leaves the player\'s own queue alone', function()
+    case('aiming during the opening stops it, though the game would not', function()
         player.hunger = 0.16
-        local shell, book = give(closed()), give(Game.item('Base.Book'))
+        local shell = give(closed())
         local job = start({ shell }, 'food', can)
-        local mine
-        Game.after(200, function()
-            mine = ISInventoryTransferAction:new(player, book, player.main, Game.container('shelf'))
-            ISTimedActionQueue.add(mine)
-            player.aiming = true
-        end)
-        Game.after(400, function() player.aiming = false end)
+        Game.after(400, function() player.aiming = true end)
         Game.run(job)
-        assert(job.state == 'cancelled' and job.reason:find('aimed'), job.reason)
-        assert(Game.consumed == 0 and ISTimedActionQueue.getTimedActionQueue(player):indexOf(mine) ~= -1)
+        assert(job.state == 'cancelled' and job.reason:find('aimed') and Game.consumed == 0, job.reason)
+    end)
+
+    case('a mask taken off goes back on after the bite is interrupted', function()
+        player.hunger = 0.2
+        player.mask = give(Game.item('Base.Mask'))
+        local job = start({ give(food(0.2)) }, 'food')
+        Game.onTick = function()
+            if player.maskOff and not player.ran then player.ran, player.running = Game.now, true end
+            if player.ran and Game.now - player.ran > 500 then player.running = false end
+        end
+        Game.run(job)
+        assert(job.state == 'cancelled' and player.mask and not player.maskOff, job.reason)
+        assert(not player:hasTimedActions(), 'nothing half-started is left behind')
+    end)
+
+    case('a food in a bag goes back when the bite is interrupted', function()
+        player.hunger = 0.2
+        local bag = Game.item('Base.Bag')
+        bag.inside = Game.container('bag', { bag = bag })
+        give(bag)
+        local snack = bag.inside:put(food(0.2))
+        local job = start({ snack }, 'food')
+        Game.onTick = function()
+            if player.main:getItemWithID(snack.id) and not player.ran then player.ran, player.running = Game.now, true end
+            if player.ran and Game.now - player.ran > 500 then player.running = false end
+        end
+        Game.run(job)
+        assert(job.state == 'cancelled' and bag.inside:getItemWithID(snack.id), job.reason)
+    end)
+
+    case('cancelling keeps what the player queued behind it', function()
+        player.hunger = 0.16
+        local shell, book, shelf = give(closed()), give(Game.item('Base.Book')), Game.container('shelf')
+        local job = start({ shell }, 'food', can)
+        Game.after(200, function() ISTimedActionQueue.add(ISInventoryTransferAction:new(player, book, player.main, shelf)) end)
+        Game.after(400, function() job:cancel() end)
+        Game.run(job)
+        for _ = 1, 30 do ISTimedActionQueue.getTimedActionQueue(player):tick(); require('LootBox/Act').restore(); Game.tick(100) end
+        assert(job.state == 'cancelled' and Game.consumed == 0 and shelf:getItemWithID(book.id), job.reason)
+    end)
+
+    case('drinks two bottles to the last drop', function()
+        player.thirst = 2
+        local a, b = give(Game.item('Base.Bottle', { litres = 0.5, capacity = 1 })), give(Game.item('Base.Bottle', { litres = 0.5, capacity = 1 }))
+        local job = Game.run(start({ a, b }, 'fluid'))
+        assert(job.state == 'finished' and job.count == 2 and near(player.thirst, 1), tostring(job.count) .. job.reason)
+    end)
+
+    case('food that vanished before the bite is not counted', function()
+        player.hunger = 0.2
+        local bag = Game.item('Base.Bag')
+        bag.inside = Game.container('bag', { bag = bag })
+        give(bag)
+        local snack = bag.inside:put(food(0.3))
+        local job = start({ snack }, 'food')
+        Game.onTick = function()
+            local held = player.main:getItemWithID(snack.id)
+            if held then Game.lift(held) end
+        end
+        Game.run(job)
+        assert(job.count == 0 and Game.consumed == 0, job.reason)
+    end)
+
+    case('wanting both needs met does not open cans for thirst alone', function()
+        player.thirst = 0.1
+        assert(Full.offers(player, Game.world, { give(closed()) }, { kind = 'food', both = true, recipe = can }) == false)
     end)
 
     case('a queued action of the player\'s waits for nothing and delays only the next step', function()
@@ -302,11 +361,6 @@ player.main:put(bag)
 local deep = bag.inside:put(Game.item('Base.X'))
 local found, holder, place = Items.find(player, deep.id)
 assert(found == deep and holder == bag.inside and place == 'carried')
-local twin = Game.replica(deep)
-assert(Items.unique(player, deep))
-player.main.items:add(twin); twin.container = player.main
-assert(not Items.unique(player, deep))
-player.main:take(twin)
 local laid = Game.lay(Game.item('Base.Y'), Game.square(11, 10))
 found, holder, place = Items.find(player, laid.id)
 assert(found == laid and holder == nil and place == 'ground')

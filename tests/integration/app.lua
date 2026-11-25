@@ -1,4 +1,5 @@
 package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.path
+package.loaded['TimedActions/ISTimedActionQueue'] = true
 
 -- World/action boundaries are doubles. The actual App, category graph, catalog,
 -- and data-only Store run together; native file I/O has a separate smoke check.

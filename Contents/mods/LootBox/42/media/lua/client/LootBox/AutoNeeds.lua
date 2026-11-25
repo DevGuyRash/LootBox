@@ -15,7 +15,8 @@ local function safe(player)
     if not player:isLocalPlayer() or not player:getCurrentSquare() or player:getVehicle()
         or player:isDead() or player:isAsleep() or player:isMoving() or player:isRunning() or player:isSprinting()
         or player:isAiming() or player:isAttacking() or player:isShoving() or player:isClimbing()
-        or player:isKnockedDown() or player:isbFalling() or player:isPerformingGrappleAnimation() then return false end
+        or player:isKnockedDown() or player:isbFalling() or player:isPerformingGrappleAnimation()
+        or ISInventoryPaneContextMenu.getEatingMask(player, false) then return false end
     local stats = player:getStats()
     return stats:getNumVisibleZombies() == 0 and stats:getNumChasingZombies() == 0 and stats:getNumVeryCloseZombies() == 0
 end

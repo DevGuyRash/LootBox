@@ -12,9 +12,9 @@ Vessels.TOLERANCE = 0.02
 local function finite(value) return type(value) == "number" and value == value and math.abs(value) < math.huge end
 
 -- What a pour of have into free moves, rounded as the game rounds it.
-function Vessels.amount(have, free, wanted)
+function Vessels.amount(have, free)
     if not finite(have) or not finite(free) then return nil end
-    local most = math.min(have, free, wanted or math.huge)
+    local most = math.min(have, free)
     local rounded = FluidUtil.roundTransfer(most)
     local amount = finite(rounded) and math.min(most, rounded) or 0
     return amount > 0 and amount or nil
@@ -35,21 +35,21 @@ local function pourable(item)
     return fluid and fluid:canPlayerEmpty() and fluid or nil
 end
 
-local function reading(flow, id, containers)
-    local item = Items.find(flow.player, id, containers)
+local function reading(flow, id)
+    local item = Items.find(flow.player, id)
     local fluid = item and Vessels.fluid(item)
-    return fluid and fluid:getAmount(), item
+    return fluid and fluid:getAmount()
 end
 
 -- Pours source into target. done(litres), or failed(why) with nothing moved.
 function Vessels.pour(flow, source, target, opts)
     local a, b = pourable(source), pourable(target)
     if not a or not b or not FluidContainer.CanTransfer(a, b) then return opts.failed("The game does not allow pouring between these") end
-    local amount = Vessels.amount(a:getAmount(), b:getFreeCapacity(), opts.litres)
+    local amount = Vessels.amount(a:getAmount(), b:getFreeCapacity())
     if not amount then return opts.failed("There is nothing to pour or no room for it") end
-    local id, before = target:getID(), b:getAmount()
+    local from, id, before = source:getID(), target:getID(), b:getAmount()
     local function gained()
-        local now = reading(flow, id, opts.containers)
+        local now = reading(flow, id)
         return now and now - before or 0
     end
     Log.trace(flow.interaction, "POUR", "litres", string.format("%.3f", amount), "from", Log.item(source, flow.player),
@@ -72,14 +72,11 @@ function Vessels.pour(flow, source, target, opts)
             return opts.failed(why or "The game did not confirm the pour")
         end
     end
-    flow:act({ op = "pour", allow = opts.allow, limitMs = 300000, begin = function()
+    flow:act({ op = "pour", lasting = function() return Items.find(flow.player, from) ~= nil and Items.find(flow.player, id) ~= nil end,
+        limitMs = 300000, begin = function()
         require "Fluids/ISFluidTransferAction"
-        local from, to = ISFluidContainer:new(a), ISFluidContainer:new(b)
-        local action = ISFluidTransferAction:new(flow.player, from, from:getFluidObject(), to, to:getFluidObject(), amount)
-        -- Emptying its source makes the game stop a pour just before it is done.
-        local valid = action.isValid
-        action.isValid = function(pouring) return pouring:isStarted() or valid(pouring) end
-        ISTimedActionQueue.add(action)
+        local source_, target_ = ISFluidContainer:new(a), ISFluidContainer:new(b)
+        ISTimedActionQueue.add(ISFluidTransferAction:new(flow.player, source_, source_:getFluidObject(), target_, target_:getFluidObject(), amount))
     end }, function() flow:await(full, settled, ended()) end, function(why) flow:await(full, settled, ended(why), 1500) end)
 end
 
@@ -98,7 +95,7 @@ end
 -- Brings loan.item to the main inventory. done(item) with the object it now is.
 function Vessels.fetch(flow, loan, done, failed)
     local main = flow.player:getInventory()
-    flow:act({ op = "fetch", allow = loan.allow, begin = function()
+    flow:act({ op = "fetch", begin = function()
         ISTimedActionQueue.add(ISInventoryTransferUtil.newInventoryTransferAction(flow.player, loan.item, loan.from, main))
     end }, function()
         flow:await(function() return main:getItemWithID(loan.id) end, function(item)
@@ -114,7 +111,7 @@ function Vessels.giveBack(flow, loan, done, failed)
     local player = flow.player
     local item = Items.find(player, loan.id)
     if not item or item:getContainer() ~= player:getInventory() then return failed("The vessel is no longer in your inventory") end
-    flow:act({ op = "return", allow = loan.allowBack, begin = function()
+    flow:act({ op = "return", begin = function()
         if loan.spot then
             require "TimedActions/ISDropWorldItemAction"
             local spot = loan.spot

@@ -11,6 +11,7 @@ function getTimestampMs() return time end
 function getCore() return {getOptionAutoDrink=function() return vanilla end} end
 CharacterStat={HUNGER='h',THIRST='t'}
 ISTimedActionQueue={getTimedActionQueue=function() return queue end}
+ISInventoryPaneContextMenu={getEatingMask=function(player) return player.mask end}
 local function controller()
  return {state='running',count=0,isBusy=function(s)return s.state=='running' end,
          tick=function() end,cancel=function(s)s.state='cancelled' end}
@@ -149,4 +150,9 @@ end)
 run('a drink that did not help is not repeated; one that helped may be',function()
  options.autoConsumeCarried=true;stats.t=.5;object.holder=bag;selected.fluid=object;step(0)
  first.state='finished';first.count=1;step(16000);step(40000);assert(attempts==1)
+end)
+
+run('a mask is never taken off for a background bite',function()
+ options.autoConsumeCarried=true;stats.h=.6;selected.food=object;p.mask={};step(0);assert(attempts==0)
+ p.mask=nil;step(16000);assert(attempts==1)
 end)

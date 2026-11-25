@@ -102,6 +102,11 @@ end
 local function player()
     local value = { location = square(0, 0), inventory = container("inventory") }
     function value:isDead() return self.dead == true end
+    function value:isLocalPlayer() return true end
+    function value:isShoving() return self.shoving == true end
+    function value:isClimbing() return false end
+    function value:isKnockedDown() return false end
+    function value:hasTimedActions() return queues[self] ~= nil and #queues[self].queue > 0 end
     function value:isAsleep() return self.asleep == true end
     function value:pressedMovement() return self.movementInput == true end
     function value:isPlayerMoving() return self.moving == true end
@@ -774,6 +779,8 @@ case("Cancel preserves foreign pending actions by reference, order, and executio
     local done, reason = adapter:poll()
     equal(done, false)
     includes(reason, "Cancelled")
+    equal(#queues[actor].queue, 0) -- the engine would clear whatever started inside stop
+    require("LootBox/Act").restore()
     equal(queues[actor].queue[1], first)
     equal(queues[actor].queue[2], second)
     equal(first.cancellations, 0)
@@ -1180,6 +1187,8 @@ case("A foreign action yields walking without being cancelled or learned", funct
     includes(reason, "queued action")
     equal(code, "yielded")
     equal(operation.travel, nil)
+    equal(adapter:isPlayerBusy(), true)
+    require("LootBox/Act").restore()
     equal(queues[actor].current, foreign)
     equal(foreign.cancellations, 0)
     equal(foreign.starts, 1)
@@ -1330,6 +1339,7 @@ case("Arbitrary queued preparation consumption and restoration yield in original
     equal(code, "yielded")
     equal(adapter:isBusy(), false)
     equal(selected:getContainer(), actor.inventory)
+    require("LootBox/Act").restore()
     for index, entry in ipairs(foreign) do
         equal(queues[actor].queue[index], entry)
         equal(entry.cancellations, 0)
@@ -1595,6 +1605,7 @@ case("Vehicle retries keep the original outside or passenger-seat restoration ta
         local done, _, code = adapter:poll()
         equal(done, false)
         equal(code, "yielded")
+        require("LootBox/Act").restore()
         equal(queues[actor].current, foreign)
         equal(foreign.cancellations, 0)
         foreign:complete()
@@ -1630,6 +1641,8 @@ case("Vehicle cancellation waits for foreign work before restoring the original 
     local foreign = action(actor, "finish drinking")
     ISTimedActionQueue.add(foreign)
     assert(adapter:cancel())
+    equal(adapter:poll(), nil)
+    require("LootBox/Act").restore()
     equal(adapter:poll(), nil)
     clock = 200000
     equal(adapter:poll(), nil)
@@ -1671,6 +1684,7 @@ case("Cancelling a yielded vehicle operation restores its retained outside or pa
         local done, _, code = adapter:poll()
         equal(done, false)
         equal(code, "yielded")
+        require("LootBox/Act").restore()
         equal(adapter:isBusy(), false)
         assert(adapter:cancel(operation))
         equal(adapter:isBusy(), true)

@@ -17,7 +17,7 @@ function Pour.displayed(index, holder) return require("LootBox/PourStacks").disp
 local function slot(entry)
     local fetched = entry.scope == "loot" and not entry.groundSquare
     return { entry = entry, mix = entry.pourSignature or entry.amount > 0 and Inventory.mix(entry) or nil,
-        loan = fetched and { id = entry.id, from = entry.container, spot = entry.spot } or nil }
+        loan = fetched and { id = entry.id, from = entry.container } or nil }
 end
 
 local function describe(entry, player)

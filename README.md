@@ -130,7 +130,7 @@ In **LootBox > Settings > Eating and drinking**, all four switches start **off**
 
 A can is opened with the game's recipe and what comes out is eaten at once, in single-player and multiplayer alike.
 
-Automatic intake waits for meaningful thirst (20%) or hunger (25%), then uses one native portion for that need. The manual **Til Full satisfies hunger and thirst together** preference is not used for background intake. LootBox does not interrupt movement, aiming, combat, existing queued actions, an active or paused LootBox job, or pending gear recovery. It skips unsafe, spoiled, alcoholic, medical and unrecognized supplies; favorites and **Keep** items are never chosen. A canceled or unconfirmed portion is not automatically retried in the same need episode. In multiplayer the client can stop requesting work, but it cannot recall a bite or sip the server has already accepted. Manual Eat, Drink and Til Full remain available.
+Automatic intake waits for meaningful thirst (20%) or hunger (25%), then uses one native portion for that need. The manual **Til Full satisfies hunger and thirst together** preference is not used for background intake. LootBox does not interrupt movement, aiming, combat, existing queued actions, an active or paused LootBox job, or pending gear recovery. It skips unsafe, spoiled, alcoholic, medical and unrecognized supplies; favorites and **Keep** items are never chosen. A portion that did not help is not repeated in the same need episode; an interrupted one may be tried again later. In multiplayer the client can stop requesting work, but it cannot recall a bite or sip the server has already accepted. Manual Eat, Drink and Til Full remain available.
 
 ## Inventory navigation shortcuts
 

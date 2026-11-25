@@ -44,12 +44,12 @@ local function launch(self)
     self.pending = nil
     local opts = pending.opts
     opts.interaction = self.interaction
-    local run, why, code = Act.run(self.player, opts)
+    local run, why = Act.run(self.player, opts)
     if run then
         self.launched, self.run, self.done, self.failed = true, run, pending.done, pending.failed
         return
     end
-    Log.warn(self.interaction, "REFUSED", "op", opts.op, "reason", why, "check", code, "queue", Log.queue(self.player),
+    Log.warn(self.interaction, "REFUSED", "op", opts.op, "reason", why, "queue", Log.queue(self.player),
         "player", Log.player(self.player))
     if pending.failed then return pending.failed(why) end
     return self:finish("cancelled", why)
@@ -80,7 +80,7 @@ function Flow:finish(state, reason)
         "litres", self.liters > 0 and string.format("%.3f", self.liters) or nil, "submitted", self.launched == true,
         "elapsedMs", Clock.now() - self.startedAt, "player", Log.player(self.player))
     local shown = not self.silent and not self.automatic
-    if shown and not good and not self.launched and HaloTextHelper and HaloTextHelper.addBadText then
+    if shown and not good and not self.launched and self.adopted and HaloTextHelper and HaloTextHelper.addBadText then
         HaloTextHelper.addBadText(self.player, tostring(reason))
     end
     if self.launched and shown then
@@ -94,13 +94,13 @@ end
 
 local function step(self)
     if self.run then
-        local ok, why, check = self.run:poll()
+        local ok, why = self.run:poll()
         if ok == nil then return end
         local done, failed = self.done, self.failed
         self.run, self.done, self.failed = nil, nil, nil
         if self.stopping then return self:finish("cancelled", self.stopping) end
         if ok then return done() end
-        if failed then return failed(why, check) end
+        if failed then return failed(why) end
         return self:finish("cancelled", why)
     end
     if self.waiting then

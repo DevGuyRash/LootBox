@@ -19,7 +19,7 @@ end
 
 local function loanOf(entry)
     if entry.scope ~= "loot" then return nil end
-    entry.loan = entry.loan or { id = entry.id, from = entry.container, spot = entry.spot }
+    entry.loan = entry.loan or { id = entry.id, from = entry.container }
     return entry.loan
 end
 
@@ -39,7 +39,8 @@ function Fixture:next()
     if self.ending then return self:finish(self.ending.state, self.ending.reason) end
     local ok, why = W.live(player, anchor)
     if not ok then return self:stop("cancelled", "The fixture is out of reach: " .. tostring(why)) end
-    if anchor.object:getPrimaryFluid() ~= anchor.primary or anchor.object:isTaintedWater() ~= anchor.tainted then
+    local object = anchor.object
+    if object:hasFluid() and (object:getPrimaryFluid() ~= anchor.primary or object:isTaintedWater() ~= anchor.tainted) then
         return self:stop("cancelled", "The fixture's liquid changed")
     end
     local live
@@ -86,7 +87,20 @@ function Fixture:pour(entry, live)
         self.liters, self.count, entry.done = self.liters + litres, self.count + 1, true
         Log.trace(self.interaction, "FILLED", "n", self.count, "litres", litres, "expected", expected, "fixture", W.describe(self.anchor))
     end
+    local function full()
+        local litres = changed()
+        if litres > 0 and litres >= (expected or 0) * 0.95 then return litres end
+    end
+    local function ended(why)
+        return function()
+            local litres = changed()
+            if litres > 0 and not why then return settled(litres) end
+            self.liters = self.liters + litres
+            self:stop("cancelled", why or "The game did not confirm it")
+        end
+    end
     self:act({ op = self.take and "fixture-fill" or "fixture-pour", keepAfter = true,
+        lasting = function() return Inventory.current(self.player, self.world, entry) ~= nil end,
         main = function(action) return action.Type == kind end,
         allow = function(phase, action)
             if phase == "run" then return true end
@@ -94,16 +108,7 @@ function Fixture:pour(entry, live)
             return Inventory.current(self.player, self.world, entry) ~= nil, "The vessel moved or is gone"
         end,
         begin = function() queue(self, live.item) end,
-    }, function()
-        self:await(function()
-            local litres = changed()
-            if litres > 0 and litres >= (expected or 0) * 0.95 then return litres end
-        end, settled, function()
-            local litres = changed()
-            if litres > 0 then return settled(litres) end
-            self:stop("cancelled", "The game did not confirm it")
-        end)
-    end, function(why) self:stop("cancelled", why) end)
+    }, function() self:await(full, settled, ended()) end, function(why) self:await(full, settled, ended(why), 1500) end)
 end
 
 function Fixture:finish(state, reason)

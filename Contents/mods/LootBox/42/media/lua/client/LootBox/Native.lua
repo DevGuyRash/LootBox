@@ -14,6 +14,7 @@ require "TimedActions/ISClothingExtraAction"
 require "TimedActions/ISEquipWeaponAction"
 require "TimedActions/ISUnequipAction"
 
+local Act = require "LootBox/Act"
 local Carry = require "LootBox/Carry"
 local Clock = require "LootBox/Clock"
 local Facts = require "LootBox/Facts"
@@ -34,6 +35,7 @@ local function queueFor(self)
 end
 
 local function hasForeign(self, state)
+    if Act.holding(self.player) then return true end
     for _, action in ipairs(queueFor(self).queue) do
         if not state.owned[action] then return true end
     end
@@ -276,18 +278,10 @@ local function own(self, state, action)
     local queue, nativeStop = queueFor(self), action.stop
     action.stop = function(stopped)
         state.rejected = rejected(stopped)
-        local pending = {}
-        local current = queue.current
-        for _, candidate in ipairs(queue.queue) do
-            if candidate ~= current and not state.owned[candidate] then
-                pending[#pending + 1] = candidate
-            end
-        end
-        state.stepYielded = state.stepYielded or #pending > 0 or manualMovement(self.player)
-        -- Native stop resets its queue. Temporarily detach only foreign pending work.
-        for _, candidate in ipairs(pending) do queue:removeFromQueue(candidate) end
+        state.stepYielded = state.stepYielded or hasForeign(self, state) or manualMovement(self.player)
+        local yields = Act.yields(self.player)
+        Act.spare(self.player, function(entry) return not state.owned[entry] and not yields end)
         local ok, err = pcall(nativeStop, stopped)
-        for _, candidate in ipairs(pending) do queue:addToQueue(candidate) end
         state.stepStopped = true
         if not ok then error(err) end
     end
@@ -786,7 +780,7 @@ end
 function Native:isPlayerBusy()
     if not self.player then return false end
     if self.active then return hasForeign(self, self.active) end
-    return playerFlag(self.player, "pressedMovement", false) or #queueFor(self).queue > 0
+    return Act.holding(self.player) or playerFlag(self.player, "pressedMovement", false) or #queueFor(self).queue > 0
         or not self.player:getCharacterActions():isEmpty()
 end
 

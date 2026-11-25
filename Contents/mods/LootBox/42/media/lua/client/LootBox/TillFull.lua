@@ -223,8 +223,7 @@ end
 function TillFull:plannedPortion(hunger, thirst, effects)
     -- A closed package has no nutrition of its own: open it when it can help.
     if effects.opening and effects.hunger == nil then
-        local need = self.goal == "fluid" and thirst or hunger
-        return (self.both and math.max(hunger, thirst) or need) > 0 and 1 or 0
+        return (self.goal == "fluid" and thirst or hunger) > 0 and 1 or 0
     end
     return TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both, self.goal)
 end
@@ -306,7 +305,8 @@ function TillFull:consume(record, portion, effects, hunger, thirst)
     end
     Log.trace(self.interaction, "PLAN", "n", self.count + 1, "item", Log.item(item, player), "portion", portion, "share", share,
         "hunger", hunger, "hungerRelief", effects.hunger, "thirst", thirst, "thirstRelief", effects.thirst)
-    self:act({ op = "consume", keepAfter = true,
+    self:act({ op = "consume", keepAfter = true, lasting = not food and function() return Items.find(player, record.id) ~= nil end or nil,
+       
         main = function(action) return action.Type == (food and "ISEatFoodAction" or "ISDrinkFluidAction") end,
         allow = function(phase)
             if phase == "run" then return self:permitted() end

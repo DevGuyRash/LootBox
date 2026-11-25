@@ -48,7 +48,7 @@ end
 
 local function entryFor(player, item, container, scope, path)
     local id,fullType = call(item, "getID"), call(item,"getFullType")
-    local object,spot,groundSquare = item,nil,nil
+    local object,groundSquare = item,nil
     if not finite(id) or call(item, "isSealed") ~= false then return nil end
     local fluid=call(item,"getFluidContainer")
     if call(container, "getType") == "floor" then
@@ -60,9 +60,6 @@ local function entryFor(player, item, container, scope, path)
         if component and call(component,"getOwner")==floorObject then
             if call(component,"isMultiTileMoveable")~=false then return nil end
             object,fluid,groundSquare=floorObject,component,call(floorObject,"getSquare")
-        elseif fluid and (not component or component==fluid) then
-            spot=Vessels.spot(player,item)
-            if not spot then return nil end
         else return nil end
     end
     if not fluid or call(fluid,"isMultiTileMoveable")==true or call(fluid, "getOwner") ~= object
@@ -72,7 +69,7 @@ local function entryFor(player, item, container, scope, path)
     local where=path or (scope=="main" and "Main inventory" or scope=="equipped" and "Equipped" or scope=="carried" and "Carried" or "Displayed loot")
     local label=itemName(item) .. " | " .. where
     return {id=id, fullType=fullType, item=item, object=object, container=container, scope=scope, fluid=fluid,
-        spot=spot,groundSquare=groundSquare,
+        groundSquare=groundSquare,
         capacity=capacity, amount=amount, free=free, label=label, place=where}
 end
 
@@ -129,7 +126,7 @@ local function scan(player, world, loot, allowLoot)
                     -- Ordinary cargo is neither, and most of an inventory is cargo.
                     local gear = (vessel or bag) and container == main and Items.equipped(player,item)
                     local entry = vessel and entryFor(player,item,container,scope or (gear and "equipped" or "main"),current.path)
-                    if entry and (scope~="loot" or (world and (call(container,"getType")=="floor" and not entry.spot
+                    if entry and (scope~="loot" or (world and (call(container,"getType")=="floor"
                         or (call(item,"isFavorite")~=true and call(world,"protected",item)~=true))
                         and call(world,"consumptionSource",item,container)==true)) then
                         result[#result+1]=entry

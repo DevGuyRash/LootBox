@@ -63,17 +63,6 @@ function Items.find(player, id, containers)
     if item then return item, item:getContainer(), "ground" end
 end
 
--- Exactly one carried item has this id and it is this object. Stock requests
--- name items by id, so a duplicate could act on the wrong one.
-function Items.unique(player, item)
-    local id, count = item:getID(), 0
-    Items.eachCarried(player, function(candidate)
-        if candidate:getID() == id then count = count + (candidate == item and 1 or 2) end
-        return count > 1
-    end)
-    return count == 1
-end
-
 function Items.holds(container, item)
     return container ~= nil and item ~= nil and item:getContainer() == container and container:contains(item) == true
 end

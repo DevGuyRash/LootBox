@@ -104,13 +104,22 @@ for _, mp in ipairs({ false, true }) do
         assert(Game.run(job).state == 'finished' and near(b.fluid.amount, 1), job.reason)
     end)
 
-    case('a vessel set on the ground goes back to the same spot', function()
-        getPlayerLoot():refreshBackpacks()
+    case('a vessel standing on the ground is filled where it stands', function()
         local a, b = give(vessel(1)), Game.lay(vessel(0), Game.square(11, 10), { 0.3, 0.7, 0 })
+        getPlayerLoot():refreshBackpacks()
         local job = Game.run(pour(entry(a), { entry(b, Game.floor) }))
+        assert(job.state == 'finished' and near(b.world.fluid.amount, 1) and b.world.pose[1] == 0.3, job.reason)
+    end)
+
+    case('a ground vessel is carried to a fixture and set down on the same spot', function()
+        local b = Game.lay(vessel(0), Game.square(11, 10), { 0.3, 0.7, 0 })
+        getPlayerLoot():refreshBackpacks()
+        local object = Game.fixture(Game.square(10, 11), 50)
+        Game.square(10, 11).objects:add(object)
+        local anchor = { object = object, square = object.square, primary = object:getPrimaryFluid(), tainted = false, name = 'Sink', capacity = 100 }
+        local job = Game.run(assert(Fixture.new(player, Game.world, anchor, true, { entry(b, Game.floor) })))
         local w = Game.square(11, 10).ground:get(0)
-        assert(job.state == 'finished' and w and w.item.id == b.id and near(w.item.fluid.amount, 1), job.reason)
-        assert(w.pose[1] == 0.3 and w.pose[2] == 0.7)
+        assert(job.state == 'finished' and w and w.item.id == b.id and near(w.fluid.amount, 1) and w.pose[2] == 0.7, job.reason)
     end)
 
     case('a batch never mixes into a vessel someone filled meanwhile', function()
@@ -145,7 +154,9 @@ for _, mp in ipairs({ false, true }) do
         local a, b = give(vessel(1)), give(vessel(0))
         local target = entry(b)
         player.main:take(b)
-        local job = Game.run(pour(entry(a), { target }))
+        local job = pour(entry(a), { target })
+        job.adopted = true
+        Game.run(job)
         HaloTextHelper = nil
         assert(job.state == 'cancelled' and said and said:find('gone'), tostring(said))
     end)

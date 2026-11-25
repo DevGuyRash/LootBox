@@ -210,9 +210,12 @@ function getCell() return { getGridSquare = function(_, x, y, z) return squares[
 -- Lays an item on a tile; the loot window's floor container lists it when open.
 function Game.lay(item, square, pose)
     if item.container then item.container:take(item) end
-    local w = { isWorldItem = true, item = item, square = square, pose = pose or { 0.5, 0.5, 0 }, fluid = nil }
+    local w = { isWorldItem = true, item = item, square = square, pose = pose or { 0.5, 0.5, 0 }, fluid = item.fluid }
+    -- Standing on the ground, a vessel's liquid belongs to its world object.
+    if w.fluid then w.fluid.owner = w end
     function w:getItem() return self.item end
     function w:getSquare() return self.square end
+    function w:isMultiTileMoveable() return false end
     function w:isExtendedPlacement() return false end
     function w:isExistInTheWorld() return true end
     function w:getOffX() return self.pose[1] end
@@ -225,7 +228,11 @@ function Game.lay(item, square, pose)
     return item
 end
 function Game.lift(item)
-    if item.world then item.world.square.ground:remove(item.world); item.world = nil end
+    if item.world then
+        item.world.square.ground:remove(item.world)
+        if item.fluid then item.fluid.owner = item end
+        item.world = nil
+    end
     if item.container then item.container:take(item) end
 end
 
@@ -306,6 +313,11 @@ function Queue:onCompleted(action)
         if self.current:isValidStart() then self.current:begin() else self:resetQueue() end
     end
 end
+-- The game clears a queue whose first action the engine no longer runs.
+function Queue:tick()
+    local first = self.queue[1]
+    if first and not self.character.actions:contains(first.action) then self:resetQueue() end
+end
 function Queue:resetQueue()
     for _, a in ipairs(self.queue) do if not a:isStarted() then a:forceCancel() end end
     self.queue, self.current = {}, nil
@@ -324,7 +336,8 @@ local function derive(name)
 end
 function Base.create(class, player, fields)
     local o = setmetatable(fields or {}, class)
-    o.character, o.stopOnWalk, o.stopOnRun, o.stopOnAim = player, true, true, true
+    o.character = player
+    for _, name in ipairs({ "stopOnWalk", "stopOnRun", "stopOnAim" }) do if o[name] == nil then o[name] = true end end
     if o.duration == nil then o.duration = 500 end
     return o
 end
@@ -382,13 +395,21 @@ function Game.tick(ms)
     if Game.onTick then Game.onTick() end
     local p = Game.player
     local java = p.actions:get(0)
+    local halted = java and java.started and (p.moving and java.table.stopOnWalk or p.running and java.table.stopOnRun
+        or p.aiming and java.table.stopOnAim)
+    if halted then
+        -- Walking, running and aiming stop the action, then drop whatever has started since.
+        java.gone = true
+        java.table:stop()
+        p.actions.values = {}
+        return
+    end
     if java then
         local action = java.table
         local valid = action:isValid()
         if valid and not java.started then Game.tryStart(p, java)
         elseif valid and java.started then
             action:update()
-            if p.moving and action.stopOnWalk or p.running and action.stopOnRun or p.aiming and action.stopOnAim then java.stopNow = true end
             if Game.client then
                 if java.done then java.completeNow = true elseif java.rejected then java.stopNow = true end
             elseif Game.now - java.at >= action.duration then java.completeNow = true end
@@ -403,14 +424,14 @@ function Game.tick(ms)
                 java.gone = true
                 if java.started then action:stop() end
                 p.actions:remove(java)
-                local q = ISTimedActionQueue.getTimedActionQueue(p)
-                if not java.started and q.current == action then q:resetQueue() end
             end
         end
     end
 end
 function Game.run(flow, frames)
     for _ = 1, frames or 400 do
+        ISTimedActionQueue.getTimedActionQueue(Game.player):tick()
+        require("LootBox/Act").restore()
         flow:tick()
         if not flow:isBusy() then return flow end
         Game.tick(100)
@@ -472,7 +493,6 @@ function ISInventoryTransferAction:effect()
     local arrival = Game.client and Game.replica(item) or item
     return { function()
         if item.world then
-            if item.world.fluid then arrival.fluid = Game.fluid(arrival, item.world.fluid.capacity, item.world.fluid.amount, item.world.fluid.name) end
             Game.lift(item)
         else from:take(item) end
     end, function()
@@ -537,7 +557,7 @@ CraftRecipeManager = {
 }
 ISHandcraftAction = derive("ISHandcraftAction")
 function ISHandcraftAction:new(player, recipe, item)
-    return Base.create(self, player, { craftRecipe = recipe, item = item, manualInputs = { list({ item }) }, duration = 700 })
+    return Base.create(self, player, { craftRecipe = recipe, item = item, manualInputs = { list({ item }) }, duration = 700, stopOnAim = false })
 end
 function ISHandcraftAction:effect()
     local p, item, spec = self.character, Game.player.main:getItemWithID(self.item.id), self.craftRecipe.spec
@@ -575,14 +595,28 @@ local function fetchFirst(player, item)
     if item.container ~= player.main then ISTimedActionQueue.add(ISInventoryTransferAction:new(player, item, item.container, player.main)) end
     return item.container
 end
+ISUnequipAction = derive("ISUnequipAction")
+function ISUnequipAction:new(player, item) return Base.create(self, player, { item = item, duration = 300 }) end
+function ISUnequipAction:effect() return { function() Game.player.mask, Game.player.maskOff = nil, self.item end } end
+ISWearClothing = derive("ISWearClothing")
+function ISWearClothing:new(player, item) return Base.create(self, player, { item = item, duration = 300 }) end
+function ISWearClothing:effect() return { function() Game.player.mask, Game.player.maskOff = self.item, nil end } end
+local function unmask()
+    local mask = Game.player.mask
+    if mask then ISTimedActionQueue.add(ISUnequipAction:new(Game.player, mask)) end
+    return mask
+end
 ISInventoryPaneContextMenu = {
+    getEatingMask = function(player) return player.mask end,
     OnNewCraft = function(item, recipe)
         fetchFirst(Game.player, item)
         ISTimedActionQueue.add(ISHandcraftAction:new(Game.player, recipe, item))
     end,
     eatItem = function(item, share)
         local from = fetchFirst(Game.player, item)
+        local mask = unmask()
         ISTimedActionQueue.add(ISEatFoodAction:new(Game.player, item, share))
+        if mask then ISTimedActionQueue.add(ISWearClothing:new(Game.player, mask)) end
         if from ~= Game.player.main then ISTimedActionQueue.add(ISInventoryTransferAction:new(Game.player, item, Game.player.main, from)) end
     end,
     onDrinkFluid = function(target, share)
@@ -636,7 +670,7 @@ function Game.fixture(square, litres, name)
     local o = { square = square, litres = litres, name = name or "Water", isFixture = true }
     function o:getSquare() return square end
     function o:getObjectIndex() return 0 end
-    function o:getPrimaryFluid() return kinds[self.name] end
+    function o:getPrimaryFluid() return self.litres > 0 and kinds[self.name] or nil end
     function o:isTaintedWater() return false end
     function o:getFluidAmount() return self.litres end
     function o:getFluidCapacity() return 100 end
@@ -651,6 +685,7 @@ ISTakeWaterAction = derive("ISTakeWaterAction")
 function ISTakeWaterAction:new(player, item, object)
     return Base.create(self, player, { item = item, waterObject = object, waterUnit = math.min(item.fluid.capacity - item.fluid.amount, object.litres) })
 end
+function ISTakeWaterAction:isValid() return self.waterObject:hasFluid() and carried(self) end
 function ISTakeWaterAction:effect()
     local item, object, litres = Game.player.main:getItemWithID(self.item.id), self.waterObject, self.waterUnit
     return { function() item.fluid.name = item.fluid.name or object.name; item.fluid.amount, object.litres = item.fluid.amount + litres, object.litres - litres end }
