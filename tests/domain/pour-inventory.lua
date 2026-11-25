@@ -48,7 +48,7 @@ local function fixture()
     function p:getInventory() return self.main end
     function p:getPrimaryHandItem() return self.primary end
     function p:getSecondaryHandItem() return self.secondary end
-    function p:getAttachedItems() return {contains=function(_,i) return self.gear[i]==true end} end
+    function p:isEquipped(i) return self.gear[i]==true end
     local loot, world=container(), {}
     function world:consumptionSource(i,c)
         return c==loot and not self.deny and i.container==loot
