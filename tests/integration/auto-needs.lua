@@ -137,11 +137,45 @@ run('MP native can settlement starts no bite; later hunger reselects only safe r
  assert(attempts==1);first.state='finished';first.count=0;first.mpOpenedInputRetired=true
  step(5000);step(10000);assert(attempts==1)
  step(20000);assert(attempts==1,'a second can in this hunger episode is never opened')
- seal=nil;step(26000);assert(attempts==2 and kindSeen=='food')
- first.state='finished';first.count=1;stats.h=.1;step(30000);seal={source=main};stats.h=.52;step(50000)
+ seal=nil;step(26000);assert(attempts==1,'the empty search waits out the cooldown')
+ step(33000);assert(attempts==2 and kindSeen=='food')
+ first.state='finished';first.count=1;stats.h=.1;step(40000);seal={source=main};stats.h=.52;step(60000)
  assert(attempts==3,'a later distinct need can open a can again')
 end)
 run('rejected MP craft blocks even ready food in the same unresolved hunger episode',function()
  client=true;options.autoConsumeCarried=true;stats.h=.55;seal={source=main};selected.food=object;step(0)
  first.state='failed';seal=nil;step(5000);step(30000);assert(attempts==1)
+end)
+
+run('an interrupted meal is tried again after the cooldown; an unconfirmed one is not',function()
+ options.autoConsumeCarried=true;stats.h=.6;selected.food=object;step(0);assert(attempts==1)
+ first.state='cancelled';step(4000);step(9000);assert(attempts==1,'within the cooldown')
+ step(16500);assert(attempts==2,'walking away once does not end eating')
+ first.state='cancelled';step(21000);step(33000);assert(attempts==3)
+ first.state='failed';step(37000);step(60000);step(90000);assert(attempts==3)
+end)
+run('an attempt the game refuses outright backs off for a minute',function()
+ options.autoConsumeCarried=true;stats.h=.6;selected.food=object;step(0)
+ first.state='cancelled';first.goal='food';step(4000)
+ step(30000);step(60000);assert(attempts==1);step(64500);assert(attempts==2)
+end)
+run('a search that finds nothing is not repeated before the cooldown',function()
+ options.autoConsumeCarried=true;stats.h=.6;stats.t=.6
+ step(0);assert(checks==2,'one search per need')
+ step(4000);step(8000);step(11900);assert(checks==2)
+ step(16000);assert(checks==4)
+ selected.food=object;step(24000);assert(attempts==0);step(30000);assert(attempts==1)
+end)
+run('the controller and its trace share the automatic interaction',function()
+ local Log=require 'LootBox/Log'
+ local intent,saved=nil,Log.intent
+ Log.intent=function(origin,label) intent={origin,label};return 314 end
+ options.autoConsumeCarried=true;stats.h=.6;selected.food=object
+ local policy
+ local till=package.loaded['LootBox/TillFull']
+ local make=till.new
+ till.new=function(a,b,c,d,e,f,g,automatic) policy=automatic;return make(a,b,c,d,e,f,g,automatic) end
+ step(0)
+ till.new,Log.intent=make,saved
+ assert(intent[1]=='auto' and intent[2]=='eat' and policy.interaction==314)
 end)

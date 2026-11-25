@@ -961,5 +961,32 @@ test('Til Full bounded partial and no-progress outcomes do not claim full', func
  assert(cards[2].detail=='2s' and cards[2].note:find('not fully confirmed',1,true))
  PZActionCompletionHUD=nil
 end)
+test('offers answers without starting anything',function()
+ local ok,why=Full.offers(player(.4,0),world,{food(1,.2)},'food');assert(ok and #created.calls==0)
+ ok,why=Full.offers(player(0,0),world,{food(1,.2)},'food');assert(not ok and why:find('no need',1,true))
+ local bad=food(1,.2);bad.unsafe=true
+ ok,why=Full.offers(player(.4,0),world,{bad},'food');assert(not ok and why:find('not safe',1,true))
+ ok,why=Full.offers(player(.4,0),world,{},'food');assert(not ok and why)
+end)
+test('the trace carries the clicked interaction, the plan and the measured outcome',function()
+ local Log=require 'LootBox/Log'
+ local lines,saved={},{}
+ for _,level in ipairs({'trace','info','warn'}) do
+  saved[level]=Log[level]
+  Log[level]=function(id,event,...)
+   local line={id=id,event=event}
+   for n=1,select('#',...),2 do line[(select(n,...))]=(select(n+1,...)) end
+   lines[event]=line
+  end
+ end
+ local p=player(.1,0);local f=food(1,.2);local items={f};items.interaction=88
+ local c=assert(Full.new(p,world,items,'food'));assert(c.interaction==88)
+ c:tick();f.h=.1;p.h=0;c:tick()
+ local failed=assert(Full.new(player(.5,0),world,{food(2,.2)},'food'));failed:tick();failed:tick();now=now+2001;failed:tick()
+ for level,write in pairs(saved) do Log[level]=write end
+ assert(c.state=='finished' and lines.START and lines.OP and lines.CONFIRMED)
+ assert(failed.state=='failed' and lines.UNCONFIRMED.improved==false and lines.UNCONFIRMED.hunger==.5
+  and lines.UNCONFIRMED.quantityExpected=='0.000000' and lines.END.state=='failed' and failed.interaction)
+end)
 print('Til Full controller: '..count..' scenarios passed')
 
