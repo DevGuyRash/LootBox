@@ -99,6 +99,29 @@ for _, mp in ipairs({ false, true }) do
         assert(job.state == 'finished' and near(player.hunger, 0) and Game.consumed == 1, job.reason)
     end)
 
+    case('something dropped beside the player is not mistaken for the result', function()
+        player.hunger = 0.16
+        local shell = give(closed())
+        local other
+        Game.after(300, function() other = Game.lay(Game.item('Base.CanOpen', { food = { hunger = 0.16 } }), Game.square(11, 10)) end)
+        local job = Game.run(start({ shell }, 'food', can))
+        assert(job.state == 'finished' and other.world and near(other.food.hunger, 0.16), job.reason)
+    end)
+
+    case('a follow-up that never ends does not hold it for ever', function()
+        player.hunger = 0.16
+        local bag = Game.item('Base.Bag')
+        bag.inside = Game.container('bag', { bag = bag })
+        give(bag)
+        local snack = bag.inside:put(food(0.3))
+        local valid = ISInventoryTransferAction.isValid
+        local job = start({ snack }, 'food')
+        Game.after(1500, function() ISInventoryTransferAction.waitToStart = function() return true end end)
+        for _ = 1, 3000 do job:tick(); if not job:isBusy() then break end; Game.tick(100) end
+        ISInventoryTransferAction.waitToStart = nil
+        assert(job.state == 'finished' and valid, job.state)
+    end)
+
     case('other carried things may come and go mid-opening', function()
         player.hunger = 0.16
         local shell, junk = give(closed()), give(Game.item('Base.Junk'))

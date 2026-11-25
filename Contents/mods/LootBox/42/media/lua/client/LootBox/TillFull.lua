@@ -222,7 +222,10 @@ end
 
 function TillFull:plannedPortion(hunger, thirst, effects)
     -- A closed package has no nutrition of its own: open it when it can help.
-    if effects.opening and effects.hunger == nil then return (self.goal == "fluid" and thirst or hunger) > 0 and 1 or 0 end
+    if effects.opening and effects.hunger == nil then
+        local need = self.goal == "fluid" and thirst or hunger
+        return (self.both and math.max(hunger, thirst) or need) > 0 and 1 or 0
+    end
     return TillFull.portion(hunger, thirst, effects.hunger, effects.thirst, self.both, self.goal)
 end
 

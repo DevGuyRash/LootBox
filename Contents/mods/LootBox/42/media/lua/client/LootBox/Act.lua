@@ -102,7 +102,7 @@ local function hookMain(self, action)
         return result
     end
     action.perform = function(performing, ...)
-        self.performed = true
+        self.performed, self.performedAt = true, Clock.now()
         if self.onPerform then Log.guard("Act.onPerform", self.onPerform, performing) end
         return perform(performing, ...)
     end
@@ -183,11 +183,14 @@ function Act:poll()
     local busy = false
     for action in pairs(self.owned) do if queued(queue, action) then busy = true; break end end
     if busy then
-        if not self.performed then
+        if self.performed then
+            -- Follow-ups are the game's own; do not wait on them for ever.
+            if Clock.now() - self.performedAt < self.limit then return nil end
+        else
             if Clock.now() - self.startedAt >= self.limit then self:cancel("The action took too long")
             elseif self.problem or not allowed(self, "run") then self:cancel(self.problem) end
+            return nil
         end
-        return nil
     end
     local ok = self.performed == true
     local why = not ok and (self.problem or "The action ended early") or nil

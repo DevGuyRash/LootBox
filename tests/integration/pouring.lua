@@ -81,7 +81,7 @@ for _, mp in ipairs({ false, true }) do
     case('stopping says which vessel is still carried', function()
         local a, b = give(vessel(1)), shelf:put(vessel(0))
         local job = pour(entry(a), { entry(b, shelf) })
-        Game.onTick = function() if now(b) and job.targets[1].loan.out then job:cancel() end end
+        Game.onTick = function() if now(b) then job:cancel() end end
         Game.run(job)
         assert(job.state == 'cancelled' and job.reason:find('In your inventory: Base.Vessel'), job.reason)
     end)
@@ -111,6 +111,43 @@ for _, mp in ipairs({ false, true }) do
         local w = Game.square(11, 10).ground:get(0)
         assert(job.state == 'finished' and w and w.item.id == b.id and near(w.item.fluid.amount, 1), job.reason)
         assert(w.pose[1] == 0.3 and w.pose[2] == 0.7)
+    end)
+
+    case('a batch never mixes into a vessel someone filled meanwhile', function()
+        local a, b, c = give(vessel(2, 2)), give(vessel(0)), give(vessel(0))
+        local job = pour(entry(a), { entry(b), entry(c) })
+        Game.after(300, function() c.fluid.amount, c.fluid.name = 0.5, 'Cola' end)
+        Game.run(job)
+        assert(job.state == 'cancelled' and job.count == 1 and near(c.fluid.amount, 0.5), job.reason)
+    end)
+
+    case('a pour that moves nothing is not a success, however small', function()
+        local a, b = give(vessel(0.01)), give(vessel(0))
+        Game.pourFails = true
+        local job = Game.run(pour(entry(a), { entry(b) }))
+        assert(job.state == 'cancelled' and job.count == 0, job.reason)
+    end)
+
+    case('a vessel that could not be put back is named', function()
+        local a, b = give(vessel(1)), shelf:put(vessel(0))
+        local put = shelf.put
+        shelf.put = function(self, i) if now(i) == nil and job_started then return player.main:put(i) end return put(self, i) end
+        local job = pour(entry(a), { entry(b, shelf) })
+        job_started = true
+        Game.run(job)
+        job_started = nil
+        assert(job.state == 'cancelled' and job.reason:find('In your inventory'), job.reason)
+    end)
+
+    case('a refusal before anything starts is said aloud', function()
+        local said
+        HaloTextHelper = { addBadText = function(_, text) said = text end }
+        local a, b = give(vessel(1)), give(vessel(0))
+        local target = entry(b)
+        player.main:take(b)
+        local job = Game.run(pour(entry(a), { target }))
+        HaloTextHelper = nil
+        assert(job.state == 'cancelled' and said and said:find('gone'), tostring(said))
     end)
 
     case('keep and favorite vessels are not fetched', function()

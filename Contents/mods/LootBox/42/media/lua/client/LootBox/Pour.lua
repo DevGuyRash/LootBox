@@ -42,7 +42,9 @@ end
 function Pour:live(vessel)
     local live, why = Inventory.current(self.player, self.world, vessel.entry)
     if not live then return nil, why end
-    if live.amount > 0 and vessel.mix and not vessel.filled and not Inventory.sameLiquid(Inventory.mix(live) or {}, vessel.mix) then
+    -- An empty vessel someone has filled meanwhile would mix.
+    local expected = vessel.mix or vessel ~= self.source and self.source.mix or nil
+    if live.amount > 0 and expected and not vessel.done and not Inventory.sameLiquid(Inventory.mix(live) or {}, expected) then
         return nil, "The liquid changed"
     end
     return live
@@ -55,7 +57,7 @@ end
 
 function Pour:putBack(vessel)
     Vessels.giveBack(self, vessel.loan, function() end, function(why)
-        vessel.loan.lost, vessel.loan.out = true, false
+        vessel.loan.lost = true
         self:unwind(why)
     end)
 end
@@ -70,7 +72,8 @@ end
 
 function Pour:next()
     local target = self.targets[self.index]
-    if target and target.loan and target.loan.out and (target.done or self.ending) then return self:putBack(target) end
+    local function out(vessel) return vessel.loan and not vessel.loan.lost and Vessels.held(self, vessel.loan) end
+    if target and out(target) and (target.done or self.ending) then return self:putBack(target) end
     if target and target.done then self.index, target = self.index + 1, self.targets[self.index + 1] end
     local source, problem = nil, nil
     if not self.ending then
@@ -81,24 +84,26 @@ function Pour:next()
     if not self.ending then
         local live, why = self:live(target)
         if not live then self:unwind(why)
-        elseif self.source.loan and not self.source.loan.out then return self:fetch(self.source, source)
-        elseif target.loan and not target.loan.out then return self:fetch(target, live)
+        elseif self.source.loan and not out(self.source) then return self:fetch(self.source, source)
+        elseif target.loan and not out(target) then return self:fetch(target, live)
         else
             return Vessels.pour(self, source.item, live.item, {
-                done = function() self.count, target.done, target.filled = self.count + 1, true, true end,
+                done = function() self.count, target.done = self.count + 1, true end,
                 failed = function(why) self:unwind(why) end })
         end
     end
-    if self.source.loan and self.source.loan.out then return self:putBack(self.source) end
+    if out(self.source) then return self:putBack(self.source) end
     return self:finish(self.ending.state, self.ending.reason)
 end
 
 -- Where each fetched vessel was left, when it could not be put back.
 function Pour:left()
     local names = {}
-    for _, vessel in ipairs({ self.source, self.targets[self.index] }) do
-        if vessel.loan and (vessel.loan.out or vessel.loan.lost) then names[#names + 1] = Inventory.vesselName(vessel.entry) end
+    local function add(vessel)
+        if Vessels.held(self, vessel.loan) then names[#names + 1] = Inventory.vesselName(vessel.entry) end
     end
+    add(self.source)
+    for _, vessel in ipairs(self.targets) do add(vessel) end
     return #names > 0 and "In your inventory: " .. table.concat(names, ", ") or nil
 end
 
@@ -110,7 +115,8 @@ end
 
 function Pour:card()
     return { title = self.state == "finished" and "Pour complete" or "Pour stopped",
-        detail = { self.count .. (self.count == 1 and " vessel" or " vessels"), string.format("%.2f L", self.liters) } }
+        detail = { self.count .. (self.count == 1 and " vessel" or " vessels"), string.format("%.2f L", self.liters) },
+        note = self.count < self.total and self.reason or nil }
 end
 
 return Pour

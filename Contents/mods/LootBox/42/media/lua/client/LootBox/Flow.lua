@@ -79,7 +79,11 @@ function Flow:finish(state, reason)
     emit(self.interaction, "END", "op", self.action, "state", state, "reason", reason, "done", self.count, "of", self.total,
         "litres", self.liters > 0 and string.format("%.3f", self.liters) or nil, "submitted", self.launched == true,
         "elapsedMs", Clock.now() - self.startedAt, "player", Log.player(self.player))
-    if self.launched and not self.silent and not self.automatic then
+    local shown = not self.silent and not self.automatic
+    if shown and not good and not self.launched and HaloTextHelper and HaloTextHelper.addBadText then
+        HaloTextHelper.addBadText(self.player, tostring(reason))
+    end
+    if self.launched and shown then
         local card = Log.guard("Flow.card", self.card, self)
         if card then
             Feedback.show(self.player, card.title, card.detail or {}, Clock.now() - self.startedAt, not good and "stopped" or nil,

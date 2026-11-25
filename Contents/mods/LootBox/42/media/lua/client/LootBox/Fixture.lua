@@ -28,10 +28,10 @@ function Fixture:stop(state, reason) self.ending = self.ending or { state = stat
 function Fixture:next()
     local player, anchor, entry = self.player, self.anchor, self.entries[self.index]
     local loan = entry and entry.loan
-    if loan and loan.out and (entry.done or self.ending) then
+    if loan and not loan.lost and Vessels.held(self, loan) and (entry.done or self.ending) then
         return Vessels.giveBack(self, loan, function() end, function(why)
-            loan.out, loan.lost = false, true
-            self:stop("cancelled", tostring(why) .. ". It is in your inventory")
+            loan.lost = true
+            self:stop("cancelled", why)
         end)
     end
     if entry and entry.done then self.index, entry = self.index + 1, self.entries[self.index + 1] end
@@ -106,9 +106,17 @@ function Fixture:pour(entry, live)
     end, function(why) self:stop("cancelled", why) end)
 end
 
+function Fixture:finish(state, reason)
+    for _, entry in ipairs(self.entries) do
+        if Vessels.held(self, entry.loan) then reason = tostring(reason) .. ". In your inventory: " .. Inventory.vesselName(entry) end
+    end
+    return Flow.finish(self, state, reason)
+end
+
 function Fixture:card()
     return { title = self.state == "finished" and "Pour complete" or "Pour stopped",
-        detail = { self.count .. (self.count == 1 and " vessel" or " vessels"), string.format("%.2f L", self.liters) } }
+        detail = { self.count .. (self.count == 1 and " vessel" or " vessels"), string.format("%.2f L", self.liters) },
+        note = self.count < self.total and self.reason or nil }
 end
 
 return Fixture

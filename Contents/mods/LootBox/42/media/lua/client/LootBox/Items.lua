@@ -102,12 +102,11 @@ function Items.watch(player, opts)
     return watch
 end
 
--- Where the item ended up, best first. The game drops a result at the player's
--- feet when they are overloaded.
+-- A carried answer before one on the ground. The game drops a result on the
+-- player's own tile when they are overloaded.
 local function rank(player, place)
-    if place == player:getInventory() then return 3 end
-    if place == player:getCurrentSquare() then return 1 end
-    return place.getItems and 2 or 0
+    if not place.getItems then return place == player:getCurrentSquare() and 0 or nil end
+    return place == player:getInventory() and 2 or 1
 end
 
 -- The result: an item, its holder (nil on the ground), and whether it is the
@@ -126,10 +125,12 @@ function Watch:find()
         local score = self.makes(item)
         if not score then return end
         score = type(score) == "number" and score or 0
-        matches = matches + 1
         local placed = rank(self.player, place)
-        if not best or score > bestScore or score == bestScore and (placed > bestRank
-            or placed == bestRank and id < best:getID()) then
+        if not placed then return end
+        matches = matches + 1
+        local carried, bestCarried = placed > 0, bestRank ~= nil and bestRank > 0
+        if not best or carried and not bestCarried or carried == bestCarried and (score > bestScore
+            or score == bestScore and (placed > bestRank or placed == bestRank and id < best:getID())) then
             best, bestHolder, bestScore, bestRank = item, place.getItems and place or nil, score, placed
         end
     end

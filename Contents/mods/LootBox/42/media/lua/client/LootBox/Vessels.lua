@@ -54,7 +54,7 @@ function Vessels.pour(flow, source, target, opts)
     end
     Log.trace(flow.interaction, "POUR", "litres", string.format("%.3f", amount), "from", Log.item(source, flow.player),
         "into", Log.item(target, flow.player))
-    local enough = amount - math.max(Vessels.TOLERANCE, amount * 0.02)
+    local enough = math.max(amount * 0.5, amount - math.max(Vessels.TOLERANCE, amount * 0.02))
     local function full()
         local litres = gained()
         if litres >= enough then return litres end
@@ -101,7 +101,6 @@ function Vessels.fetch(flow, loan, done, failed)
     flow:act({ op = "fetch", allow = loan.allow, begin = function()
         ISTimedActionQueue.add(ISInventoryTransferUtil.newInventoryTransferAction(flow.player, loan.item, loan.from, main))
     end }, function()
-        loan.out = true
         flow:await(function() return main:getItemWithID(loan.id) end, function(item)
             loan.item = item
             Log.trace(flow.interaction, "FETCHED", "item", Log.item(item, flow.player), "from", Log.container(loan.from, flow.player))
@@ -126,7 +125,6 @@ function Vessels.giveBack(flow, loan, done, failed)
             ISTimedActionQueue.add(ISInventoryTransferUtil.newInventoryTransferAction(player, item, player:getInventory(), loan.from))
         end
     end }, function()
-        loan.out = false
         flow:await(function()
             if loan.spot then return (Items.eachNearby(player, function(candidate) return candidate:getID() == loan.id end)) end
             return loan.from:getItemWithID(loan.id)
@@ -134,8 +132,18 @@ function Vessels.giveBack(flow, loan, done, failed)
             loan.item = back
             Log.trace(flow.interaction, "RETURNED", "item", Log.item(back, player), "to", Log.container(loan.from, player))
             return done(back)
-        end, function() return done(nil) end)
+        end, function()
+            if Vessels.held(flow, loan) then return failed("The vessel could not be put back") end
+            return done(nil)
+        end)
     end, failed)
+end
+
+-- A vessel that was fetched and is still with the player.
+function Vessels.held(flow, loan)
+    if not loan or not loan.item then return false end
+    local _, _, place = Items.find(flow.player, loan.id)
+    return place == "carried"
 end
 
 return Vessels

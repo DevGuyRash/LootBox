@@ -96,8 +96,8 @@ function Dispenser:stand(what)
 end
 
 function Dispenser:jug()
-    if self.jugId then return (Items.find(self.player, self.jugId)) end
-    return self.watch and self.watch:find() or nil
+    if self.jugId then return Items.find(self.player, self.jugId) end
+    if self.watch then return self.watch:find() end
 end
 
 local function handle(self, stand, jug, done)
@@ -120,7 +120,10 @@ function Dispenser:giveUp(reason)
 end
 
 function Dispenser:finish(state, reason)
-    if state ~= "finished" and self:jug() then reason = tostring(reason) .. ". The bottle is in your inventory" end
+    local jug, holder = self:jug()
+    if state ~= "finished" and jug then
+        reason = tostring(reason) .. (holder and ". The bottle is in your inventory" or ". The bottle is on the ground beside you")
+    end
     return Flow.finish(self, state, reason)
 end
 
