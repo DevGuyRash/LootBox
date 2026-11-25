@@ -34,7 +34,7 @@ function Describe.container(container)
     local parent = call(container, "getParent")
     if parent and instanceof(parent, "IsoPlayer") then return "main inventory" end
     if parent and instanceof(parent, "IsoDeadBody") then return "corpse" end
-    local custom = call(container, "getCustomName")
+    local custom = parent and call(container, "getCustomName") -- the game throws without an owner
     if type(custom) == "string" and custom ~= "" then return custom end
     local raw = tostring(call(container, "getType") or "container")
     if raw == "floor" then return "the ground" end

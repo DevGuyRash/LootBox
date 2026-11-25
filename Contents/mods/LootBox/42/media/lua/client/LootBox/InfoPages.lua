@@ -112,7 +112,7 @@ end
 function HelpPage.choose(page, id)
     page.topic = Help.get(id)
     local rows = {}
-    for _, topic in ipairs(Help.topics) do rows[#rows + 1] = { title = topic.title, id = topic.id, current = topic.id == page.topic.id, tooltip = topic.summary } end
+    for _, topic in ipairs(Help.topics) do rows[#rows + 1] = { title = topic.title, id = topic.id, current = topic.id == page.topic.id } end
     page.list:fill(rows, true)
     page.text:set(render(page.topic))
     page.try:setVisible(page.topic.request ~= nil and getSpecificPlayer(page.win.playerIndex) ~= nil)

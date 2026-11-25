@@ -15,6 +15,7 @@ local K = {}
 K.FONT, K.TITLE = UIFont.Small, UIFont.Medium
 K.LINE = getTextManager():getFontHeight(K.FONT)
 K.ROW = K.LINE + 12
+K.ENTRY = K.LINE + 8
 K.PAD = 12
 K.GAP = 8
 
@@ -76,6 +77,21 @@ function K.place(widget, x, y, width, height)
     if y and widget.y ~= y then widget:setY(y) end
     if width and widget.width ~= width then widget:setWidth(math.max(1, width)) end
     if height and widget.height ~= height then widget:setHeight(math.max(1, height)) end
+end
+
+-- Anchors move a scrollbar by the change in size, which drifts when a widget is
+-- placed several times. Pin it to the frame instead.
+local function pinScrollBar(widget)
+    local native = widget.prerender
+    function widget:prerender()
+        local bar = self.vscroll
+        if bar then
+            bar:setAnchorRight(false); bar:setAnchorBottom(false)
+            if bar.height ~= self.height then bar:setHeight(self.height) end
+            if bar.x ~= self.width - bar.width then bar:setX(self.width - bar.width) end
+        end
+        if native then native(self) end
+    end
 end
 
 function K.tip(widget, text)
@@ -242,6 +258,7 @@ function K.rich(parent)
     child:setMargins(0, 2, 16, 2)
     parent:addChild(child)
     child:addScrollBars()
+    pinScrollBar(child)
     function child:set(text)
         if self.shown == text then return end
         self.shown, self.text = text, text
@@ -254,7 +271,7 @@ end
 -- Entry ------------------------------------------------------------------
 
 function K.entry(parent, placeholder, target, changed)
-    local child = ISTextEntryBox:new("", 0, 0, 100, K.ROW)
+    local child = ISTextEntryBox:new("", 0, 0, 100, K.ENTRY)
     child:initialise()
     child:instantiate()
     child.backgroundColor, child.borderColor = { r = 0, g = 0, b = 0, a = 0.5 }, K.color("line", 0.18)
@@ -294,7 +311,7 @@ function K.list(parent, target, click)
     child:initialise()
     child:instantiate()
     child.font, child.itemheight, child.selected = K.FONT, K.ROW, 0
-    child.drawBorder = true
+    child.drawBorder, child.doRepaintStencil = true, true
     child.backgroundColor, child.borderColor = { r = 0, g = 0, b = 0, a = 0.28 }, K.color("line")
     child.onmousedown = nil
     if click then
@@ -358,10 +375,12 @@ function K.list(parent, target, click)
             end
         end
         local x = K.GAP + (row.indent or 0) * 14
+        local textTop = y + math.floor((height - (row.sub and 2 * K.LINE or K.LINE)) / 2)
+        local shownLine = visible(textTop, K.LINE)
         if row.check ~= nil then
             local box = math.floor(K.LINE * 0.8)
             local by = y + math.floor((height - box) / 2)
-            if visible(by, box) then
+            if shownLine and visible(by, box) then
                 local c = row.check and K.colors.accent or K.colors.faint
                 self:drawRectBorder(x, by, box, box, 1, c.r, c.g, c.b)
                 if row.check then self:drawRect(x + 3, by + 3, box - 6, box - 6, 1, c.r, c.g, c.b) end
@@ -371,17 +390,16 @@ function K.list(parent, target, click)
         if row.icon ~= nil then
             local size = math.min(height - 6, K.LINE + 8)
             local iy = y + math.floor((height - size) / 2)
-            if row.icon and visible(iy, size) then self:drawTextureScaledAspect(row.icon, x, iy, size, size, 1, 1, 1, 1) end
+            if row.icon and shownLine and visible(iy, size) then self:drawTextureScaledAspect(row.icon, x, iy, size, size, 1, 1, 1, 1) end
             x = x + size + K.GAP
         end
-        local textTop = y + math.floor((height - (row.sub and 2 * K.LINE or K.LINE)) / 2)
-        if row.right and visible(textTop, K.LINE) then
+        if row.right and shownLine then
             local c = K.colors[row.rightTone or "dim"]
             local shown = K.fit(row.right, math.max(60, (right - x) * 0.55))
             self:drawTextRight(shown, right, textTop, c.r, c.g, c.b, 1, K.FONT)
             right = right - K.width(shown) - K.PAD
         end
-        if visible(textTop, K.LINE) then
+        if shownLine then
             local c = K.colors[row.tone or "text"]
             self:drawText(K.fit(row.title, right - x), x, textTop, c.r, c.g, c.b, 1, K.FONT)
         end
@@ -402,6 +420,7 @@ function K.list(parent, target, click)
             end
         end
     end
+    pinScrollBar(child)
     parent:addChild(child)
     return child
 end

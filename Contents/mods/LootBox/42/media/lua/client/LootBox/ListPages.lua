@@ -121,7 +121,7 @@ function Categories.layout(page)
     K.place(page.list, 0, 0, left, body.height - K.ROW - K.GAP)
     K.place(page.add, 0, body.height - K.ROW, left)
     local x, width = left + K.GAP, body.width - left - K.GAP
-    K.place(page.name, x, 0, width)
+    K.place(page.name, x, 2, width)
     K.place(page.save, x + width - page.save.width, body.height - K.ROW)
     K.place(page.remove, x, body.height - K.ROW)
     K.place(page.message, x + page.remove.width + K.GAP, body.height - K.ROW + 6, width - page.save.width - page.remove.width - 2 * K.GAP, K.LINE)
@@ -204,8 +204,8 @@ function Storage.choose(page, container, key, labels)
         page.picker:setSelection({ ids = listOf(labels), types = {} }, true)
     else
         page.title:set("Choose a container on the left.", "dim")
-        page.picker:setSelection({ ids = {}, types = {} }, true)
     end
+    page.picker:setVisible(container ~= nil or key ~= nil)
     Storage.refresh(page)
 end
 
@@ -225,7 +225,7 @@ function Storage.opened(page, context)
         Storage.choose(page, container, instance.world:key(container), instance:labels(container))
     elseif page.container and instance.world:key(page.container) == page.key then
         Storage.choose(page, page.container, page.key, instance:labels(page.container))
-    else Storage.choose(page, nil) end
+    else Storage.choose(page, nil, nil) end
 end
 
 function Storage.layout(page)

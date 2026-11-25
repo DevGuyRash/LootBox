@@ -110,7 +110,7 @@ function Picker:layout(x, y, width, height)
     local left = math.floor((width - K.GAP) * 0.56)
     local right = width - left - K.GAP
     local tabs = self.options.onlyCategories and 0 or (self.categoryTab.width + self.itemTab.width + K.GAP)
-    K.place(self.search, x, y, left - tabs)
+    K.place(self.search, x, y + math.floor((K.ROW - K.ENTRY) / 2), left - tabs)
     K.place(self.categoryTab, x + left - tabs + K.GAP, y)
     K.place(self.itemTab, x + left - self.itemTab.width, y)
     K.place(self.list, x, y + K.ROW + K.GAP, left, height - K.ROW - K.GAP)

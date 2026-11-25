@@ -91,9 +91,9 @@ end
 function Log.container(container, player)
     if container == nil then return "{none}" end
     local out = { Log.where(container) }
-    local custom = try(container, "getCustomName")
-    if custom and custom ~= "" then out[#out + 1] = "named=" .. quote(custom) end
     local parent = try(container, "getParent")
+    local custom = parent and try(container, "getCustomName") -- the game throws without an owner
+    if custom and custom ~= "" then out[#out + 1] = "named=" .. quote(custom) end
     if parent and not is(parent, "IsoPlayer") and not try(container, "getContainingItem") then
         local sprite = try(parent, "getSpriteName") or try(try(parent, "getSprite"), "getName")
         if sprite then out[#out + 1] = "sprite=" .. tostring(sprite) end

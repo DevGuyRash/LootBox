@@ -299,10 +299,21 @@ local function labelRows(host, s, container, facts)
     child:row("more", "More...", function() UI.open(s.playerIndex, "storage", { container = container }) end)
 end
 
+-- A key ring is no place for planks.
+local function accepts(destination, items)
+    for _, item in ipairs(items) do
+        if call(destination, "isItemAllowed", item) ~= false and call(destination, "isInside", item) ~= true then return true end
+    end
+    return false
+end
+
 local function destinations(s, container)
-    local result = {}
+    local result, sample = {}, {}
+    local items = call(container, "getItems")
+    for index = 0, math.min(12, call(items, "size") or 0) - 1 do sample[#sample + 1] = call(items, "get", index) end
     for _, entry in ipairs(openContainers(s.playerIndex)) do
-        if entry.container ~= container and storage(entry.container) and call(entry.container, "isLockedToCharacter", s.player) ~= true then
+        if entry.container ~= container and storage(entry.container) and call(entry.container, "isLockedToCharacter", s.player) ~= true
+            and accepts(entry.container, sample) then
             result[#result + 1] = entry
         end
     end
