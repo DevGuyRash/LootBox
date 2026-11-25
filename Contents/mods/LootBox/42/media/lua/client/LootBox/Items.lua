@@ -49,18 +49,18 @@ function Items.eachNearby(player, visit)
     end
 end
 
--- The item with this id, in whatever object now represents it: carried, in one
--- of the given containers, or on the ground beside the player.
+-- The item with this id, in whatever object now represents it, its holder, and
+-- "carried", "container" (one of those given) or "ground" (beside the player).
 function Items.find(player, id, containers)
     local function same(item) return item:getID() == id end
     local item, holder = Items.eachCarried(player, same)
-    if item then return item, holder end
+    if item then return item, holder, "carried" end
     for _, container in ipairs(containers or {}) do
         item = container:getItemWithID(id)
-        if item then return item, container end
+        if item then return item, container, "container" end
     end
     item = Items.eachNearby(player, same)
-    return item, item and item:getContainer()
+    if item then return item, item:getContainer(), "ground" end
 end
 
 -- Exactly one carried item has this id and it is this object. Stock requests

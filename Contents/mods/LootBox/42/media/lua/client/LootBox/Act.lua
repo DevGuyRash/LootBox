@@ -111,7 +111,7 @@ end
 --   begin    queues the actions with the game's own functions
 --   main     main(action): which of them does the work; default the last one
 --   allow    allow(phase) with phase "start" or "run"; false, reason stops it
---   keep     keep(action): a follow-up that must happen even if the work stops
+--   keepAfter  what is queued behind it must happen even if the work stops
 --   onStart, onPerform, limitMs
 function Act.run(player, opts)
     local queue = queueOf(player)
@@ -131,8 +131,10 @@ function Act.run(player, opts)
         self.owned[action] = true
         if not opts.main or opts.main(action) then main = action end
     end
-    for action in pairs(self.owned) do
-        if action ~= main and opts.keep and opts.keep(action, main) then self.keep[action] = true end
+    local past = false
+    for _, action in ipairs(queue.queue) do
+        if past and opts.keepAfter then self.keep[action] = true end
+        past = past or action == main
         hook(self, action)
     end
     if main then hookMain(self, main) end
@@ -144,6 +146,12 @@ function Act.run(player, opts)
     end
     Log.trace(self.interaction, "OP", "op", self.op, "action", main.Type, "queue", Log.queue(player))
     return self
+end
+
+-- Something the player queued behind ours.
+function Act:foreign()
+    for _, entry in ipairs(queueOf(self.player).queue) do if not self.owned[entry] then return true end end
+    return false
 end
 
 function Act:cancel(reason)

@@ -6,7 +6,7 @@ local function countLabel(count, unit, action)
     return tostring(count) .. " " .. unit .. (count == 1 and "" or "s") .. " " .. action
 end
 
-local function show(player, title, detail, elapsed, status, note)
+function Feedback.show(player, title, detail, elapsed, status, note)
     local hud = PZActionCompletionHUD
     if not hud or not player.getPlayerNum then return end
     local ok, failure = pcall(function()
@@ -44,21 +44,7 @@ function Feedback.job(player, plan, view, measured, stamp)
     elseif view.state == "failed" or view.state == "cancelled" then
         suffix, note, status = view.state == "failed" and " stopped" or " cancelled", view.reason, "stopped"
     end
-    show(player, kind .. suffix, detail, (measured.pausedAt or stamp) - measured.startedAt, status, note)
-end
-
-function Feedback.consume(player, state, reason, outcome, count, elapsed)
-    local detail, title, status, note = {}
-    if count > 0 then detail[#detail + 1] = countLabel(count, "portion", "confirmed") end
-    if state == "finished" then
-        if outcome == "target" then title = "Selected need satisfied"
-        elseif outcome == "exhausted" then title = "Selected stack exhausted"
-        elseif outcome == "different_amount" then title, note = "Drink amount differed", reason
-        else title = "Requested portion consumed" end
-    else
-        title, status, note = state == "failed" and "Til Full stopped" or "Til Full cancelled", "stopped", reason
-    end
-    show(player, title, detail, elapsed, status, note)
+    Feedback.show(player, kind .. suffix, detail, (measured.pausedAt or stamp) - measured.startedAt, status, note)
 end
 
 return Feedback

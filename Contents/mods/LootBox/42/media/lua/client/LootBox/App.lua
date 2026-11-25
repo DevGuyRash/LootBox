@@ -682,51 +682,25 @@ function Instance:adopt(controller)
     return true
 end
 
-function Instance:startPour(source, targets, options, clickedReceiver)
+function Instance:startPour(source, targets, interaction)
     return self:borrow(function()
-        local Pour = require "LootBox/Pour"
-        local function context(shelf)
-            local p = currentPreferences()
-            if not p.contextMenus or not p.inventoryShortcuts then return nil end
-            return Pour.options(p), Pour.displayed(self.player:getPlayerNum(), shelf)
-        end
-        local controller, why = Pour.new(self.player, self.world, source, targets, options, context, clickedReceiver)
+        local controller, why = require("LootBox/Pour").new(self.player, self.world, source, targets, interaction)
         if not controller then return nil, why end
         return self:adopt(controller)
     end)
 end
 
-function Instance:worldPour(anchor, take, entries, origin, options, loan)
-    local function enabled()
-        local prefs = currentPreferences()
-        if not prefs.contextMenus or not prefs[origin] then return false end
-        local now = require("LootBox/Pour").options(prefs)
-        return now.pourFillOrder == options.pourFillOrder and now.pourFillScope == options.pourFillScope
-    end
+function Instance:worldPour(anchor, take, entries, interaction)
     return self:borrow(function()
-        local controller, why
-        if loan then
-            if not take or origin ~= "inventoryShortcuts" or #entries ~= 1 or loan.a ~= anchor or loan.lease.entry ~= entries[1] then
-                return nil, "The selected fixture or vessel changed."
-            end
-            controller, why = require("LootBox/WorldLootFill").new(self.player, self.world, loan, enabled)
-        else
-            controller, why = require("LootBox/WorldFluidJob").new(self.player, self.world, anchor, take, entries, enabled)
-        end
+        local controller, why = require("LootBox/Fixture").new(self.player, self.world, anchor, take, entries, interaction)
         if not controller then return nil, why end
         return self:adopt(controller)
     end)
 end
 
-function Instance:refillDispenser(anchor, donor, bottle, origin)
-    origin = origin == "inventoryShortcuts" and origin or "worldShortcuts"
-    local function allowed()
-        local prefs = currentPreferences()
-        return prefs.contextMenus == true and prefs[origin] == true
-    end
+function Instance:refillDispenser(stand, donors, bottle)
     return self:borrow(function()
-        local ok, controller, why = pcall(require("LootBox/MountedDispenser").new, self.player, self.world, anchor, donor, bottle, allowed)
-        if not ok then Log.fault(nil, "MountedDispenser.new", controller); return nil, "The selected dispenser could not be read." end
+        local controller, why = require("LootBox/Dispenser").new(self.player, self.world, stand, donors, bottle)
         if not controller then return nil, why end
         return self:adopt(controller)
     end)
@@ -738,7 +712,8 @@ function Instance:tillFull(items, kind, openingRecipe, menuSource)
     local ok, err = clearConsumption(self)
     if not ok then return nil, err end
     local controller
-    controller, err = TillFull.new(self.player, self.world, items, kind, options.tillFullBothNeeds, openingRecipe, menuSource)
+    controller, err = TillFull.new(self.player, self.world, items,
+        { kind = kind, both = options.tillFullBothNeeds, recipe = openingRecipe, source = menuSource })
     if not controller then return nil, err end
     if Log.guard("TillFull.alreadySatisfied", controller.alreadySatisfied, controller) then return true end
     return self:borrow(function() return self:adopt(controller) end)
@@ -850,12 +825,6 @@ function App.tick()
         local consumption = instance.consumption
         if consumption then
             consumption:tick()
-            if consumption.openedFoodPrompt then
-                local message = consumption.openedFoodPrompt
-                consumption.openedFoodPrompt = nil
-                if HaloTextHelper and HaloTextHelper.addGoodText then HaloTextHelper.addGoodText(instance.player, message)
-                else print("[LootBox] " .. message) end
-            end
         end
         instance.jobs:tick()
         if instance.takeover then instance:advance() end

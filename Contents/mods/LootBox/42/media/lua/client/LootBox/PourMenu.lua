@@ -4,7 +4,7 @@ local Stacks = require "LootBox/PourStacks"
 local Rows = require "LootBox/FluidRows"
 local Log = require "LootBox/Log"
 local WorldMenu = require "LootBox/WorldFluidMenu"
-local MountedMenu = require "LootBox/MountedDispenserMenu"
+local MountedMenu = require "LootBox/DispenserMenu"
 
 local Menu = {}
 local DROP = "Item_WaterDrop"
@@ -43,13 +43,8 @@ local function title(e,relation,contents)
     return text
 end
 
-local function startPour(ctx,source,targets,route,receiver)
-    return function(id)
-        local options={}
-        for key,value in pairs(ctx.options) do options[key]=value end
-        options.pourRoute,options.interaction=route,id
-        return ctx.app:startPour(source,targets,options,receiver)
-    end
+local function startPour(ctx,source,targets)
+    return function(id) return ctx.app:startPour(source,targets,id) end
 end
 
 -- One row per distinguishable destination; identical vessels in one place share.
@@ -61,7 +56,7 @@ local function destinations(ctx,source,targets,batchAllowed)
         local fill=batchAllowed and Inventory.batch(entries,ctx.options) or {}
         if #fill<2 then return nil end
         return {title="All ("..#fill..")",texture=DROP,tip="Fills these one after another until the source is empty.",
-            start=startPour(ctx,source,fill,"fill-all")}
+            start=startPour(ctx,source,fill)}
     end
     for _,e in ipairs(targets) do
         local name=title(e,e.relation,Inventory.liquid(e.fluid))
@@ -71,7 +66,7 @@ local function destinations(ctx,source,targets,batchAllowed)
         else
             row={title=name,kind=kind(e,e.relation),relation=e.relation,scope=e.scope,place=e.place,id=e.id,item=e.item,
                 entries={e},count=1,all=all,tip="From "..source.label.." to "..e.label..".",
-                start=startPour(ctx,source,{e},"single")}
+                start=startPour(ctx,source,{e})}
             same[key]=row
             rows[#rows+1]=row
         end
@@ -109,7 +104,7 @@ local function pourInto(ctx,plan,anchors,mounted)
         table.insert(rows,1,{title="Pour into all ("..#plan.fill..")",
             texture="media/ui/inventoryPanes/TransferSameTypeMultiContainer.png",item=source.item,
             tip="Only empty vessels and those with the same liquid, in your fill order.",
-            start=startPour(ctx,source,plan.fill,"fill-all")})
+            start=startPour(ctx,source,plan.fill)})
     end
     local tip=title(source).." | "..tostring(source.place)
     if #ctx.members>1 then tip=tip..". Pours from the least filled vessel of this stack." end
@@ -123,21 +118,19 @@ local function fillFrom(ctx,inverse,anchors)
     local rows={}
     for _,donor in ipairs(inverse.donors) do
         local e=donor.source
-        local receiver=first.scope=="loot" and first.item or nil
-        local route=receiver and "portable-fill-from" or "carried-fill-from"
         local row
         if #targets==1 then
             local target=donor.targets[1]
             row={title=title(e,target.relation,Inventory.liquid(target.fluid)),relation=target.relation,
-                start=startPour(ctx,e,{target},route,receiver)}
+                start=startPour(ctx,e,{target})}
         else
             local fill=not inverse.truncated and Inventory.batch(donor.targets,ctx.options) or {}
             if #fill>0 then
-                local one={title="Fill one",item=fill[1].item,tip="Fills "..fill[1].label..".",start=startPour(ctx,e,{fill[1]},route)}
+                local one={title="Fill one",item=fill[1].item,tip="Fills "..fill[1].label..".",start=startPour(ctx,e,{fill[1]})}
                 row={title=title(e),relation=fill[1].relation,children={one}}
                 if #fill>1 then
                     table.insert(row.children,1,{title="Fill all ("..#fill..")",texture=DROP,
-                        tip="One after another until the source is empty.",start=startPour(ctx,e,fill,route)})
+                        tip="One after another until the source is empty.",start=startPour(ctx,e,fill)})
                 end
             end
         end
@@ -167,14 +160,6 @@ local function add(given)
     local ctx={playerIndex=index,player=player,parent=given.parent,branded=given.branded,app=app,tooltip=given.tooltip,
         interaction=given.interaction,origin="menu.item",options=Pour.options(given.preferences),members=members,click={},
         snapshot=Inventory.snapshot(player,app.world,holder,viewed)}
-    -- A shelf vessel must be returnable to the place it was clicked in.
-    local checked,anchor=false,nil
-    local function pin(e)
-        if e.scope~="loot" or e.container:getType()=="floor" then return true end
-        if not checked then anchor=app.world:pourShelfAnchor(e.container);checked=true end
-        e.pourAnchor=anchor
-        return anchor~=nil
-    end
     local anchors=WorldMenu.fixtures(player)
     local mounted
     local function mountedTargets(e)
@@ -183,8 +168,6 @@ local function add(given)
     end
 
     local inverse=Inventory.fillFrom(ctx.snapshot,members,ctx.options)
-    for _,target in ipairs(inverse and inverse.targets or {}) do if not pin(target) then inverse=nil;break end end
-    for _,donor in ipairs(inverse and inverse.donors or {}) do for _,target in ipairs(donor.targets) do pin(target) end end
 
     -- A collapsed row delegates the choice; an expanded individual never does.
     local plan,why
@@ -194,7 +177,6 @@ local function add(given)
             return #WorldMenu.pourRows(ctx,anchors,e)>0 or #mountedTargets(e)>0
         end)
     end
-    if plan and not pin(plan.source) then plan,why=nil,"storage-unreachable" end
     -- Both go directly after the game's Fluid entry, so the last one is first.
     local filled=fillFrom(ctx,inverse,anchors)
     local poured=plan and pourInto(ctx,plan,anchors,mountedTargets(plan.source)) or false

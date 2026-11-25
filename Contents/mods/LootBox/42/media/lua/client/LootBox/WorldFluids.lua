@@ -1,21 +1,10 @@
 -- Fixed world fluids are IsoObjects, not InventoryItems. Let the object's
 -- directional rules choose the liquid (including plumbing and taint).
 local Inventory=require "LootBox/PourInventory"
-local PourNative=require "LootBox/PourNative"
 local Log=require "LootBox/Log"
 local W={}
 local donorPolicy={allowEquippedConsumption=true}
 local receiverPolicy={allowMainInventoryFluidReceive=true}
-function W.near(a,b)
-    return type(a)=="number" and type(b)=="number" and math.abs(a-b)<=PourNative.TOLERANCE
-end
-W.tolerance=PourNative.tolerance
--- A vessel is measured by the stock actions themselves, so only its own change
--- proves a transfer. Fixtures lose and gain rain, and every frame rounds them.
-function W.changedBy(before,now,expected)
-    return type(now)=="number" and math.abs(now-before-expected)<=PourNative.tolerance(math.abs(expected))
-end
-
 function W.live(p,a)
     if p~=getSpecificPlayer(p:getPlayerNum()) or ISWorldObjectContextMenu.disableWorldMenu
         or (ISWorldMap_instance and ISWorldMap_instance:isVisible()) then return false,"world-menu-disabled" end
@@ -203,50 +192,6 @@ function W.signature(e)
     if e.amount==0 then return true end
     e.pourSignature=e.pourSignature or Inventory.mix(e)
     return e.pourSignature~=nil
-end
-
--- The live vessel when it is still exactly what was chosen, or nil and why not.
-function W.allowedEntry(p,world,a,e,take)
-    local ok,live=Inventory.accessible(p,world,e,nil)
-    if not ok then return nil,live end
-    if not W.near(e.capacity,live.capacity) or not W.near(e.amount,live.amount) then
-        return nil,string.format("litres: %.5f/%.5f selected, %.5f/%.5f now",e.amount,e.capacity,live.amount,live.capacity)
-    end
-    if live.amount>0 and not Inventory.sameMix(live,e.pourSignature) then return nil,"mixture-changed" end
-    local can,why=W.can(p,world,a,live,take)
-    if not can then return nil,why end
-    return live
-end
-
--- Native item-field sync may refresh the fluid component, but a direct fill
--- never replaces or moves the selected item or changes its equipment role.
-function W.inPlaceReceiver(p,world,e)
-    if e.container~=p:getInventory() then return nil,"vessel-not-in-main" end
-    if Inventory.reserved(world,e.item,receiverPolicy) then return nil,"protected" end
-    local ok,live=Inventory.accessible(p,world,e,nil,true)
-    if not ok then return nil,live end
-    if not W.near(live.capacity,e.capacity) then return nil,"capacity-changed" end
-    return live
-end
-
--- Stock bag pickup/return may replace the local item replica. Confirm only a
--- unique ID+type in the original exact holder with its original carried scope.
-function W.received(p,world,e)
-    local list=e.container:getItems()
-    local item
-    for i=0,list:size()-1 do
-        local candidate=list:get(i)
-        if candidate:getID()==e.id then
-            if item or candidate:getFullType()~=e.fullType then return nil,"ambiguous-identity" end
-            item=candidate
-        end
-    end
-    if not item then return nil,"not-in-original-holder" end
-    local ref={item=item,object=item,id=e.id,fullType=e.fullType,scope=e.scope,container=e.container}
-    local ok,live=Inventory.accessible(p,world,ref,nil,true)
-    if not ok then return nil,live end
-    if not W.near(live.capacity,e.capacity) then return nil,"capacity-changed" end
-    return live
 end
 
 return W

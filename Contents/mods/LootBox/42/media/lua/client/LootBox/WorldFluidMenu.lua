@@ -19,10 +19,10 @@ local function tip(a,text)
     return (a.unlimited and getText("Tooltip_WaterUnlimited") or string.format("%.2f / %.2f L",a.amount,a.capacity))..". "..text
 end
 
-local function start(ctx,a,take,entries,loan)
+local function start(ctx,a,take,entries)
     return function(id)
         a.interaction=id
-        return ctx.app:worldPour(a,take,entries,"inventoryShortcuts",ctx.options,loan)
+        return ctx.app:worldPour(a,take,entries,id)
     end
 end
 
@@ -56,19 +56,16 @@ function Menu.fillRows(ctx,anchors,entries)
     return rows
 end
 
--- Fill one clicked loot vessel: it is borrowed, filled and put back.
+-- Fill one clicked loot vessel: it is fetched, filled and put back.
 function Menu.lootRows(ctx,anchors,target)
-    local Loan=require "LootBox/WorldLootFill"
-    local lease=#anchors>0 and Loan.bind(ctx.player,ctx.app.world,target)
-    if not lease then return {} end
     local rows={}
+    if ctx.app.world:protected(target.item)~=false or target.item:isFavorite() then return rows end
     for _,a in ipairs(anchors) do
-        local source=Loan.source(ctx.player,a,target)
-        if source then
-            local loan={a=a,lease=lease,source=source}
+        local source=W.recipe(a)
+        if source and W.canReceive(ctx.player,a,target) then
             local relation=W.relation(source,target)
             rows[#rows+1]={title=title(a,relation,Inventory.liquid(target.fluid)),relation=relation,texture="Item_WaterDrop",
-                tip=tip(a,"Takes the vessel, fills it here and puts it back where it was."),start=start(ctx,a,true,{target},loan)}
+                tip=tip(a,"Takes the vessel, fills it here and puts it back where it was."),start=start(ctx,a,true,{target})}
         end
     end
     return rows

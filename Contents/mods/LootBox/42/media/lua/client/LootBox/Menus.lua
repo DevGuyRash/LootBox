@@ -792,7 +792,7 @@ Menus.worldMenu = guarded("menu.world", function(playerIndex, parent, objects, t
     end
     local host = root(parent)
     if preferences.worldShortcuts then
-        Log.guard("MountedDispenserMenu", require("LootBox/MountedDispenserMenu").add, fluids(s, parent, host, { objects = objects }))
+        Log.guard("MountedDispenserMenu", require("LootBox/DispenserMenu").add, fluids(s, parent, host, { objects = objects }))
         jobRows(host, s)
         if #containers == 1 then containerRows(host, s, containers[1].container, "menu.world-container")
         else
