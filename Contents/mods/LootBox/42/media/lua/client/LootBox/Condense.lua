@@ -219,7 +219,9 @@ function Condense:validate(op)
     local current, maximum = world:carrying()
     local delta = world:carryDelta(item, destination)
     if delta > EPS and current + delta > maximum + EPS then return nil, "You cannot carry that much, even for a moment", "capacity" end
-    if not destination:hasRoomFor(world.player, item) then return nil, world:name(destination) .. " has no room for this", "capacity" end
+    if not destination:hasRoomFor(world.player, item) or not world:serverAccepts(item, source, destination) then
+        return nil, world:name(destination) .. " has no room for this", "capacity"
+    end
     op.condenseDelta = delta
     return true
 end

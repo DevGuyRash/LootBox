@@ -326,6 +326,7 @@ local function fixture(capacity)
         return {x = current.x, y = current.y, z = current.z}
     end
     function world:key(value) return value.name end
+    function world:serverAccepts(value) return not (f.serverRefuses and f.serverRefuses[value]) end
     function world:square(value) return f:ensureSquare(value.position) end
     function world:sourceAnchor(value)
         f.sourceLocations[value.name] = f.sourceLocations[value.name] or value
@@ -588,6 +589,15 @@ local function stopJob(f)
     assert(stopped.state == "paused" and stopped.canResume, "A settled pause must retain a resumable checkpoint")
     return stopped
 end
+
+test("an item the server would refuse is never tried", function()
+    local f = fixture(9)
+    local ok, refused = item(f.source), item(f.source)
+    f.serverRefuses = { [refused] = true }
+    start(f)
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.skipped == 1 and #f.source.items == 1 and #f.destination.items == 1, status.reason)
+end)
 
 test("haul seven unit items in three capacity-limited trips", function()
     local f = fixture(3)

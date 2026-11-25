@@ -400,6 +400,13 @@ function World:carryFactor(container)
     return 1
 end
 
+-- A server compares exact weights where hasRoomFor rounds, and refuses in
+-- silence; the game lets us ask its own question first.
+function World:serverAccepts(item, source, destination)
+    if not isClient() or type(isItemTransactionConsistent) ~= "function" then return true end
+    return isItemTransactionConsistent(item, source, destination, nil, self.player) == true
+end
+
 function World:carryDelta(item, destination)
     if not self:owns(destination) then return 0 end
     local source = call(item, "getContainer")
