@@ -438,19 +438,70 @@ function World:carrying()
     return inventory:getCapacityWeight(), maximum
 end
 
+-- The bags in what the player carries and in these containers, once each.
 function World:gearRecords(sources)
     local result, seen = {}, {}
-    local function add(container)
-        if not self:valid(container) or (self.recovery and self.recovery:isReservedContainer(container)) then return end
-        if not self:owns(container) and not permitted(self.player, self:square(container)) then return end
-        for _, record in ipairs(self:records(container, true)) do
-            local id = self:itemId(record.item)
-            if id and not seen[id] then seen[id] = true; result[#result + 1] = record end
+    local function scan(container)
+        if not container or seen[container] then return end
+        seen[container] = true
+        local items = call(container, "getItems")
+        for index = 0, size(items) - 1 do
+            local item = at(items, index)
+            if isBag(item) then
+                result[#result + 1] = {item = item, source = container}
+                scan(call(item, "getInventory"))
+            end
         end
+    end
+    local function add(container)
+        if not container or seen[container] or not self:valid(container)
+            or (self.recovery and self.recovery:isReservedContainer(container)) then return end
+        if self:owns(container) or permitted(self.player, self:square(container)) then scan(container) end
     end
     add(call(self.player, "getInventory"))
     for _, container in ipairs(sources or {}) do add(container) end
     return result
+end
+
+-- The carried bags that count as storage, outermost first: worn, held and key
+-- rings. The player's settings can add bags that are not worn and bags inside bags.
+function World:bags(settings)
+    local result, seen = {}, {}
+    local function scan(container, root)
+        if seen[container] then return end
+        seen[container] = true
+        local items = call(container, "getItems")
+        for index = 0, size(items) - 1 do
+            local item = at(items, index)
+            local inside = isBag(item) and call(item, "getInventory")
+            if inside then
+                local ring = call(item, "isFakeEquipped", self.player) == true
+                local worn = ring or call(self.player, "isEquipped", item) == true
+                local wanted = worn or (call(item, "getAttachedSlot") or -1) < 0
+                    and (root and settings.useUnequipped or not root and settings.nested)
+                if wanted and self:owns(inside) and self:valid(inside) and call(inside, "isLockedToCharacter", self.player) ~= true
+                    and not (self.recovery and self.recovery:isReservedContainer(inside)) then
+                    local key = self:key(inside)
+                    result[#result + 1] = {item = item, container = inside, source = container, worn = worn, ring = ring,
+                        factor = self:carryFactor(inside), labels = key and self.state.containerLabels[key]}
+                    scan(inside, false)
+                end
+            end
+        end
+    end
+    scan(self.player:getInventory(), true)
+    return result
+end
+
+-- Whether one of bags() is for this item. The game looks for a key only in main
+-- inventory and on key rings, and a labelled bag is for what its label says
+-- unless the item is only passing through.
+function World:meantFor(bag, item, passing)
+    if instance(item, "Key") and not bag.ring then return false end
+    if passing or not bag.labels or not self.graph then return true end
+    local descriptor = self:describe(item)
+    for _, id in ipairs(bag.labels) do if self.graph:matches(id, descriptor) then return true end end
+    return false
 end
 
 function World:replaceGear(oldId, oldType, item)
@@ -1601,21 +1652,21 @@ function World:matchingPoint(request, container)
     end
 end
 
+function World:storageSettings()
+    local preference = self.preference or function() end
+    return {useUnequipped = preference("condenseUseUnequipped"), nested = preference("condenseNested")}
+end
+
 -- Everything destinations() needs that does not depend on the item. Build it
 -- once for a plan or one delivery; it reads the world as it is at that moment.
 function World:destinationPass(request, graph)
     local destination = request.destination or {}
-    local pass = {graph = graph or self.graph, accepted = {}}
+    local pass = {graph = graph or self.graph, accepted = {}, types = {}, kinds = {}}
     if destination.kind == "inventory" then
-        pass.bags, pass.types, pass.aliases = {}, {}, {}
-        -- A bag that is itself being hauled, and any bag in it, is cargo rather than storage for the rest of the load.
-        local cargo = {}
-        for _, record in ipairs(self:records(call(self.player, "getInventory"), true)) do
-            local container = isBag(record.item) and call(record.item, "getInventory")
-            local hauled = container and destination.cargo and destination.cargo[self:itemId(record.item)]
-            if container and (cargo[record.source] or hauled and not hauled.delivered) then cargo[container] = true
-            elseif container then pass.bags[#pass.bags + 1] = {container = container, factor = self:carryFactor(container)} end
-        end
+        -- A load on its way elsewhere fills worn and held bags, whatever their labels:
+        -- other bags carry no better, and may be part of the load.
+        pass.load = destination.cargo ~= nil
+        pass.bags = self:bags(pass.load and {} or self:storageSettings())
     elseif destination.kind == "matching" then
         pass.matching = {}
         for _, target in ipairs(destination.targets or {}) do
@@ -1653,42 +1704,59 @@ function World:destinationPass(request, graph)
                 if self.state.containerLabels[key] and self:key(container) == key then candidates[#candidates + 1] = container end
             end
             pass.labelled = {}
-            for _, container in ipairs(byDistance(self, candidates)) do
-                pass.labelled[#pass.labelled + 1] = {container = container, labels = self.state.containerLabels[self:key(container)]}
+            for index, container in ipairs(byDistance(self, candidates)) do
+                pass.labelled[index] = {container = container, labels = self.state.containerLabels[self:key(container)]}
             end
         end)
     elseif destination.kind == "trash" then pass.bins = self:trashCandidates() end
     return pass
 end
 
-local function requestedLabel(destination, labels, graph, descriptor)
+-- How closely the requested labels name this item: 1 a label on the item itself,
+-- 2 a custom category, 3 one of the game's categories. Nil when none of them do.
+local function labelRank(destination, labels, graph, descriptor)
+    local best
     for _, id in ipairs(labels) do
-        if (not destination.labels or #destination.labels == 0 or contains(destination.labels, id)) and graph:matches(id, descriptor) then return id end
+        if (not destination.labels or #destination.labels == 0 or contains(destination.labels, id)) and graph:matches(id, descriptor) then
+            local rank = contains(descriptor.labels, id) and 1 or id:sub(1, 7) == "custom:" and 2 or 3
+            if not best or rank < best then best = rank end
+        end
     end
+    return best
 end
 
+-- In storage with a requested label, or in a bag or kit that is.
 function World:alreadySorted(request, item, graph)
     if request.destination.kind ~= "labels" then return false end
-    local key = self:key(call(item, "getContainer"))
-    local labels = key and self.state.containerLabels[key]
-    return labels ~= nil and requestedLabel(request.destination, labels, graph or self.graph, self:describe(item)) ~= nil
+    local descriptor, container = self:describe(item), call(item, "getContainer")
+    for _ = 1, 16 do
+        local key = container and self:key(container)
+        local labels = key and self.state.containerLabels[key]
+        if labels and labelRank(request.destination, labels, graph or self.graph, descriptor) then return true end
+        local bag = container and call(container, "getContainingItem")
+        container = bag and call(bag, "getContainer")
+        if not container then return false end
+    end
+    return false
 end
 
-local function similarTypes(pass, item)
-    local source = call(item, "getContainer")
-    if not source then return nil end
-    local aliases = pass.aliases[source]
-    if not aliases then
-        aliases = {}
-        for fullType, items in pairs(itemTypes(source) or {}) do
-            for _, candidate in ipairs(items) do
-                aliases[candidate] = aliases[candidate] or {}
-                table.insert(aliases[candidate], fullType)
-            end
+-- What the game's matching transfer counts each item in a container as.
+function World:kinds(container)
+    local byItem = {}
+    for fullType, items in pairs(itemTypes(container) or {}) do
+        for _, item in ipairs(items) do
+            byItem[item] = byItem[item] or {}
+            table.insert(byItem[item], fullType)
         end
-        pass.aliases[source] = aliases
     end
-    return aliases[item] or {tostring(call(item, "getFullType"))}
+    return function(item) return byItem[item] and Sort(byItem[item]) or {tostring(call(item, "getFullType"))} end
+end
+
+local function similarTypes(self, pass, item)
+    local source = call(item, "getContainer")
+    if not source then return {tostring(call(item, "getFullType"))} end
+    if not pass.kinds[source] then pass.kinds[source] = self:kinds(source) end
+    return pass.kinds[source](item)
 end
 
 local function holdsSimilar(self, pass, container, types)
@@ -1722,9 +1790,12 @@ function World:destinations(request, item, pass)
         result[#result + 1] = container
     end
     if destination.kind == "inventory" then
-        for _, bag in ipairs(pass.bags) do add(bag.container) end
-        local factors, types = {}, item and similarTypes(pass, item)
-        for _, bag in ipairs(pass.bags) do factors[bag.container] = bag.factor end
+        local factors = {}
+        for _, bag in ipairs(pass.bags) do
+            factors[bag.container] = bag.factor
+            if not item or self:meantFor(bag, item, pass.load) then add(bag.container) end
+        end
+        local types = item and not pass.load and similarTypes(self, pass, item)
         Sort(result, function(container)
             return types and holdsSimilar(self, pass, container, types) and 0 or 1, factors[container]
         end)
@@ -1746,12 +1817,18 @@ function World:destinations(request, item, pass)
         local accepted = id and pass.accepted[id]
         if id and not accepted then
             accepted = {}
-            for _, entry in ipairs(pass.graph and pass.labelled or {}) do
-                if requestedLabel(destination, entry.labels, pass.graph, descriptor) then accepted[#accepted + 1] = entry.container end
+            local types = similarTypes(self, pass, item)
+            for index, entry in ipairs(pass.graph and pass.labelled or {}) do
+                local rank = labelRank(destination, entry.labels, pass.graph, descriptor)
+                if rank then
+                    accepted[#accepted + 1] = {container = entry.container, rank = rank, index = index,
+                        similar = holdsSimilar(self, pass, entry.container, types) and 0 or 1}
+                end
             end
-            pass.accepted[id] = accepted
+            -- Where the same thing already is, then the closest label, then the nearest.
+            pass.accepted[id] = Sort(accepted, function(entry) return entry.similar, entry.rank, entry.index end)
         end
-        for _, container in ipairs(accepted or {}) do add(container) end
+        for _, entry in ipairs(accepted or {}) do add(entry.container) end
     elseif destination.kind == "trash" then
         for _, container in ipairs(pass.bins) do add(container) end
     else return nil, "Choose a destination" end

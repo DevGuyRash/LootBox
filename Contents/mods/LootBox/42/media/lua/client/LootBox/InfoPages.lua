@@ -27,8 +27,8 @@ local groups = {
         { "rememberLastSetup", "Reopen the planner with my last job" } } },
     { "Condense", {
         { "condenseRebalance", "Also rearrange what is already in bags", "Looks for swaps between bags that lower your encumbrance." },
-        { "condenseUseUnequipped", "Use bags I am not wearing" },
-        { "condenseNested", "Use bags inside bags" } } },
+        { "condenseUseUnequipped", "Use bags I am not wearing", "Also for loot that goes into your bags." },
+        { "condenseNested", "Use bags inside bags", "Also for loot that goes into your bags." } } },
     { "Eating and drinking", {
         { "tillFullEnabled", "Til Full in the Eat and Drink menus" },
         { "tillFullBothNeeds", "Til Full satisfies hunger and thirst together" },

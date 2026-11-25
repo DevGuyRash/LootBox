@@ -1938,6 +1938,8 @@ function Jobs:deliveryStep()
     if not ok or delivery.failure then self:nextDelivery(record, false, delivery.failure or err); return end
     local source = record.item:getContainer()
     if not source or not self.world:owns(source) or not source:contains(record.item) then self:nextDelivery(record, false, "Hauled item is no longer carried"); return end
+    -- Carried in a bag that is labelled for it.
+    if self.world:alreadySorted(self.plan.request, record.item, self.activeGraph) then self:nextDelivery(record, true, nil, source); return end
     if self.plan.request.destination.kind == "trash" then self:trashDestination(record)
     else
         local destination, code
