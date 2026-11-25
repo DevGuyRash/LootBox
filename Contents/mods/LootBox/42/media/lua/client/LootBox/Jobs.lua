@@ -15,7 +15,7 @@ Jobs.__index = Jobs
 -- How long a searched multiplayer container may stay empty before the job moves
 -- on. The game never acknowledges an empty reply.
 local REPLY_MS = 1000
-local HAULED, MAX_PREVIEWS, MAX_FAULTS, MAX_LOGGED, MAX_REFUSALS = {hauled = true}, 4, 3, 12, 3
+local MAX_PREVIEWS, MAX_FAULTS, MAX_LOGGED, MAX_REFUSALS = 4, 3, 12, 3
 -- What the player has to do before anything can continue, by the code Native reports it under.
 local PLAYER_MUST = {seated = true, corpse = true, trading = true}
 local WAITING = "Waiting for your current action to finish. This job will continue automatically."
@@ -180,7 +180,12 @@ function Jobs:choose(request, item, reservations, pass)
     return nil, reason, code
 end
 
+-- Throwing away asks more of an item than moving it.
+local DISCARD = {discard = true}
+local function protectionFor(request) return request.destination.kind == "trash" and DISCARD or nil end
+
 local function matchesSelection(graph, request, descriptor, item, player)
+    if request.only and not request.only[tostring(item:getID())] then return false end
     local leave = request.excludeUnwanted == true or request.destination.kind == "inventory"
     return graph:matchesFilter(request.filter, descriptor) and not (leave and item.isUnwanted and item:isUnwanted(player))
 end
@@ -204,7 +209,7 @@ end
 
 local function whole(self, request, graph, container)
     for _, entry in ipairs(self.world:records(container, true)) do
-        if self.world:protected(entry.item) or not matchesSelection(graph, request, entry.descriptor, entry.item, self.player) then return false end
+        if self.world:protected(entry.item, protectionFor(request)) or not matchesSelection(graph, request, entry.descriptor, entry.item, self.player) then return false end
     end
     return true
 end
@@ -244,7 +249,7 @@ local function protectedIn(self, bin)
     local contents = bin:getItems()
     for index = 0, contents:size() - 1 do
         local item = contents:get(index)
-        local protected, why = self.world:protected(item)
+        local protected, why = self.world:protected(item, DISCARD)
         if protected then return tostring(item:getName()) .. " (" .. tostring(why or "protected") .. ")" end
     end
 end
@@ -390,11 +395,11 @@ function Jobs:buildPlan(request)
         local item = record.item
         local can = canOf(record.source)
         if (not can or can.selected) and matchesSelection(self.graph, request, record.descriptor, record.item, self.player) then
-            local protected, protection = self.world:protected(item)
+            local protected, protection = self.world:protected(item, protectionFor(request))
             local reason, status
             if protected then reason, status = protection or "Protected item", "Protected"
             elseif request.destination.kind == "inventory" and self.world:owns(record.source) then reason, status = "Already in carried storage", "Already carried"
-            elseif self.world:alreadySorted(request, item, self.graph) then reason, status = "Already sorted", "Already sorted"
+            elseif self.world:alreadySorted(request, item, self.graph, pass) then reason, status = "Already sorted", "Already sorted"
             else
                 reason = bagReason(self, request, self.graph, record)
                 if reason then status = "Protected"
@@ -843,7 +848,7 @@ function Jobs:admit(work)
                 local controller = self.execution and self.execution.condense
                 if controller then ok, reason, code = controller:validate(op) else ok, reason = nil, "The Condense arrangement is no longer active" end
             elseif op.personalRecovery then ok, reason = self.recovery:allows(op)
-            else ok, reason = self:matches({item = item, hauled = op.hauled}, self.plan) end
+            else ok, reason = self:matches({item = item, hauled = op.hauled, passing = op.passing == true}, self.plan) end
             if ok then ok, reason, code = self:admits(item, op.destination, room) end
             if ok and not self.world:serverAccepts(item, op.source, op.destination) then ok, reason, code = nil, FULL, "capacity" end
         end
@@ -940,8 +945,14 @@ function Jobs:walkStep()
     end)
 end
 
+-- Taken from the world, and carried only to where it goes.
+local function passing(record)
+    return record.groundPoint ~= nil or record.sourceAnchor == nil or record.sourceAnchor.kind ~= "carried"
+end
+
 function Jobs:matches(record, plan)
-    local protected, protection = self.world:protected(record.item, record.hauled and HAULED)
+    local protected, protection = self.world:protected(record.item, {hauled = record.hauled == true, discard = plan.request.destination.kind == "trash",
+        passing = record.passing == true or record.passing == nil and passing(record)})
     if protected then return nil, "Protected: " .. tostring(protection or "Item is protected") end
     if not matchesSelection(self.activeGraph, plan.request, self.world:describe(record.item), record.item, self.player) then
         return nil, "Item no longer matches the selection" end
@@ -1571,7 +1582,8 @@ function Jobs:pickup(record)
         for _, entry in ipairs(run) do
             if hauling then self.hauled[self.world:itemId(entry.item) or entry.item] = entry end
         end
-        local operation = {kind = "transfer", item = record.item, source = source, destination = destination, target = can or nil}
+        local operation = {kind = "transfer", item = record.item, source = source, destination = destination, target = can or nil,
+            passing = passing(record)}
         self:action(operation, function(ok, failure, failureCode)
             local moved = self:settleRun(run, operation, ok)
             for _, entry in ipairs(moved) do
@@ -1687,7 +1699,7 @@ function Jobs:place(record, destination)
         if not matches then self:nextDelivery(record, false, reason); return end
         local run = self:deliveryRun(record, source, destination)
         local operation = {kind = "transfer", item = item, source = source, destination = destination,
-            target = can, hauled = record.hauled, destinationPoint = point}
+            target = can, hauled = record.hauled, passing = passing(record), destinationPoint = point}
         self:action(operation, function(ok, failure, failureCode)
             local moved, left = self:settleRun(run, operation, ok)
             for index, entry in ipairs(moved) do execution.batch[delivery.index + index - 1] = entry end
@@ -1783,7 +1795,7 @@ function Jobs:reviewBin()
     local approved, contents = {}, bin:getItems()
     for index = 0, contents:size() - 1 do
         local item = contents:get(index)
-        local protected, why = self.world:protected(item)
+        local protected, why = self.world:protected(item, DISCARD)
         if protected then
             review.canApprove = false
             review.skipped[#review.skipped + 1] = {itemName = item:getName(), status = "Protected", tone = "warning",

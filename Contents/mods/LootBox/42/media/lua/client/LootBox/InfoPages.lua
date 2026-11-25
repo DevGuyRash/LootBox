@@ -18,7 +18,12 @@ local groups = {
     { "Inventory buttons", {
         { "matchingTransferButtons", "Smart Take and Match buttons", "Shown only while there is something for them to do." },
         { "smartTakeAllContainers", "Smart Take uses every open container", "Off takes only from the selected one." },
+        { "putAwayButton", "Put Away button", "Shown while you carry something that belongs in storage nearby." },
         { "condenseButton", "Condense button" } } },
+    { "Storage", {
+        { "storageTitles", "Show what belongs in a container on its title and icon" },
+        { "storageTips", "Show where an item goes in its tooltip" },
+        { "autoPutAway", "Put away what I bring home by myself", "Once you are home, standing still and safe. Only what you did not leave with, and it stops when you move or act." } } },
     { "While a job runs", {
         { "jobBar", "Show the job strip", "Off shows it only when a job needs you. The job key always brings it back." },
         { "confirmQuickMoves", "Ask before moving items" },

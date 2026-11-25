@@ -1,5 +1,6 @@
 package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.path
 package.loaded['TimedActions/ISTimedActionQueue'] = true
+package.loaded['LootBox/AutoPutAway'] = {yield = function() end, forget = function(instance) instance.forgotten = true; instance.state.trip = nil end, update = function() end}
 
 -- World/action boundaries are doubles. The actual App, category graph, catalog,
 -- and data-only Store run together; native file I/O has a separate smoke check.
@@ -32,7 +33,8 @@ function getText(key) return key end
 Events = nil
 package.loaded["LootBox/World"] = { new = function(_, state)
     return { key = function(_, container) return container.id end, itemId = function(_, item) return item.id end,
-        _observe = function() end, observeNearby = function() return calls.seen == true end,
+        _observe = function() end, forgetGlance = function() end, rename = function(_, container, name) container.named = name; return container.fixture == true end,
+        endpoints = {}, valid = function() return true end, givenName = function() end, observeNearby = function() return calls.seen == true end,
         protected = function(_, item) return state.keep[item.id] == true end,
         rememberVehicle = function(_, vehicle)
             if not vehicle then return nil, "Vehicle unavailable" end
@@ -497,6 +499,110 @@ test("Escape pauses a job unless that press is closing something", function()
     guard = false; App.onKeyStartPressed(2); assert(app.jobs.state == "running")
     App.onKeyStartPressed(1); assert(app.jobs.state == "paused" and app.jobs.trigger == "escape")
     Keyboard, getCore, App.escapeGuard = nil, nil, nil
+end)
+
+local function thing(id, fullType) return {id = id, getFullType = function() return fullType end, getID = function() return id end} end
+
+test("kinds, single items and anything else are labels, saved and read back, with or without the container", function()
+    App.reset()
+    local app = assert(App.get(0))
+    local crate = {id = "world:1:2:0:#0:crate:0:crate"}
+    assert(app:setLabels(crate, {"type:Base.Nails", "native:Food", "rest:", "custom:99"}))
+    same(app:labels(crate), {"type:Base.Nails", "native:Food", "rest:"})
+    same(app:labels(crate.id), {"type:Base.Nails", "native:Food", "rest:"})
+    assert(app:toggleLabel(crate.id, "native:Food") and app:toggleLabel(crate.id, "type:Base.Saw"))
+    App.reset()
+    same(assert(App.get(0)):labels(crate), {"type:Base.Nails", "rest:", "type:Base.Saw"})
+    assert(App.categoryName("rest:") == "Anything else")
+end)
+
+test("a name and an order are saved by key, and cleared by an empty name and the usual order", function()
+    App.reset()
+    local app = assert(App.get(0))
+    assert(app:setStorage("vehicle:7:Base.Car:TruckBed", {name = "  Haul\n ", order = "first"}))
+    App.reset()
+    app = assert(App.get(0))
+    local details = app:storageDetails("vehicle:7:Base.Car:TruckBed")
+    assert(details.name == "Haul" and details.order == "first")
+    assert(app:setStorage("vehicle:7:Base.Car:TruckBed", {order = "usual"}) and app:setStorage("vehicle:7:Base.Car:TruckBed", {name = ""}))
+    assert(app.state.storage["vehicle:7:Base.Car:TruckBed"] == nil)
+end)
+
+test("one item has one place, and its mark goes when no place or list names it", function()
+    App.reset()
+    local app = assert(App.get(0))
+    local axe, rack, shed = thing("41", "Base.Axe"), {id = "rack"}, {id = "shed"}
+    local mark = "item:41:Base.Axe"
+    assert(app:setItemPlace(axe, rack, true))
+    same(app:labels(rack), {mark}); same(app:itemLabels(axe), {mark})
+    assert(app:setItemPlace(axe, shed, true))
+    assert(#app:labels(rack) == 0); same(app:labels(shed), {mark})
+    assert(app:setItemWanted(axe, true) and app:onChecklist("ids", mark))
+    assert(app:setItemPlace(axe, shed, false))
+    same(app:itemLabels(axe), {mark})
+    assert(app:setItemWanted(axe, false))
+    assert(#app:itemLabels(axe) == 0 and not app:onChecklist("ids", mark))
+end)
+
+test("a mark to pick something up comes off once it is carried", function()
+    App.reset()
+    local app = assert(App.get(0))
+    local axe, carried = thing(52, "Base.Axe"), {}
+    player.getInventory = function() return {getItems = function()
+        return {size = function() return #carried end, get = function(_, index) return carried[index + 1] end} end} end
+    assert(app:setItemWanted(axe, true))
+    clock = clock + 2000; App.tick()
+    assert(app:onChecklist("ids", "item:52:Base.Axe"))
+    carried[1] = thing(52, "Base.Axe")
+    clock = clock + 2000; App.tick()
+    assert(not app:onChecklist("ids", "item:52:Base.Axe"))
+    player.getInventory = nil
+end)
+
+test("keeping a kind is saved, and damaged storage data costs only what is damaged", function()
+    App.reset()
+    local app = assert(App.get(0))
+    assert(app:keepType("Base.Nails", true) and app:isTypeKept("Base.Nails"))
+    app.state.storage = {good = {name = "Pantry"}, bad = 7, worse = {name = {}, order = "sideways"}}
+    app.state.keepTypes[12] = true
+    assert(app:persist())
+    App.reset()
+    app = assert(App.get(0))
+    assert(app:isTypeKept("Base.Nails") and app.state.keepTypes[12] == nil)
+    assert(app.state.storage.good.name == "Pantry" and app.state.storage.bad == nil and app.state.storage.worse == nil)
+end)
+
+test("turning automatic put-away off forgets the trip, and so does a world opened while it is off", function()
+    App.reset()
+    local app = assert(App.get(0))
+    assert(App.setPreferences({autoPutAway = true}))
+    app.state.trip = {who = "Ann", had = {}}
+    assert(App.setPreferences({autoPutAway = false}) and app.forgotten and app.state.trip == nil)
+    app.state.trip = {who = "Ann", had = {}}
+    assert(app:persist())
+    App.reset()
+    assert(assert(App.get(0)).state.trip == nil)
+end)
+
+test("Put Away pressed again starts afresh from a paused one, unless that one is carrying something", function()
+    App.reset()
+    local app = assert(App.get(0))
+    local request = {shortcutIntent = "put-away", only = {["1"] = true}}
+    local status = {hasJob = true, intent = "put-away", canResume = true, carried = 0}
+    app.jobs.status = function() return status end
+    assert(app:again(request) == false)
+    status.carried = 2
+    assert(app:again(request) == true)
+    status.canResume, status.carried = false, 0
+    local found, outcome = app:again(request)
+    assert(found and outcome == "running")
+end)
+
+test("a job for certain items is not offered again as the last one", function()
+    App.reset()
+    local app = assert(App.get(0))
+    assert(app:rememberSetup({scope = "inventory", filter = {all = true, ids = {}, types = {}}, destination = {kind = "labels", labels = {}}, only = {["1"] = true}}))
+    assert(app:lastSetup() == nil)
 end)
 
 test("the game item catalog is read once and custom categories refresh it", function()

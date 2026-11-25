@@ -3,7 +3,11 @@
 local K = require "LootBox/UIKit"
 local App = require "LootBox/App"
 local Describe = require "LootBox/Describe"
+local Facts = require "LootBox/Facts"
+local Labels = require "LootBox/Labels"
 local Picker = require "LootBox/Picker"
+local StorageMenu = require "LootBox/StorageMenu"
+local View = require "LootBox/StorageView"
 
 local Loot = { id = "loot", title = "Loot list" }
 local Categories = { id = "categories", title = "Categories" }
@@ -91,6 +95,7 @@ function Categories.save(page)
     local id, err = App.saveCategory({ id = page.definition.id, name = page.name:getText(), types = page.definition.types, includes = page.definition.includes })
     if not id then page.message:set(err, "bad"); return end
     for _, definition in ipairs(App.customCategories()) do if definition.id == id then Categories.edit(page, definition) end end
+    if getSpecificPlayer(page.win.playerIndex) then View.refresh(page.win.playerIndex) end
     page.message:set("Saved.", "good")
 end
 
@@ -99,6 +104,7 @@ function Categories.remove(page)
     local ok, err = App.deleteCategory(page.definition.id)
     if not ok then page.message:set(err, "bad"); return end
     Categories.edit(page, nil)
+    if getSpecificPlayer(page.win.playerIndex) then View.refresh(page.win.playerIndex) end
     page.message:set("Deleted, and removed wherever it was used.", "dim")
 end
 
@@ -130,26 +136,93 @@ end
 
 -- Storage ------------------------------------------------------------------
 
+local CHECK_MS = 1000
+
 function Storage.build(win, body)
-    local page = { win = win, body = body }
-    page.list = K.list(body, page, function(p, row) Storage.choose(p, row.container, row.key, row.labels) end)
-    page.list.emptyText = "Label a container and sorting knows what goes in it. Right-click one, or open it and pick it here."
-    page.title = K.label(body, "", "text")
+    local page = { win = win, body = body, orders = {} }
+    page.list = K.list(body, page, function(p, row) Storage.choose(p, row.container, row.key) end)
+    page.list.emptyText = "Label a container and LootBox knows what goes in it. Right-click one, or open it and pick it here."
     page.car = K.button(body, "Forget vehicle", page, function(p)
         local instance = app(p)
         instance.state.vehicle = nil
         instance:persist()
         Storage.refresh(p)
     end, "ghost")
-    page.picker = Picker.new(body, { owner = page, onlyCategories = true, chosenTitle = "Belongs in here", emptyText = "Nothing is sorted into this container yet.",
-        changed = function(p, selection)
-            local instance = app(p)
-            if not instance or not p.container then return end
-            local ok, err = instance:setLabels(p.container, selection.ids)
-            if not ok then p.title:set(tostring(err), "bad") end
-            Storage.refresh(p)
-        end })
+    page.title = K.label(body, "", "dim")
+    page.name = K.entry(body, "Name")
+    page.name.onCommandEntered = function() K.unfocus(win); Storage.saveName(page) end
+    page.show = K.button(body, "Show me", page, Storage.showMe, "plain", "Points the way to it.")
+    page.more = K.button(body, "More...", page, Storage.menu, "ghost")
+    page.fill = K.label(body, "When to fill it", "dim")
+    for _, order in ipairs(StorageMenu.orders) do
+        local button = K.button(body, order.title, page, function(p) Storage.change(p, "setStorage", { order = order.id }) end, "ghost", order.tip)
+        button.order = order.id
+        page.orders[#page.orders + 1] = button
+    end
+    page.rest = K.toggle(body, "Anything else", false, page, function(p) Storage.saveLabels(p) end, "Takes what no other storage is labelled for.")
+    page.picker = Picker.new(body, { owner = page, chosenTitle = "Belongs in here", emptyText = "Nothing is put away in here yet.",
+        changed = function(p) Storage.saveLabels(p) end })
+    page.parts = { page.name, page.show, page.more, page.fill, page.rest, page.picker }
+    for _, button in ipairs(page.orders) do page.parts[#page.parts + 1] = button end
     return page
+end
+
+local function target(page) return page.container or page.key end
+
+-- The entry this page is about, or a plain one for a container without labels.
+local function chosen(page, instance)
+    for _, entry in ipairs(instance.world:storages()) do if entry.key == page.key then return entry end end
+    if not page.container then return nil end
+    local square = instance.world:square(page.container)
+    return { key = page.key, container = page.container, name = Describe.container(page.container), tiles = 0,
+        kind = page.container:getContainingItem() and Describe.container(page.container) or instance.world.plainName(page.container), nameable = page.container:getContainingItem() == nil, carried = instance.world:owns(page.container),
+        point = square and { x = square:getX(), y = square:getY(), z = square:getZ() } }
+end
+
+function Storage.change(page, method, value)
+    local instance = app(page)
+    -- Clicking the picker takes the focus from a name that was just typed.
+    Storage.saveName(page)
+    if not instance or not page.key then return end
+    local ok, err = instance[method](instance, target(page), value)
+    if ok then View.refresh(page.win.playerIndex) end
+    Storage.load(page, true)
+    if not ok then page.title:set(tostring(err), "bad") end
+end
+
+function Storage.saveLabels(page) Storage.change(page, "setLabels", Labels.join(page.picker.selection, page.rest.on)) end
+
+function Storage.saveName(page)
+    local text = page.name:getText()
+    if not page.key or not page.nameable or text == page.saved then return end
+    page.saved = text
+    Storage.change(page, "setStorage", { name = text })
+end
+
+function Storage.showMe(page)
+    local instance = app(page)
+    local entry = instance and page.key and chosen(page, instance)
+    if not entry then return end
+    local ok, text = View.show(page.win.playerIndex, entry)
+    page.title:set(text, ok and "good" or "warn")
+end
+
+function Storage.menu(page)
+    local instance = app(page)
+    if not instance or not page.key then return end
+    Storage.saveName(page)
+    local rows, labels = StorageMenu.changes(instance, target(page), page.container)
+    local copy = #StorageMenu.copyable(labels) > 0
+    if #rows == 0 and not copy then page.title:set("Nothing to copy or paste yet.", "dim"); return end
+    local menu = K.menu(page.win.playerIndex, page.more)
+    if not menu then return end
+    if copy then K.option(menu, "Copy labels", function() StorageMenu.copy(labels) end) end
+    for _, entry in ipairs(rows) do
+        K.option(menu, entry.title, function()
+            if entry.clear then Storage.change(page, "setStorage", { order = "usual" }) end
+            Storage.change(page, "setLabels", entry.labels)
+        end, nil, entry.tip)
+    end
 end
 
 function Storage.refresh(page)
@@ -157,28 +230,29 @@ function Storage.refresh(page)
     local rows = {}
     if instance then
         local PlanPage = require "LootBox/PlanPage"
-        local open, names, here = PlanPage.openContainers(page.win.playerIndex), nil, {}
-        names = PlanPage.numbered(open)
+        local session, open, here = { player = instance.player, world = instance.world }, {}, {}
+        for _, container in ipairs(PlanPage.openContainers(page.win.playerIndex)) do
+            if StorageMenu.labelable(session, container) then open[#open + 1] = container end
+        end
+        local names = PlanPage.numbered(open)
         for index, container in ipairs(open) do
-            local key = container:getType() ~= "floor" and instance.world:key(container)
-            if key then
-                here[key] = true
-                local labels = instance:labels(container)
-                rows[#rows + 1] = { title = names[index], sub = #labels > 0 and Storage.names(labels) or "No labels", container = container, key = key,
-                    labels = labels, current = key == page.key, subTone = #labels > 0 and "info" or "faint" }
-            end
+            local key, labels = instance.world:key(container), instance:labels(container)
+            here[key] = true
+            rows[#rows + 1] = { title = names[index], sub = #labels > 0 and Describe.labels(labels, App.category, 4) or "No labels",
+                container = container, key = key, current = key == page.key, subTone = #labels > 0 and "info" or "faint" }
         end
         if #rows > 0 then table.insert(rows, 1, { heading = true, title = "Open right now" }) end
         local others = {}
-        for _, entry in ipairs(instance.world:labelledContainers()) do
+        for _, entry in ipairs(instance.world:storages()) do
             if not here[entry.key] then
-                local at = entry.point and (entry.point.x .. ", " .. entry.point.y .. (entry.point.z ~= 0 and (", floor " .. entry.point.z) or ""))
-                others[#others + 1] = { title = tostring(entry.name or "Container"), sub = Storage.names(entry.labels), subTone = "info", right = at,
-                    container = entry.container, key = entry.key, labels = entry.labels, current = entry.key == page.key }
+                local away = entry.carried and "carried" or entry.tiles == math.huge and "" or math.floor(entry.tiles + 0.5) .. " tiles"
+                others[#others + 1] = { title = entry.name, sub = #entry.labels > 0 and Describe.labels(entry.labels, App.category, 4) or "No labels",
+                    subTone = #entry.labels > 0 and "info" or "faint", right = away, rightTone = entry.container and "dim" or "faint",
+                    container = entry.container, key = entry.key, current = entry.key == page.key }
             end
         end
         if #others > 0 then
-            rows[#rows + 1] = { heading = true, title = "Labelled elsewhere", right = tostring(#others) }
+            rows[#rows + 1] = { heading = true, title = "My other storage", right = tostring(#others) }
             for _, row in ipairs(others) do rows[#rows + 1] = row end
         end
         local vehicle = instance.state.vehicle
@@ -188,53 +262,98 @@ function Storage.refresh(page)
     page.list:fill(rows, true)
 end
 
-function Storage.names(ids)
-    local names = {}
-    for _, id in ipairs(ids or {}) do names[#names + 1] = App.categoryName(id) end
-    return table.concat(names, ", ")
+-- Shows what is saved for the chosen container. keep leaves the lists where they are scrolled.
+function Storage.load(page, keep)
+    local instance = app(page)
+    local entry = instance and page.key and chosen(page, instance)
+    -- Out of sight and without anything saved, there is nothing left to show.
+    if not entry then page.container, page.key = nil, nil end
+    page.nameable = entry ~= nil and entry ~= false and entry.nameable == true
+    for _, part in ipairs(page.parts) do part:setVisible(entry and true or false) end
+    if not entry then
+        page.title:set(instance and "Choose a container on the left." or "", "dim")
+        if instance then Storage.refresh(page) end
+        return
+    end
+    page.revision = instance.storageRevision
+    local selection, rest = Labels.split(instance:labels(target(page)))
+    page.picker:setSelection(selection, keep)
+    page.rest.on = rest
+    local order = instance:storageDetails(target(page)).order or "usual"
+    for _, button in ipairs(page.orders) do button:setTone(button.order == order and "primary" or "ghost") end
+    page.name:setEditable(page.nameable)
+    page.name:setClearButton(page.nameable)
+    local name = entry.given or page.container and instance.world:givenName(page.container)
+        or entry.key:sub(1, 4) == "bag:" and entry.name or ""
+    if not page.name:isFocused() then page.name:setText(name) end
+    page.saved = name
+    local away = entry.carried and "carried" or entry.tiles and entry.tiles < math.huge and Facts.awayText(entry.tiles)
+    local why = not page.nameable and (entry.key:sub(1, 4) == "bag:" and ". Rename the bag from its own menu." or ". Go near it to rename it.") or ""
+    page.title:set(entry.kind .. (away and ", " .. away or "") .. why, "dim")
+    Storage.refresh(page)
 end
 
-function Storage.choose(page, container, key, labels)
+function Storage.choose(page, container, key)
+    Storage.saveName(page)
+    K.unfocus(page.win)
     page.container, page.key = container, key
-    if container then
-        page.title:set(Describe.container(container), "text")
-        page.picker:setSelection({ ids = listOf(labels), types = {} })
-    elseif key then
-        page.title:set("Not loaded. Go near it to change its labels.", "dim")
-        page.picker:setSelection({ ids = listOf(labels), types = {} }, true)
-    else
-        page.title:set("Choose a container on the left.", "dim")
-    end
-    page.picker:setVisible(container ~= nil or key ~= nil)
-    Storage.refresh(page)
+    Storage.load(page)
 end
 
 function Storage.opened(page, context)
     local instance = app(page)
-    page.picker:setVisible(instance ~= nil)
+    if page.key then Storage.saveName(page) end
     if not instance then
-        page.title:set("")
+        page.container, page.key = nil, nil
         page.list.emptyText = "Enter a game to label storage."
         page.list:fill({})
         page.car:setVisible(false)
-        return
+    else
+        local container = context and context.container
+        if container then
+            context.container = nil
+            page.container, page.key = container, instance.world:key(container)
+        elseif page.container and instance.world:key(page.container) ~= page.key then page.container, page.key = nil, nil end
     end
-    local container = context and context.container
-    if container then
-        context.container = nil
-        Storage.choose(page, container, instance.world:key(container), instance:labels(container))
-    elseif page.container and instance.world:key(page.container) == page.key then
-        Storage.choose(page, page.container, page.key, instance:labels(page.container))
-    else Storage.choose(page, nil, nil) end
+    Storage.load(page)
+end
+
+-- A name is saved when the player is done with it, not at every letter. Labels changed elsewhere,
+-- and a container that went out of sight, show within a second.
+function Storage.tick(page)
+    local instance = app(page)
+    if not instance or not page.key then return end
+    if not page.name:isFocused() then Storage.saveName(page) end
+    local stamp = getTimestampMs()
+    if page.checked and stamp >= page.checked and stamp - page.checked < CHECK_MS then return end
+    page.checked = stamp
+    local lost = page.container and not instance.world:valid(page.container)
+    if lost then page.container = nil end
+    local entry = not page.container and chosen(page, instance)
+    if entry and entry.container then page.container, lost = entry.container, true end
+    if lost or page.revision ~= instance.storageRevision then Storage.load(page, true) end
 end
 
 function Storage.layout(page)
-    local body, left = page.body, math.floor(page.body.width * 0.34)
+    local body, left = page.body, math.floor(page.body.width * 0.3)
     K.place(page.list, 0, 0, left, body.height - (page.car:isVisible() and (K.ROW + K.GAP) or 0))
     K.place(page.car, 0, body.height - K.ROW)
     local x, width = left + K.GAP, body.width - left - K.GAP
     K.place(page.title, x, 5)
-    page.picker:layout(x, K.ROW, width, body.height - K.ROW)
+    local y = K.ROW
+    K.place(page.more, x + width - page.more.width, y)
+    K.place(page.show, x + width - page.more.width - K.GAP - page.show.width, y)
+    K.place(page.name, x, y + math.floor((K.ROW - K.ENTRY) / 2), width - page.more.width - page.show.width - 2 * K.GAP)
+    y = y + K.ROW + 4
+    K.place(page.fill, x, y + 5)
+    local at = x + K.width(page.fill.name) + K.PAD
+    for _, button in ipairs(page.orders) do
+        K.place(button, at, y)
+        at = at + button.width + 2
+    end
+    K.place(page.rest, x + width - page.rest.width, y)
+    y = y + K.ROW + K.GAP
+    page.picker:layout(x, y, width, body.height - y)
 end
 
 return { Loot = Loot, Categories = Categories, Storage = Storage }

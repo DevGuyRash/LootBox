@@ -1,4 +1,6 @@
 -- Plain-language names shared by menus, windows, the job bar and the log.
+local Labels = require "LootBox/Labels"
+
 local Describe = {}
 
 local function call(object, method, ...)
@@ -14,6 +16,11 @@ end
 
 function Describe.category(id, definition)
     if definition then return definition.name end
+    if id == Labels.REST then return "Anything else" end
+    local fullType = Labels.typeOf(id)
+    if fullType then return Describe.type(fullType) end
+    local _, single = Labels.itemOf(id)
+    if single then return Describe.type(single) .. " (one of them)" end
     local raw = id:match("^native:(.+)$")
     return raw and (translated("IGUI_ItemCat_" .. raw) or raw) or "Removed category"
 end
@@ -22,8 +29,21 @@ function Describe.type(fullType)
     return getItemNameFromFullType and getItemNameFromFullType(fullType) or fullType
 end
 
+-- "Nails, Tools +2": the first few names of a list of labels.
+function Describe.labels(ids, category, limit)
+    local names = {}
+    limit = limit or 2
+    for index = 1, math.min(limit, #ids) do names[index] = Describe.category(ids[index], category and category(ids[index])) end
+    return table.concat(names, ", ") .. (#ids > limit and " +" .. (#ids - limit) or "")
+end
+
+-- The name the player gave a container. The app answers this once there is one.
+function Describe.given() end
+
 function Describe.container(container)
     if not container then return "a container" end
+    local given = Describe.given(container)
+    if given then return given end
     local item = call(container, "getContainingItem")
     if item then return tostring(call(item, "getName") or "bag") end
     local part = call(container, "getVehiclePart")
@@ -89,6 +109,7 @@ end
 
 -- A short job title: verb first, then what makes this job different.
 function Describe.title(request, category)
+    if request.title then return request.title end
     local kind = request.destination and request.destination.kind
     local what, from = Describe.what(request.filter, category), Describe.from(request)
     if kind == "condense" or request.shortcutIntent == "condense" then return "Condense bags" end

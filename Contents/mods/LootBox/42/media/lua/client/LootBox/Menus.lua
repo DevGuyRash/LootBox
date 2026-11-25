@@ -13,6 +13,7 @@ local Selection = require "LootBox/Selection"
 local ObjectMenu = require "LootBox/ObjectMenu"
 local Focus = require "LootBox/ContainerFocus"
 local PaneClicks = require "LootBox/PaneClicks"
+local StorageMenu = require "LootBox/StorageMenu"
 
 local Menus = {}
 local UI
@@ -196,7 +197,7 @@ local function oneCategory(id) return { ids = { id }, types = {}, all = false } 
 local function request(scope, kind, filter, extra)
     local result = { scope = scope, includeInventory = false, includeBags = not (kind == "inventory" and filter.all), filter = filter, sourceLabels = {}, destination = { kind = kind, labels = {} } }
     for key, value in pairs(extra or {}) do
-        if key == "ref" or key == "mode" then result.destination[key] = value else result[key] = value end
+        if key == "ref" or key == "mode" or key == "near" then result.destination[key] = value else result[key] = value end
     end
     return result
 end
@@ -228,6 +229,8 @@ local function floorHere(s)
     if s.square and call(s.square, "isFree", false) == true then return s.square end
     return s.player:getCurrentSquare()
 end
+
+local tools = { ask = ask, openContainers = openContainers, nameAll = nameAll, ui = function() return UI end }
 
 -- The job in progress ------------------------------------------------------
 
@@ -264,46 +267,6 @@ local function presetRows(host, s, fits, context)
             end)
         end
     end
-end
-
-local function labelRows(host, s, container, facts)
-    if not storage(container) or facts.kind == "main" or facts.kind == "corpse" or facts.kind == "bin" then return end
-    if not s.world:key(container) then return end
-    local current = s.app:labels(container)
-    local on, shown = {}, {}
-    for _, id in ipairs(current) do on[id] = true end
-    local title = "Belongs here"
-    if #current > 0 then
-        title = title .. ": " .. App.categoryName(current[1]) .. (#current > 1 and (" +" .. (#current - 1)) or "")
-    end
-    local child = host:sub("belongs", title)
-    local function toggle(id)
-        return ask(s, "menu.label", (on[id] and "unlabel " or "label ") .. id, Log.container(container, s.player), function()
-            local labels = {}
-            for _, value in ipairs(s.app:labels(container)) do if value ~= id then labels[#labels + 1] = value end end
-            if not on[id] then labels[#labels + 1] = id end
-            return s.app:setLabels(container, labels)
-        end)
-    end
-    for _, id in ipairs(current) do
-        shown[id] = true
-        child:check("label", App.categoryName(id), true, toggle(id))
-    end
-    local suggestions = {}
-    for id, count in pairs(facts.categories or {}) do if not shown[id] then suggestions[#suggestions + 1] = { id = id, count = count } end end
-    table.sort(suggestions, function(a, b) if a.count ~= b.count then return a.count > b.count end return a.id < b.id end)
-    for index = 1, math.min(5, #suggestions) do
-        shown[suggestions[index].id] = true
-        child:check("category", App.categoryName(suggestions[index].id), false, toggle(suggestions[index].id), "Already in here.")
-    end
-    local custom = 0
-    for _, definition in ipairs(App.customCategories()) do
-        if not shown[definition.id] and custom < 6 then
-            custom = custom + 1
-            child:check("tag", definition.name, false, toggle(definition.id))
-        end
-    end
-    child:row("more", "More...", function() UI.open(s.playerIndex, "storage", { container = container }) end)
 end
 
 -- A key ring is no place for planks.
@@ -363,7 +326,7 @@ local function containerRows(host, s, container, origin)
 
     if has then
         local rows = {}
-        if s.world:hasStorageLabels() then
+        if s.world:contentsHaveHomes(container) then
             rows[#rows + 1] = { icon = "sort", title = "Where it belongs", single = "Put contents away", tip = "Storage with matching labels.",
                 run = go("sort contents", request("container", "labels", everything(), from)) }
         end
@@ -394,12 +357,12 @@ local function containerRows(host, s, container, origin)
             rows[#rows + 1] = { icon = "takeSame", title = "More of what is inside (" .. same .. ")", single = "Put in more of the same (" .. same .. ")",
                 run = go("put in matching", request("inventory", "container", { ids = {}, types = types, all = false }, { ref = container })) }
         end
-        local labels = s.app:labels(container)
-        local fits = 0
-        for _, id in ipairs(labels) do fits = fits + s.world:countCarriedCategory(id, container) end
-        if fits > 0 then
-            rows[#rows + 1] = { icon = "belongs", title = "What belongs here (" .. fits .. ")", single = "Put in what belongs here (" .. fits .. ")",
-                run = go("put in labelled", request("inventory", "container", { ids = labels, types = {}, all = false }, { ref = container })) }
+        local fits, only = s.world:fitting(container), {}
+        for _, item in ipairs(fits) do only[tostring(item:getID())] = true end
+        if #fits > 0 then
+            rows[#rows + 1] = { icon = "belongs", title = "What belongs here (" .. #fits .. ")", single = "Put in what belongs here (" .. #fits .. ")",
+                run = go("put in labelled", request("inventory", "container", everything(), { ref = container, only = only,
+                    title = "Put what belongs in " .. name .. " there" })) }
         end
         if not facts.owned and (facts.capacity or 0) >= 20 and s.world:countCarried(nil, container) > 0 then
             rows[#rows + 1] = { icon = "all", title = "Everything I carry", single = "Put in everything I carry",
@@ -413,7 +376,7 @@ local function containerRows(host, s, container, origin)
     if away then
         host:row("trash", "Throw away contents" .. count, go("throw away contents", request("container", "trash", everything(), from)), throwTip(away))
     end
-    labelRows(host, s, container, facts)
+    s.world:pass(function() StorageMenu.container(host, s, container, facts, tools) end)
     presetRows(host, s, function(setup) return setup.scope == "container" or setup.destination.kind == "container" end,
         { container = container, sourceContainer = container, targetContainer = container, square = floorHere(s) })
 end
@@ -431,7 +394,7 @@ end
 
 -- What can be done with "all of these": one rule set for a type, a selection of
 -- types, a game category and a custom category.
-local function allRows(s, what, label, carried, total, picked, source, target, descriptor)
+local function allRows(s, what, label, carried, total, picked, source, target)
     local rows, clicked, away = {}, what.clicked, s.world:binDistance()
     local function add(icon, title, single, made, tip)
         rows[#rows + 1] = { icon = icon, title = title, single = single, run = act(s, "menu.item", single, made, clicked), tip = tip }
@@ -442,7 +405,11 @@ local function allRows(s, what, label, carried, total, picked, source, target, d
             local name = Describe.container(target)
             add("put", "Put in " .. name, "Put all " .. label .. " in " .. name, request("inventory", "container", what.filter, { ref = target }))
         end
-        if s.world:storageAccepts(descriptor) then
+        if what.home then
+            add("sort", "Put away in " .. what.home.name, "Put away all " .. label .. " in " .. what.home.name, request("inventory", "labels", what.filter,
+                -- Further storage may be meant for it more closely, but this is the one named.
+                { near = what.home.tiles <= s.world.HOME_RANGE and s.world:nearHere() or nil }))
+        elseif what.homes then
             add("sort", "Put away", "Put away all " .. label, request("inventory", "labels", what.filter))
         end
         if s.world:rememberedVehicleLoaded() then
@@ -507,9 +474,12 @@ local function itemRows(host, s, items, item)
     end
     local total, mine, everywhere = ofTypes(order)
     local label = #order == 1 and tostring(item:getName()) or (#order .. " selected types")
+    local home = carried and #order == 1 and s.world:home(item) or nil
+    if home and (not home.container or home.carried) then home = nil end
     group(host, "all", "All " .. label .. " (" .. total .. ")",
-        allRows(s, { filter = { ids = {}, types = order, all = false }, clicked = clicked, mine = mine, everywhere = everywhere, kind = facts and facts.kind },
-            label .. " (" .. total .. ")", carried, total, picked, source, target, descriptor), item)
+        allRows(s, { filter = { ids = {}, types = order, all = false }, clicked = clicked, mine = mine, everywhere = everywhere, kind = facts and facts.kind,
+                home = home, homes = carried and s.world:storageAccepts(descriptor) and #order > 1 },
+            label .. " (" .. total .. ")", carried, total, picked, source, target), item)
 
     if #order == 1 and s.preferences.categoryShortcuts then
         local groups = { { id = Catalog.categoryId(item) } }
@@ -524,63 +494,14 @@ local function itemRows(host, s, items, item)
                 local name = App.categoryName(entry.id)
                 local open = carried and 0 or sumOpen(s, function(f) return f.categories and f.categories[entry.id] or 0 end)
                 group(host, "category", "All " .. name .. " (" .. amount .. ")",
-                    allRows(s, { filter = oneCategory(entry.id), clicked = clicked, mine = held, everywhere = open, kind = facts and facts.kind },
-                        name .. " (" .. amount .. ")", carried, amount, total, source, target, descriptor))
+                    allRows(s, { filter = oneCategory(entry.id), clicked = clicked, mine = held, everywhere = open, kind = facts and facts.kind,
+                            homes = carried and s.world:storageAccepts(descriptor) },
+                        name .. " (" .. amount .. ")", carried, amount, total, source, target))
             end
         end
     end
 
-    local fullType = order[1]
-    local listed = #order == 1 and s.app:onChecklist("types", fullType)
-    if #order == 1 then
-        host:check("list", "On my loot list", listed, ask(s, "menu.list", listed and "unlist" or "list", clicked,
-            function() return s.app:toggleChecklist("types", fullType) end), "Looting picks up everything on the list.")
-    end
-    local kept = s.app:isKept(item)
-    host:check("keep", picked > 1 and "Keep these" or "Keep this one", kept, ask(s, "menu.keep", kept and "unkeep" or "keep", clicked, function()
-        for _, entry in ipairs(items) do
-            local ok, err = s.app:protect(entry, not kept)
-            if not ok then return nil, err end
-        end
-        return true
-    end), "LootBox never moves or deletes a kept item.")
-
-    if #order == 1 then
-        local child = host:sub("category", "Categories")
-        local custom = App.customCategories()
-        for index = 1, math.min(12, #custom) do
-            local definition = custom[index]
-            local inside = false
-            for _, value in ipairs(definition.types) do if value == fullType then inside = true end end
-            child:check("tag", definition.name, inside, ask(s, "menu.category", (inside and "remove from " or "add to ") .. definition.name, clicked, function()
-                local kinds = {}
-                for _, value in ipairs(definition.types) do if value ~= fullType then kinds[#kinds + 1] = value end end
-                if not inside then kinds[#kinds + 1] = fullType end
-                return App.saveCategory({ id = definition.id, name = definition.name, types = kinds, includes = definition.includes })
-            end))
-        end
-        if picked == 1 then
-            local single = child:sub("label", "Only this one")
-            local labels = {}
-            for _, id in ipairs(s.app:itemLabels(item)) do labels[id] = true end
-            for index = 1, math.min(12, #custom) do
-                local definition = custom[index]
-                single:check("tag", definition.name, labels[definition.id], ask(s, "menu.tag", "tag " .. definition.name, clicked, function()
-                    local ids = {}
-                    for _, id in ipairs(s.app:itemLabels(item)) do if id ~= definition.id then ids[#ids + 1] = id end end
-                    if not labels[definition.id] then ids[#ids + 1] = definition.id end
-                    return s.app:setItemLabels(item, ids)
-                end))
-            end
-            single:row("more", "More...", function()
-                UI.pick(s.playerIndex, "Categories for this " .. tostring(item:getName()), s.app:itemLabels(item), function(ids)
-                    local ok, err = s.app:setItemLabels(item, ids)
-                    if not ok then UI.say(s.playerIndex, err) end
-                end)
-            end)
-        end
-        child:row("newCategory", "New category...", function() UI.open(s.playerIndex, "categories", { type = fullType }) end)
-    end
+    s.world:pass(function() StorageMenu.item(host, s, items, item, order, tools) end)
 end
 
 -- The world around the player ------------------------------------------------
@@ -614,9 +535,8 @@ local function aroundRows(host, s)
         if room and (room.containers > 0 or room.groundItems > 0) then place(child, "room", "This room", "room") end
         if square:getBuilding() then place(child, "building", "This building", "building") end
     end
-    if s.world:hasStorageLabels() and s.world:countCarried(nil) > 0 then
-        child:row("sort", "Put away what I carry", act(s, "menu.around", "put away carried", request("inventory", "labels", everything()), clicked))
-    end
+    local ready = #s.world:putAway()
+    if ready > 0 then child:row("sort", "Put away what I carry (" .. ready .. ")", function() UI.putAway(s.playerIndex, "menu.around") end) end
     if child.context then
         place(child, "area", "Mark an area", "area", { area = true })
         presetRows(child, s, function(setup) return setup.scope ~= "container" and setup.destination.kind ~= "container" end, { square = floorHere(s) })

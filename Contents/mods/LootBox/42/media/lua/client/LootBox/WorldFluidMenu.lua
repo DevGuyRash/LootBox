@@ -59,7 +59,7 @@ end
 -- Fill one clicked loot vessel: it is fetched, filled and put back.
 function Menu.lootRows(ctx,anchors,target)
     local rows={}
-    if ctx.app.world:protected(target.item)~=false or target.item:isFavorite() then return rows end
+    if ctx.app.world:protected(target.item,{using=true})~=false or target.item:isFavorite() then return rows end
     for _,a in ipairs(anchors) do
         local source=W.recipe(a)
         if source and W.canReceive(ctx.player,a,target) then

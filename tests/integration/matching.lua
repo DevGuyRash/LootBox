@@ -111,7 +111,7 @@ local function fixture()
         AddHandler = function(class) add(ISLootWindowContainerControls_HandlerList, class) end,
         AddFloorHandler = function(class) add(ISLootWindowContainerControls_FloorHandlerList, class) end,
     }
-    f.ui = {condense = function(playerNum) f.condensePlayer = playerNum end, act = function(playerNum, request, options)
+    f.ui = {putAway = function(playerNum, origin) f.putAway = {playerNum, origin} end, condense = function(playerNum) f.condensePlayer = playerNum end, act = function(playerNum, request, options)
         f.quick[#f.quick + 1] = {player = playerNum, request = request, options = options}
     end, say = function(playerNum, reason)
         f.progress[#f.progress + 1] = {player = playerNum, reason = reason}
@@ -150,9 +150,9 @@ end
 
 test("companions follow their native peers and retain foreign handler order", function(f)
     local classes = ISInventoryWindowContainerControls_HandlerList
-    assert(#classes == 7 and classes[1] == f.module.Condense and classes[2] == f.transferPeer)
-    assert(classes[3] == f.peers[1] and classes[4] == f.module.Displayed)
-    assert(classes[5] == f.foreign and classes[6] == f.peers[2] and classes[7] == f.module.Nearby)
+    assert(#classes == 8 and classes[1] == f.module.PutAway and classes[2] == f.module.Condense and classes[3] == f.transferPeer)
+    assert(classes[4] == f.peers[1] and classes[5] == f.module.Displayed)
+    assert(classes[6] == f.foreign and classes[7] == f.peers[2] and classes[8] == f.module.Nearby)
     assert(f.peers[1].perform == f.originalCallbacks[1] and f.peers[2].perform == f.originalCallbacks[2])
 end)
 
@@ -161,7 +161,7 @@ test("repeated installation cannot duplicate or move controls", function(f)
     for index, value in ipairs(ISInventoryWindowContainerControls_HandlerList) do before[index] = value end
     f.module.install(f.ui)
     for index, value in ipairs(ISInventoryWindowContainerControls_HandlerList) do assert(value == before[index]) end
-    assert(#ISInventoryWindowContainerControls_HandlerList == 7)
+    assert(#ISInventoryWindowContainerControls_HandlerList == 8)
 end)
 
 test("inventory matching companions name distinct destinations with compact native sizing", function(f)
@@ -308,7 +308,7 @@ test("older builds without the native control system retain a harmless optional 
     package.loaded["LootBox/Matching"] = nil
     local unavailable = require "LootBox/Matching"
     assert(unavailable.install(f.ui) == false and unavailable.Displayed == nil)
-    assert(#ISInventoryWindowContainerControls_HandlerList == 7 and #f.quick == 0)
+    assert(#ISInventoryWindowContainerControls_HandlerList == 8 and #f.quick == 0)
 end)
 
 test("Smart Take companions follow each native object and floor peer without changing callbacks", function(f)
@@ -355,6 +355,55 @@ test("Smart Take Matching checks fresh records and deduplicates actual types on 
     assert(chosen.destination.kind == "inventory" and chosen.sourceContainer == f.displayed)
     f.records = {{item = old}}; handler:perform()
     assert(f.smartCalls == 3 and f.quick[2].request.filter.types[1] == "Base.Nails")
+end)
+
+local function putAway(f, ...)
+    f.app.state = {containerLabels = {["world:1"] = {"native:Food"}}}
+    f.entries = {}
+    for index, entry in ipairs({...}) do
+        local it = item("Base." .. entry[1])
+        it.getDisplayName = function() return entry[1] end
+        it.getID = function() return 100 + index end
+        f.entries[index] = {item = it, storage = {key = entry[2], name = entry[2]}}
+    end
+    function f.app.world:putAway() f.looks = (f.looks or 0) + 1; return f.entries end
+    function f.app.world:nearStorage() return f.near or "kitchen" end
+    function f.app.world:forgetGlance() end
+    function f.app.world:nearHere() return {x = 1, y = 2, range = 20} end
+    f.app.player = {}
+    local value = f.module.PutAway:new()
+    value.playerNum, value.playerObj, value.inventoryWindow, value.container = 3, f.player, f.inventoryWindow, f.inventoryPane.inventory
+    return value
+end
+
+test("Put Away says how many things have a place and what goes where, most first", function(f)
+    local handler = putAway(f, {"Soup", "Pantry"}, {"Nails", "Crate"}, {"Nails", "Crate"})
+    assert(handler:shouldBeVisible())
+    handler:getControl()
+    assert(handler.control.title == "Put Away (3)")
+    assert(handler.control.tooltip == "Walk over and put these in their places.\nNails (2): Crate\nSoup: Pantry")
+    handler:perform()
+    assert(f.putAway[1] == 3 and f.putAway[2] == "toolbar.put-away")
+end)
+
+test("Put Away hides without labels, without anything to put away, and when turned off", function(f)
+    local handler = putAway(f)
+    assert(not handler:shouldBeVisible())
+    handler = putAway(f, {"Soup", "Pantry"})
+    f.app.state.containerLabels = {}
+    assert(not handler:shouldBeVisible() and f.looks == 1, "Without labels nothing is read")
+    handler = putAway(f, {"Soup", "Pantry"})
+    f.preferences.putAwayButton = false
+    assert(not handler:shouldBeVisible())
+end)
+
+test("Put Away looks again when the storage at hand changes, and not at every frame", function(f)
+    local handler = putAway(f, {"Soup", "Pantry"})
+    f.near = "away"
+    for _ = 1, 20 do handler:shouldBeVisible() end
+    assert(f.looks == 1)
+    f.near, f.now, f.entries = "home", f.now + 1000, {}
+    assert(not handler:shouldBeVisible() and f.looks == 2)
 end)
 
 test("Smart matching remains visible when the selected carried bag is empty", function(f)

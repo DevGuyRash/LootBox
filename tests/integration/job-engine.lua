@@ -1083,6 +1083,378 @@ case("put away prefers where the same thing is, then the closest label, then the
     assert(holding:contains(glue) and custom:contains(nails) and near:contains(screws) and tagged:contains(named))
 end)
 
+local function labelled(f, crate, ...)
+    f.state.containerLabels[assert(f.world:key(crate))] = {...}
+    return crate
+end
+local function putAway(f, options) return f.run(f.request({kind = "labels", labels = {}}, options or {scope = "inventory"})) end
+
+case("a label for a kind of item beats where the same kind happens to lie", function(f)
+    local named, holding = labelled(f, f.crate(f.square(9, 0), "named"), "type:Base.Nails"), labelled(f, f.crate(f.square(3, 0), "holding"), "native:Material")
+    f.item(holding, "Base.Nails")
+    local nails, glue = f.item(f.inventory, "Base.Nails"), f.item(f.inventory, "Base.Glue")
+    local status = putAway(f)
+    assert(status.done == 2 and named:contains(nails) and holding:contains(glue), status.reason)
+end)
+
+case("a place for one item is for that item only", function(f)
+    local rack, crate = f.crate(f.square(9, 0), "rack"), labelled(f, f.crate(f.square(3, 0), "crate"), "type:Base.Axe")
+    local mine, spare = f.item(f.inventory, "Base.Axe"), f.item(f.inventory, "Base.Axe")
+    local mark = "item:" .. mine.id .. ":Base.Axe"
+    labelled(f, rack, mark)
+    f.state.itemLabels[tostring(mine.id)] = {mark}
+    local status = putAway(f)
+    assert(status.done == 2 and rack:contains(mine) and crate:contains(spare), status.reason)
+end)
+
+case("a place chosen for an item or its kind moves it out of a category's storage, once", function(f)
+    local tools, rack, shed = labelled(f, f.crate(f.square(2, 0), "tools"), "native:Tool"), f.crate(f.square(6, 0), "rack"),
+        labelled(f, f.crate(f.square(9, 0), "shed"), "type:Base.Saw")
+    local hammer, saw, wrench = f.item(tools, "Base.Hammer", {category = "Tool"}), f.item(tools, "Base.Saw", {category = "Tool"}),
+        f.item(tools, "Base.Wrench", {category = "Tool"})
+    local mark = "item:" .. hammer.id .. ":Base.Hammer"
+    labelled(f, rack, mark)
+    f.state.itemLabels[tostring(hammer.id)] = {mark}
+    local status = putAway(f, {scope = "room"})
+    assert(status.done == 2 and rack:contains(hammer) and shed:contains(saw) and tools:contains(wrench), status.reason)
+    local plan = assert(f.jobs:preview(f.request({kind = "labels", labels = {}}, {scope = "room"})))
+    assert(#plan.moves == 0)
+end)
+
+case("a full place sends the item to the next, and says so beforehand", function(f)
+    local near, far = labelled(f, f.crate(f.square(2, 0), "near"), "native:Material"), labelled(f, f.crate(f.square(6, 0), "far"), "native:Material")
+    near.capacity = 0
+    local nails = f.item(f.inventory)
+    assert(f.world:home(nails).container == far and f.world:putAway()[1].storage.container == far)
+    far.capacity = 0
+    f.now = f.now + 2000
+    local home, placed, full = f.world:home(nails)
+    assert(not home and not placed and full.container == near and #f.world:putAway() == 0)
+end)
+
+case("filled last waits for the others of its kind, not for a wider label, and never passes over one item's own place", function(f)
+    local material, nails, rack = labelled(f, f.crate(f.square(2, 0), "material"), "native:Material"), labelled(f, f.crate(f.square(6, 0), "nails"), "type:Base.Nails"),
+        f.crate(f.square(9, 0), "rack")
+    local mine, spare = f.item(f.inventory, "Base.Nails"), f.item(f.inventory, "Base.Nails")
+    local mark = "item:" .. mine.id .. ":Base.Nails"
+    labelled(f, rack, mark)
+    f.state.itemLabels[tostring(mine.id)] = {mark}
+    f.state.storage[f.world:key(nails)], f.state.storage[f.world:key(rack)] = {order = "last"}, {order = "last"}
+    local status = putAway(f)
+    assert(status.done == 2 and rack:contains(mine) and nails:contains(spare) and #material.items == 0, status.reason)
+    local plan = assert(f.jobs:preview(f.request({kind = "labels", labels = {}}, {scope = "room"})))
+    assert(#plan.moves == 0, "It is not moved a second time")
+end)
+
+case("what is in a category's storage stays sorted while its own place is full", function(f)
+    local material, box = labelled(f, f.crate(f.square(2, 0), "material"), "native:Material"), labelled(f, f.crate(f.square(6, 0), "box"), "type:Base.Nails")
+    local nails = f.item(material, "Base.Nails")
+    box.capacity = 0
+    local plan = assert(f.jobs:preview(f.request({kind = "labels", labels = {}}, {scope = "room"})))
+    assert(#plan.moves == 0 and plan.skipped[1].reason == "Already sorted")
+    local home, placed = f.world:home(nails)
+    assert(home == nil and placed)
+    box.capacity, f.now = 5, f.now + 2000
+    assert(f.world:home(nails).container == box)
+end)
+
+case("put away never moves things between the player's own bags, and automatic put-away only to what stays put", function(f)
+    local pantry = labelled(f, f.crate(f.square(5, 0), "pantry"), "native:Food")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.wearing[pack] = "base:Back"
+    labelled(f, pack.inside, "native:Food")
+    f.world:_observe(pack.inside)
+    local soup = f.item(f.inventory, "Base.Soup", {category = "Food"})
+    assert(f.world:home(soup).container == pantry and f.world:putAway()[1].storage.container == pantry)
+    local status = putAway(f)
+    assert(status.done == 1 and pantry:contains(soup), status.reason)
+    local bag = f.drop(f.square(1, 0), "Base.Duffel", {bag = true})
+    labelled(f, bag.inside, "type:Base.Soup")
+    f.world:_observe(bag.inside)
+    f.item(f.inventory, "Base.Soup", {category = "Food"})
+    f.now = f.now + 2000
+    assert(f.world:putAway()[1].storage.container == bag.inside and f.world:putAway(true)[1].storage.container == pantry)
+    local plan = assert(f.jobs:preview(f.request({kind = "labels", labels = {}, near = f.world:nearHere(true)}, {scope = "inventory"})))
+    assert(#plan.moves == 1 and plan.moves[1].to == "crate")
+end)
+
+case("something whose place is a bag the player carries stays with them", function(f)
+    labelled(f, f.crate(f.square(3, 0), "tools"), "native:Tool"); labelled(f, f.crate(f.square(5, 0), "medical"), "native:Medical")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.wearing[pack] = "base:Back"
+    local axe = f.item(f.inventory, "Base.Axe", {category = "Tool"})
+    local mark = "item:" .. axe.id .. ":Base.Axe"
+    labelled(f, pack.inside, mark, "type:Base.Bandage")
+    f.state.itemLabels[tostring(axe.id)] = {mark}
+    f.world:_observe(pack.inside)
+    local bandage = f.item(pack.inside, "Base.Bandage", {category = "Medical"})
+    assert(#f.world:putAway() == 0 and #f.world:putAway(true) == 0 and f.world:home(axe).container == pack.inside)
+    local _, placed = f.world:home(bandage)
+    assert(placed)
+    local status = putAway(f, {scope = "inventory", includeBags = true})
+    assert(status.state == "finished" and pack.inside:contains(axe) and pack.inside:contains(bandage), status.reason)
+end)
+
+case("what a labelled bag brought home is put away, and what it collects from a room stays in it", function(f)
+    local pantry, shelf = labelled(f, f.crate(f.square(5, 0), "pantry"), "native:Food"), f.crate(f.square(8, 0), "shelf")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.wearing[pack] = "base:Back"
+    labelled(f, pack.inside, "native:Food")
+    f.world:_observe(pack.inside)
+    local beans = f.item(pack.inside, "Base.Beans", {category = "Food"})
+    assert(f.world:home(beans).container == pantry and f.world:putAway(true)[1].item == beans)
+    local status = putAway(f, {scope = "inventory", includeBags = true})
+    assert(status.done == 1 and pantry:contains(beans), status.reason)
+    f.state.containerLabels[f.world:key(pantry)], f.roomSquares = nil, {f.square(8, 0)}
+    local soup = f.item(shelf, "Base.Soup", {category = "Food"})
+    status = putAway(f, {scope = "room"})
+    assert(status.done == 1 and pack.inside:contains(soup), status.reason)
+end)
+
+case("one item's own place wins over storage for its kind, even from where it lies", function(f)
+    local crate, rack = labelled(f, f.crate(f.square(3, 0), "crate"), "type:Base.Axe"), f.crate(f.square(6, 0), "rack")
+    local axe, other = f.item(crate, "Base.Axe"), f.item(crate, "Base.Axe")
+    local mark = "item:" .. axe.id .. ":Base.Axe"
+    labelled(f, rack, mark)
+    f.state.itemLabels[tostring(axe.id)] = {mark}
+    assert(f.world:home(axe).container == rack and select(2, f.world:home(other)))
+    local status = putAway(f, {scope = "room"})
+    assert(status.done == 1 and rack:contains(axe) and crate:contains(other), status.reason)
+end)
+
+case("loot from a room goes to storage at hand before a bag the player carries for that category", function(f)
+    local pantry, shelf = labelled(f, f.crate(f.square(3, 0), "pantry"), "native:Food"), f.crate(f.square(1, 0), "shelf")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.wearing[pack] = "base:Back"
+    labelled(f, pack.inside, "native:Food")
+    f.world:_observe(pack.inside)
+    local soup = f.item(shelf, "Base.Soup", {category = "Food"})
+    assert(f.world:home(soup).container == pantry)
+    local status = putAway(f, {scope = "room"})
+    assert(status.done == 1 and pantry:contains(soup), status.reason)
+end)
+
+case("a category given to one copy does not outrank that copy's own place", function(f)
+    local tools, rack = labelled(f, f.crate(f.square(2, 0), "tools"), "native:Tool"), f.crate(f.square(9, 0), "rack")
+    local axe = f.item(tools, "Base.Axe", {category = "Tool"})
+    local mark = "item:" .. axe.id .. ":Base.Axe"
+    labelled(f, rack, mark)
+    f.state.itemLabels[tostring(axe.id)] = {"native:Tool", mark}
+    local status = putAway(f, {scope = "room"})
+    assert(status.done == 1 and rack:contains(axe), status.reason)
+end)
+
+case("automatic put-away never lets a carried bag take what was brought home", function(f)
+    local pantry = labelled(f, f.crate(f.square(3, 0), "pantry"), "type:Base.Soup")
+    f.state.storage[f.world:key(pantry)] = {order = "first"}
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.wearing[pack] = "base:Back"
+    labelled(f, pack.inside, "type:Base.Soup")
+    f.world:_observe(pack.inside)
+    local soup = f.item(f.inventory, "Base.Soup", {category = "Food"})
+    pantry.capacity = 0
+    local plan = assert(f.jobs:preview(f.request({kind = "labels", labels = {}, near = f.world:nearHere(true)}, {scope = "inventory", only = {[tostring(soup.id)] = true}})))
+    assert(#plan.moves == 0 and f.inventory:contains(soup))
+end)
+
+case("loot waiting in a carried bag goes on to storage that stays put, not to a bag on the floor", function(f)
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.wearing[pack] = "base:Back"
+    labelled(f, pack.inside, "native:Food")
+    f.world:_observe(pack.inside)
+    local duffel = f.drop(f.square(1, 0), "Base.Duffel", {bag = true})
+    labelled(f, duffel.inside, "native:Food")
+    f.world:_observe(duffel.inside)
+    local soup = f.item(pack.inside, "Base.Soup", {category = "Food"})
+    assert(#f.world:putAway() == 0)
+    local pantry = labelled(f, f.crate(f.square(3, 0), "pantry"), "native:Food")
+    f.now = f.now + 2000
+    assert(f.world:putAway()[1].storage.container == pantry)
+end)
+
+case("Put Away counts only what fits", function(f)
+    labelled(f, f.crate(f.square(3, 0), "box"), "native:Material").capacity = 3
+    for _ = 1, 10 do f.item(f.inventory) end
+    assert(#f.world:putAway() == 3)
+end)
+
+case("a place for one item in a bag keeps no other loot out of it", function(f)
+    local source = f.crate(f.square(5, 0), "source")
+    local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
+    f.wearing[pack] = "base:Back"
+    labelled(f, pack.inside, "item:99:Base.Axe")
+    local soup = f.item(source, "Base.Soup", {category = "Food"})
+    f.run(f.request({kind = "inventory"}))
+    assert(pack.inside:contains(soup))
+    labelled(f, pack.inside, "item:99:Base.Axe", "native:Tool")
+    local beans = f.item(source, "Base.Beans", {category = "Food"})
+    f.run(f.request({kind = "inventory"}))
+    assert(f.inventory:contains(beans))
+end)
+
+case("a kept kind may be eaten, drunk and poured, and an empty key ring stays on the player", function(f)
+    local nails, ring = f.item(f.inventory), f.item(f.inventory, "Base.KeyRing", {bag = true, keyRing = true})
+    f.state.keepTypes["Base.Nails"] = true
+    assert(f.world:protected(nails) and not f.world:protected(nails, {using = true}))
+    labelled(f, f.crate(f.square(3, 0), "rest"), "rest:")
+    local protected, why = f.world:protected(ring)
+    assert(protected and why == "Equipped" and #f.world:putAway() == 0)
+end)
+
+case("a mark follows its item when the game gives it a new identity", function(f)
+    local rack = f.crate(f.square(3, 0), "rack")
+    local old, new = f.item(f.inventory, "Base.Jacket"), f.item(f.inventory, "Base.JacketUp")
+    local mark = "item:" .. old.id .. ":Base.Jacket"
+    labelled(f, rack, mark)
+    f.state.itemLabels[tostring(old.id)], f.state.checklist = {mark}, {ids = {mark}, types = {}}
+    f.world:replaceGear(old.id, "Base.Jacket", new)
+    local now = "item:" .. new.id .. ":Base.JacketUp"
+    assert(f.state.itemLabels[tostring(new.id)][1] == now and f.state.containerLabels[f.world:key(rack)][1] == now and f.state.checklist.ids[1] == now)
+    assert(f.world:home(new).container == rack)
+end)
+
+case("storage for anything else takes only what nothing else will", function(f)
+    local rest, food = labelled(f, f.crate(f.square(2, 0), "rest"), "rest:"), labelled(f, f.crate(f.square(9, 0), "food"), "native:Food")
+    local soup, sock = f.item(f.inventory, "Base.Soup", {category = "Food"}), f.item(f.inventory, "Base.Sock", {category = "Clothing"})
+    local status = putAway(f)
+    assert(status.done == 2 and food:contains(soup) and rest:contains(sock), status.reason)
+end)
+
+case("what lies in storage for anything else moves once it has a place, and is not passed between such containers", function(f)
+    local first, second = labelled(f, f.crate(f.square(2, 0), "first"), "rest:"), labelled(f, f.crate(f.square(4, 0), "second"), "rest:")
+    local sock, soup = f.item(second, "Base.Sock", {category = "Clothing"}), f.item(second, "Base.Soup", {category = "Food"})
+    local food = labelled(f, f.crate(f.square(9, 0), "food"), "native:Food")
+    local status, plan = putAway(f, {scope = "room"})
+    assert(#plan.moves == 1 and status.done == 1 and food:contains(soup) and second:contains(sock) and #first.items == 0, status.reason)
+end)
+
+case("storage filled first is full before the rest, and storage filled last waits for the others", function(f)
+    local last, usual, first = labelled(f, f.crate(f.square(2, 0), "last"), "native:Food"), labelled(f, f.crate(f.square(4, 0), "usual"), "native:Food"),
+        labelled(f, f.crate(f.square(9, 0), "first"), "native:Food")
+    f.state.storage[f.world:key(last)], f.state.storage[f.world:key(first)] = {order = "last"}, {order = "first"}
+    first.capacity, usual.capacity = 2, 1
+    for _ = 1, 4 do f.item(f.inventory, "Base.Soup", {category = "Food"}) end
+    local status = putAway(f)
+    assert(status.done == 4 and #first.items == 2 and #usual.items == 1 and #last.items == 1, status.reason)
+end)
+
+case("storage filled last still comes before storage for anything else", function(f)
+    local rest, last = labelled(f, f.crate(f.square(2, 0), "rest"), "rest:"), labelled(f, f.crate(f.square(9, 0), "last"), "native:Food")
+    f.state.storage[f.world:key(last)] = {order = "last"}
+    local soup = f.item(f.inventory, "Base.Soup", {category = "Food"})
+    local status = putAway(f)
+    assert(status.done == 1 and last:contains(soup) and #rest.items == 0, status.reason)
+end)
+
+case("a job for certain items moves no others", function(f)
+    local crate = labelled(f, f.crate(f.square(3, 0), "crate"), "native:Material")
+    local wanted, other = f.item(f.inventory), f.item(f.inventory)
+    local status, plan = putAway(f, {scope = "inventory", only = {[tostring(wanted.id)] = true}})
+    assert(#plan.moves == 1 and status.done == 1 and crate:contains(wanted) and f.inventory:contains(other), status.reason)
+end)
+
+case("a job kept to storage around here leaves further storage alone", function(f)
+    local far = labelled(f, f.crate(f.square(12, 0), "far"), "native:Material")
+    f.item(f.inventory)
+    local plan = assert(f.jobs:preview(f.request({kind = "labels", labels = {}, near = {x = 0, y = 0, range = 10}}, {scope = "inventory"})))
+    assert(#plan.moves == 0)
+    plan = assert(f.jobs:preview(f.request({kind = "labels", labels = {}, near = {x = 0, y = 0, range = 12}}, {scope = "inventory"})))
+    assert(#plan.moves == 1 and #far.items == 0)
+end)
+
+case("keeping every one of a kind holds on to what is carried, and loots and sorts the rest", function(f)
+    local crate, loose = labelled(f, f.crate(f.square(3, 0), "crate"), "native:Material"), f.crate(f.square(5, 0), "loose")
+    local mine, theirs = f.item(f.inventory, "Base.Nails"), f.item(loose, "Base.Nails")
+    f.state.keepTypes["Base.Nails"] = true
+    local status = putAway(f, {scope = "room", includeInventory = true})
+    assert(status.done == 1 and f.inventory:contains(mine) and crate:contains(theirs), status.reason)
+    status = f.run(f.request({kind = "inventory"}))
+    assert(f.inventory:contains(theirs), status.reason)
+end)
+
+case("a kept kind is never thrown away, from a room, a bag or a can", function(f)
+    local loose, can = f.crate(f.square(3, 0), "loose"), f.can(f.square(5, 0))
+    local kept, rubbish = f.item(loose, "Base.Nails"), f.item(loose, "Base.Rag")
+    local bag = f.item(loose, "Base.Bag", {bag = true})
+    local inside = f.item(bag.inside, "Base.Nails")
+    f.state.keepTypes["Base.Nails"] = true
+    f.run(f.request({kind = "trash"}, {includeBags = false}))
+    assert(f.deleted[rubbish] and loose:contains(kept) and bag.inside:contains(inside) and loose:contains(bag))
+    local holds = f.item(can, "Base.Nails")
+    f.item(loose, "Base.Rag")
+    local plan, why = f.jobs:preview(f.request({kind = "trash"}))
+    assert(plan == nil and why:find("Nails", 1, true) and can:contains(holds), tostring(why))
+end)
+
+case("what a tooltip says is what Put Away does", function(f)
+    local rest, food, pantry = labelled(f, f.crate(f.square(2, 0), "rest"), "rest:"), labelled(f, f.crate(f.square(6, 0), "food"), "native:Food"),
+        labelled(f, f.crate(f.square(8, 0), "pantry"), "type:Base.Soup")
+    local soup, beans, sock = f.item(f.inventory, "Base.Soup", {category = "Food"}), f.item(f.inventory, "Base.Beans", {category = "Food"}),
+        f.item(f.inventory, "Base.Sock", {category = "Clothing"})
+    local said = {}
+    for _, item in ipairs({soup, beans, sock}) do said[item] = f.world:homes(item)[1].storage.container end
+    assert(said[soup] == pantry and said[beans] == food and said[sock] == rest)
+    putAway(f)
+    for item, container in pairs(said) do assert(container:contains(item)) end
+    f.now = f.now + 2000
+    local homes, placed = f.world:homes(soup)
+    assert(#homes == 0 and placed == true)
+end)
+
+case("Put Away counts what has a place at hand and leaves kept, favorite and worn things", function(f)
+    labelled(f, f.crate(f.square(3, 0), "near"), "native:Material")
+    labelled(f, f.crate(f.square(60, 0), "far"), "native:Food")
+    local nails, kept = f.item(f.inventory), f.item(f.inventory)
+    f.item(f.inventory, "Base.Soup", {category = "Food"})
+    f.item(f.inventory, "Base.Glue", {favorite = true})
+    f.worn = f.item(f.inventory, "Base.Tape")
+    f.state.keep[tostring(kept.id)] = true
+    local entries = f.world:putAway()
+    assert(#entries == 1 and entries[1].item == nails)
+    assert(f.world:atHome(20) and not f.world:atHome(2))
+end)
+
+case("what belongs in a container is offered by the container, whatever else would take it", function(f)
+    local rest, food = labelled(f, f.crate(f.square(2, 0), "rest"), "rest:"), labelled(f, f.crate(f.square(6, 0), "food"), "native:Food")
+    local soup, sock = f.item(f.inventory, "Base.Soup", {category = "Food"}), f.item(f.inventory, "Base.Sock", {category = "Clothing"})
+    local fits = f.world:fitting(food)
+    assert(#fits == 1 and fits[1] == soup)
+    fits = f.world:fitting(rest)
+    assert(#fits == 1 and fits[1] == sock, "Anything else means what nothing else takes")
+end)
+
+case("a fixture that moves up takes its labels, name and order along", function(f)
+    local tile = f.square(4, 0)
+    local lower, upper = f.crate(tile, "crate"), f.crate(tile, "crate")
+    local key = assert(f.world:key(upper))
+    f.world:_observe(lower); f.world:_observe(upper)
+    f.state.containerLabels[key], f.state.storage[key] = {"native:Food"}, {order = "last"}
+    table.remove(tile.objects, 1)
+    local moved = assert(f.world:key(upper))
+    assert(moved ~= key and f.state.containerLabels[moved][1] == "native:Food" and f.state.storage[moved].order == "last")
+    assert(f.state.containerLabels[key] == nil and f.state.storage[key] == nil)
+end)
+
+case("a name given in the game is shown and remembered, and the plain name is no name", function(f)
+    local crate = labelled(f, f.crate(f.square(4, 0), "crate"), "native:Food")
+    function crate:getCustomName() return self.custom end
+    f.world:_observe(crate)
+    assert(f.world:name(crate) == "crate" and f.world:storages()[1].given == nil)
+    crate.custom = "Pantry"
+    assert(f.world:name(crate) == "Pantry" and f.world:storages()[1].name == "Pantry")
+    f.sight = 1; f.world.endpoints = {}
+    assert(f.world:storages()[1].name == "Pantry" and not f.world:storages()[1].container)
+end)
+
+case("labels for what is inside are its kinds, or their categories with the player's own first", function(f)
+    f.graph = assert(Categories.new({{id = "custom:1", name = "Fixings", types = {"Base.Nails"}, includes = {}}}))
+    f.world.graph = f.graph
+    local crate = f.crate(f.square(4, 0), "crate")
+    f.item(crate, "Base.Nails"); f.item(crate, "Base.Nails"); f.item(crate, "Base.Soup", {category = "Food"})
+    local types, categories = f.world:labelsInside(crate)
+    assert(table.concat(types, " ") == "type:Base.Nails type:Base.Soup" and table.concat(categories, " ") == "custom:1 native:Food")
+end)
+
 case("an item already carried in a bag labelled for it is put away", function(f)
     local source = f.crate(f.square(5, 0), "source")
     local pack = f.item(f.inventory, "Base.Pack", {bag = true, wear = "base:Back", reduction = 80})
@@ -1330,7 +1702,7 @@ case("menu questions describe containers, the room and what is carried without c
 end)
 
 case("menu questions about labels, bins and the vehicle come from saved state", function(f)
-    assert(not f.world:binDistance() and not f.world:hasStorageLabels() and #f.world:knownBins() == 0 and #f.world:labelledContainers() == 0)
+    assert(not f.world:binDistance() and not f.world:hasStorageLabels() and #f.world:knownBins() == 0 and #f.world:storages() == 0)
     local food = {fullType = "Base.Soup", categoryId = "native:Food", labels = {}}
     local crate, bin = f.crate(f.square(5, 0), "crate"), f.crate(f.square(6, 0), "bin")
     bin.parent.trash, bin.capacity = true, 20
@@ -1342,7 +1714,7 @@ case("menu questions about labels, bins and the vehicle come from saved state", 
     assert(not f.world:storageAccepts({fullType = "Base.Nail", categoryId = "native:Material", labels = {}}))
     f.world:discover()
     f.world:observeNearby()
-    local labelled = f.world:labelledContainers()
+    local labelled = f.world:storages()
     assert(#labelled == 2)
     for _, entry in ipairs(labelled) do
         if entry.container then

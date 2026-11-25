@@ -9,7 +9,9 @@ end
 
 local Act = require "LootBox/Act"
 local App = require "LootBox/App"
+local Labels = require "LootBox/Labels"
 local Log = require "LootBox/Log"
+local Sort = require "LootBox/Sort"
 local Handler = ISInventoryWindowControlHandler:derive("LootBoxMatchingTransfer")
 
 local modes = {
@@ -197,6 +199,71 @@ function Condense:new()
     return ISInventoryWindowControlHandler.new(self)
 end
 
+-- Put Away: what is carried and belongs in storage at hand.
+local PutAway = Handler:derive("LootBoxPutAway")
+local MAX_TIP = 10
+
+function PutAway:shouldBeVisible()
+    if getCore():isTutorial() or App.preference("putAwayButton") == false then return hidden(self) end
+    local player = self.playerObj
+    if not player or not player:getCurrentSquare() or player:getInventory():isEmpty() then return hidden(self) end
+    local app = App.get(self.playerNum)
+    if not app or Labels.none(app.state.containerLabels) or self.inventoryWindow.isCollapsed then return hidden(self) end
+    -- Coming home, or a new label, changes the answer without anything moving in the windows.
+    local near = app.world:nearStorage()
+    if near ~= self.near then self.near, self.checkedSeen = near, nil end
+    if not worthwhile(self, function(handler) return #(handler:getItemsToTransfer()) > 0 end) then return hidden(self) end
+    return true
+end
+
+function PutAway:getControl()
+    local button = self:getButtonControl("Put Away (" .. (self.count or 0) .. ")")
+    button:setHeight(getTextManager():getFontHeight(UIFont.Small) + 4)
+    button.textColor = {r = 0.93, g = 0.64, b = 0.29, a = 1}
+    button:setTooltip(self.tip)
+    button:setOnMouseOverFunction(self.onMouseOverButton)
+    button:setOnMouseOutFunction(self.onMouseOutButton)
+    self.control = button
+    return button
+end
+
+-- "Nails (8): Kitchen crate", most first.
+function PutAway.preview(entries)
+    local groups, byText = {}, {}
+    for _, entry in ipairs(entries) do
+        local text = tostring(entry.item:getDisplayName()) .. "|" .. entry.storage.key
+        local known = byText[text]
+        if not known then
+            known = {name = tostring(entry.item:getDisplayName()), storage = entry.storage, count = 0}
+            byText[text] = known
+            groups[#groups + 1] = known
+        end
+        known.count = known.count + 1
+    end
+    Sort(groups, function(entry) return -entry.count, entry.name end)
+    local lines = {"Walk over and put these in their places."}
+    for index = 1, math.min(MAX_TIP, #groups) do
+        local entry = groups[index]
+        lines[#lines + 1] = entry.name .. (entry.count > 1 and " (" .. entry.count .. ")" or "") .. ": " .. entry.storage.name
+    end
+    if #groups > MAX_TIP then lines[#lines + 1] = "and " .. (#groups - MAX_TIP) .. " more" end
+    return table.concat(lines, "\n")
+end
+
+function PutAway:getItemsToTransfer()
+    local app = App.get(self.playerNum)
+    if not app then return {}, {} end
+    local entries, items, selected = app.world:putAway(), {}, {}
+    self.count, self.tip = #entries, PutAway.preview(entries)
+    for index, entry in ipairs(entries) do items[index], selected[entry.item] = entry.item, true end
+    return items, selected
+end
+
+function PutAway:perform()
+    if isGamePaused() then return end
+    return Matching.UI.putAway(self.playerNum, "toolbar.put-away")
+end
+
 local lootAvailable = pcall(require, "ISUI/LootWindow/ISLootWindowContainerControls")
 local SmartTake = ISInventoryWindowControlHandler:derive("LootBoxSmartTake")
 
@@ -336,10 +403,11 @@ function Matching.install(ui)
     Matching.installed, Matching.UI = true, ui
     installSmartTake()
     insertBefore(Condense, "ISInventoryWindowControlHandler_TransferAll")
+    insertBefore(PutAway, Condense.Type)
     insertAfter(Displayed, modes.displayed.peer)
     insertAfter(Nearby, modes.nearby.peer)
 end
 
-Matching.Displayed, Matching.Nearby, Matching.Condense = Displayed, Nearby, Condense
+Matching.Displayed, Matching.Nearby, Matching.Condense, Matching.PutAway = Displayed, Nearby, Condense, PutAway
 Matching.SmartTake, Matching.smartClasses = SmartTake, smartClasses
 return Matching
