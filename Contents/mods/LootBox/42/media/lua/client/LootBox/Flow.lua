@@ -4,6 +4,7 @@
 -- own queued actions go first, and nothing new starts once they intervene.
 local Act = require "LootBox/Act"
 local Items = require "LootBox/Items"
+local Clock = require "LootBox/Clock"
 local Log = require "LootBox/Log"
 local Feedback = require "LootBox/CompletionFeedback"
 
@@ -21,7 +22,7 @@ end
 
 function Flow.begin(class, player, interaction, fields)
     local self = setmetatable(fields or {}, class)
-    self.player, self.interaction, self.state, self.startedAt = player, interaction, "running", getTimestampMs()
+    self.player, self.interaction, self.state, self.startedAt = player, interaction, "running", Clock.now()
     self.count, self.liters, self.total = self.count or 0, self.liters or 0, self.total or 1
     return self
 end
@@ -56,7 +57,7 @@ end
 
 -- Looks for a result until look() returns something, then done(result).
 function Flow:await(look, done, missed, ms)
-    self.waiting = { look = look, done = done, missed = missed, untilAt = getTimestampMs() + (ms or Flow.SETTLE_MS) }
+    self.waiting = { look = look, done = done, missed = missed, untilAt = Clock.now() + (ms or Flow.SETTLE_MS) }
 end
 
 function Flow:cancel(silent, reason)
@@ -77,11 +78,11 @@ function Flow:finish(state, reason)
     local emit = good and Log.info or Log.warn
     emit(self.interaction, "END", "op", self.action, "state", state, "reason", reason, "done", self.count, "of", self.total,
         "litres", self.liters > 0 and string.format("%.3f", self.liters) or nil, "submitted", self.launched == true,
-        "elapsedMs", getTimestampMs() - self.startedAt, "player", Log.player(self.player))
+        "elapsedMs", Clock.now() - self.startedAt, "player", Log.player(self.player))
     if self.launched and not self.silent and not self.automatic then
         local card = Log.guard("Flow.card", self.card, self)
         if card then
-            Feedback.show(self.player, card.title, card.detail or {}, getTimestampMs() - self.startedAt, not good and "stopped" or nil,
+            Feedback.show(self.player, card.title, card.detail or {}, Clock.now() - self.startedAt, not good and "stopped" or nil,
                 card.note or not good and reason or nil)
         end
     end
@@ -104,7 +105,7 @@ local function step(self)
         if found then
             self.waiting = nil
             return waiting.done(found, extra, more)
-        elseif getTimestampMs() >= waiting.untilAt then
+        elseif Clock.now() >= waiting.untilAt then
             self.waiting = nil
             return waiting.missed()
         end
@@ -113,8 +114,8 @@ local function step(self)
     local blocked = Act.blocked(self.player)
     if blocked then return self:finish("cancelled", blocked) end
     if not Act.idle(self.player) or Act.moving(self.player) then
-        self.heldAt = self.heldAt or getTimestampMs()
-        if getTimestampMs() - self.heldAt >= Flow.PATIENCE_MS then
+        self.heldAt = self.heldAt or Clock.now()
+        if Clock.now() - self.heldAt >= Flow.PATIENCE_MS then
             return self:finish("cancelled", "You were busy with something else")
         end
         return

@@ -1,6 +1,7 @@
 -- Owns the stock actions one step of ours queued, from the click to the end.
 -- Everything else in the player's queue is theirs and is never disturbed.
 require "TimedActions/ISTimedActionQueue"
+local Clock = require "LootBox/Clock"
 local Log = require "LootBox/Log"
 
 local Act = {}
@@ -118,7 +119,7 @@ function Act.run(player, opts)
     local blocked = Act.blocked(player)
     if blocked then return nil, blocked, "blocked" end
     local self = setmetatable({ player = player, op = opts.op, interaction = opts.interaction, allow = opts.allow, owned = {}, keep = {},
-        onStart = opts.onStart, onPerform = opts.onPerform, startedAt = getTimestampMs(),
+        onStart = opts.onStart, onPerform = opts.onPerform, startedAt = Clock.now(),
         limit = opts.limitMs or Act.LIMIT_MS }, Act)
     -- The game may start the first action inside the call that queues it, so
     -- each is taken in hand on its way there.
@@ -183,7 +184,7 @@ function Act:poll()
     for action in pairs(self.owned) do if queued(queue, action) then busy = true; break end end
     if busy then
         if not self.performed then
-            if getTimestampMs() - self.startedAt >= self.limit then self:cancel("The action took too long")
+            if Clock.now() - self.startedAt >= self.limit then self:cancel("The action took too long")
             elseif self.problem or not allowed(self, "run") then self:cancel(self.problem) end
         end
         return nil
@@ -192,7 +193,7 @@ function Act:poll()
     local why = not ok and (self.problem or "The action ended early") or nil
     local emit = ok and Log.trace or Log.warn
     emit(self.interaction, "OP-END", "op", self.op, "ok", ok, "reason", why, "check", not ok and self.check or nil,
-        "started", self.started == true, "stopped", self.stopped == true, "elapsedMs", getTimestampMs() - self.startedAt,
+        "started", self.started == true, "stopped", self.stopped == true, "elapsedMs", Clock.now() - self.startedAt,
         "player", not ok and Log.player(self.player) or nil)
     return ok, why, self.check
 end
