@@ -1,3 +1,5 @@
+local Sort = require "LootBox/Sort"
+
 local Routing = {}
 Routing.__index = Routing
 
@@ -126,19 +128,13 @@ function Routing.rank(candidates, weights, tripCapacity)
     for _, weight in ipairs(weights) do totalWeight = totalWeight + weight end
     if count ~= #weights or not finite(totalWeight) or (tripCapacity == 0 and totalWeight > 0) then return {} end
     local result = {}
-    for index, candidate in ipairs(candidates) do
+    for _, candidate in ipairs(candidates) do
         if validCandidate(candidate, #weights) then
             local score = scored(candidate, weights, tripCapacity, totalWeight)
-            if score then score.order = index; result[#result + 1] = score end
+            if score then result[#result + 1] = score end
         end
     end
-    table.sort(result, function(a, b)
-        if a.cost ~= b.cost then return a.cost < b.cost end
-        if a.unserved ~= b.unserved then return a.unserved < b.unserved end
-        if a.key ~= b.key then return a.key < b.key end
-        return a.order < b.order
-    end)
-    for _, score in ipairs(result) do score.order = nil end
+    Sort(result, function(score) return score.cost, score.unserved, score.key end)
     return result
 end
 

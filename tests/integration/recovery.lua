@@ -268,13 +268,73 @@ test("reconnect resumes from observed locations after an unacknowledged transfer
     assert(#f.moves == 3 and not f.recovery:status().pending)
 end)
 
-test("missing nested contents keep recovery pending instead of certifying restoration", function()
+test("missing nested contents are reported and the bag still comes back", function()
     local f, bag, nested, child, heavy = wholeBagFixture()
     assert(f.recovery:prepare(heavy) and f:run("stage"))
     assert(remove(nested.bag.items, child)); child.source = f.source; f.source.items[#f.source.items + 1] = child
-    local op, reason, done = f.recovery:next("restore")
-    assert(not op and not done and reason:find("contents changed", 1, true))
-    assert(f.recovery:status().pending and f.safe:contains(bag) and f.recovery:isProtected(child))
+    local op = assert(f.recovery:next("restore"))
+    local dropped = f.recovery:status().dropped
+    assert(#dropped == 1 and dropped[1].id == child.id and dropped[1].fullType == child.fullType)
+    assert(not f.recovery:isProtected(child), "An item that left the receipt is ordinary again")
+    f:apply(op)
+    assert(f:run("restore") and f.player:isEquipped(bag) and not f.recovery:status().pending)
+end)
+
+test("gear that is gone is skipped so the rest can be recovered", function()
+    local f = fixture()
+    local bag = f:item(f.inventory, 45, {bag = true, equippedWeight = 35, slot = "Back"})
+    local loose = f:item(f.inventory, 14)
+    local heavy = f:item(f.source, 40)
+    assert(f.recovery:prepare(heavy) and f:run("stage") and f.safe:contains(loose))
+    assert(f.recovery:status().blocking)
+    assert(remove(f.safe.items, loose)); loose.source = nil
+    assert(f:run("restore") and f.player:isEquipped(bag))
+    local status = f.recovery:status()
+    assert(not status.pending and not status.blocking)
+end)
+
+test("an empty receipt ends when every recorded item is gone", function()
+    local f, bag, _, _, heavy = wholeBagFixture()
+    assert(f.recovery:prepare(heavy) and f:run("stage"))
+    assert(remove(f.safe.items, bag)); bag.source = nil
+    assert(f:run("restore") and not f.recovery:status().pending)
+    assert(f.documents["fixture/recovery"].pending == false)
+end)
+
+test("a staging container that has not been opened cannot prove gear is gone", function()
+    local f, bag, _, _, heavy = wholeBagFixture()
+    assert(f.recovery:prepare(heavy) and f:run("stage"))
+    f.safe.items = {}
+    function f.safe:isExplored() return false end
+    local op, reason = f.recovery:next("restore")
+    assert(not op and reason:find("not been opened", 1, true) and #f.recovery:status().dropped == 0)
+    function f.safe:isExplored() return true end
+    f.safe.items = {bag}
+    assert(f:run("restore") and f.player:isEquipped(bag))
+end)
+
+test("forgetting releases protections, reports the gear and moves nothing", function()
+    local f, bag, nested, _, heavy = wholeBagFixture()
+    assert(f.recovery:prepare(heavy) and f:run("stage"))
+    f.safe.removed = true
+    assert(not f.recovery:next("restore") and f.recovery:status().pending)
+    local moves = #f.moves
+    local dropped, err = f.recovery:forget()
+    assert(not err and #dropped == 1 and dropped[1].id == bag.id and dropped[1].staged)
+    assert(not f.recovery:status().pending and not f.recovery:isProtected(nested) and #f.moves == moves)
+    assert(not f.recovery:isReservedContainer(f.safe) and f.documents["fixture/recovery"].pending == false)
+    assert(not Recovery.new(f.player, f.world, "fixture"):status().pending)
+end)
+
+test("a failed write is reported without inventing pending gear", function()
+    local f, _, _, _, heavy = wholeBagFixture()
+    f.failSave = true
+    assert(not f.recovery:prepare(heavy))
+    local status = f.recovery:status()
+    assert(not status.pending and not status.blocking and status.error:find("could not be saved", 1, true))
+    f.failSave = false
+    assert(f.recovery:prepare(heavy) and not f.recovery:status().error, "A later successful write clears the problem")
+    assert(f.recovery:status().pending and not f.recovery:status().blocking, "A plan that moved nothing owes nothing")
 end)
 
 test("a changed original worn slot is left under the user's control", function()
@@ -402,8 +462,9 @@ test("malformed persisted identities block new staging without authorizing movem
     assert(f.recovery:prepare(heavy))
     f.documents["fixture/recovery"].entries[1].id = "not a native ID"
     local loaded = Recovery.new(f.player, f.world, "fixture")
-    assert(loaded:status().pending and loaded:status().reason and not loaded:prepare(heavy))
-    assert(not loaded:next("stage") and #f.moves == 0)
+    assert(not loaded:status().pending and not loaded:status().blocking and loaded:status().reason)
+    assert(not loaded:prepare(heavy) and not loaded:next("stage") and #f.moves == 0)
+    assert(#loaded:forget() == 0 and not loaded:status().error and loaded:prepare(heavy))
 end)
 
 test("a native replacement follows the exact old identity while preserving descendant reservations", function()

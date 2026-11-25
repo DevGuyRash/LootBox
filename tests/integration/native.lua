@@ -4,7 +4,7 @@ local modules = {
     "TimedActions/ISTimedActionQueue", "TimedActions/ISInventoryTransferUtil",
     "Vehicles/TimedActions/ISPathFindAction", "Vehicles/TimedActions/ISEnterVehicle",
     "Vehicles/TimedActions/ISExitVehicle", "Vehicles/TimedActions/ISSwitchVehicleSeat",
-    "Vehicles/TimedActions/ISUnlockVehicleDoor", "Vehicles/TimedActions/ISOpenVehicleDoor",
+    "Vehicles/TimedActions/ISUnlockVehicleDoor", "Vehicles/TimedActions/ISLockVehicleDoor", "Vehicles/TimedActions/ISOpenVehicleDoor",
     "Vehicles/TimedActions/ISCloseVehicleDoor", "Vehicles/TimedActions/ISLockDoors",
     "TimedActions/ISWearClothing", "TimedActions/ISClothingExtraAction",
     "TimedActions/ISEquipWeaponAction", "TimedActions/ISUnequipAction",
@@ -395,6 +395,7 @@ local function vehicle()
     local value = { location = square(3, 0), occupants = {} }
     local function part(id, locked)
         local result = { id = id, door = { locked = locked, open = false } }
+        function result:getId() return self.id end
         function result:getInventoryItem() return true end
         function result:getDoor() return self.door end
         function result.door:isLocked() return self.locked end
@@ -408,6 +409,7 @@ local function vehicle()
     function value:getPartByIndex() return { getItemContainer = function() return true end } end
     function value:getPassengerDoor() return self.driver end
     function value:getPartById(id) return id == "TrunkDoor" and self.trunk or nil end
+    function value:getMaxPassengers() return 1 end
     function value:isAnyDoorLocked() return self.driver.door.locked end
     function value:isTrunkLocked() return self.trunk.door.locked end
     function value:getSeat(character) return character.vehicle == self and character.seat or -1 end

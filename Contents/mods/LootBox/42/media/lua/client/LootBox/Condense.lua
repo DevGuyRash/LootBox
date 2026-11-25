@@ -1,3 +1,7 @@
+local Log = require "LootBox/Log"
+local call = require "LootBox/Safe"
+local Sort = require "LootBox/Sort"
+
 local Condense = {}
 Condense.__index = Condense
 
@@ -6,19 +10,10 @@ local WORK_PER_TICK, MAX_EXCHANGES, MAX_VARIANTS = 256, 256, 12
 local MAX_TRANSACTIONS = 4096
 local MAX_REFUSALS = 64
 
-local function call(object, method, ...)
-    if not object then return nil end
-    local args = {...}
-    local ok, result = pcall(function()
-        local fn = object[method]
-        return fn and fn(object, unpack(args))
-    end)
-    if ok then return result end
-end
-
 local function size(values) return call(values, "size") or 0 end
 local function isBag(item) return call(item, "IsInventoryContainer") == true or call(item, "getCategory") == "Container" end
 local function itemKey(item) return tostring(item:getID()) .. ":" .. tostring(item:getFullType()) end
+local function weightRank(weight) return math.floor(weight / EPS + 0.5) end
 local function numericKey(value) return string.format("%.4f", value) end
 local function copy(values)
     local result = {}
@@ -49,6 +44,7 @@ local function matchingKeys(container)
     local rules = ISInventoryWindowControlHandler_TransferSameType
     if rules and type(rules.getItemsTable) == "function" then
         local ok, map = pcall(rules.getItemsTable, rules, container)
+        if not ok then Log.fault(nil, "Condense.matchingKeys", map) end
         if ok and type(map) == "table" then
             for key, items in pairs(map) do
                 for _, item in ipairs(items) do
@@ -164,10 +160,7 @@ local function capture(self)
     end
     local ok, err = scan(main, 1, true)
     if not ok then return nil, err end
-    table.sort(items, function(a, b)
-        if math.abs(a.weight - b.weight) > EPS then return a.weight > b.weight end
-        return a.key < b.key
-    end)
+    Sort(items, function(item) return -weightRank(item.weight), item.key end)
     local state = {at = {}, used = {}, mass = current, mainMass = 0, mainCount = 0,
         groups = groups, spread = spread, groupPairs = groupPairs}
     for index, node in ipairs(nodes) do state.used[index] = node.used end
@@ -177,12 +170,8 @@ local function capture(self)
     end
     local destinations = {}
     for index = 2, #nodes do destinations[#destinations + 1] = index end
-    table.sort(destinations, function(a, b)
-        if nodes[a].factor ~= nodes[b].factor then return nodes[a].factor < nodes[b].factor end
-        if nodes[a].parent ~= nodes[b].parent then return nodes[a].parent < nodes[b].parent end
-        return nodes[a].key < nodes[b].key
-    end)
-    table.sort(fingerprint)
+    Sort(destinations, function(index) return nodes[index].factor, nodes[index].parent, nodes[index].key end)
+    Sort(fingerprint)
     local signature = table.concat(fingerprint, "|") .. ":" .. numericKey(maximum) .. ":" .. numericKey(current)
     if self.signature and self.signature ~= signature then self.revision = self.revision + 1 end
     self.signature = signature
@@ -308,18 +297,14 @@ local function evictionSets(self, state, incoming, destination)
     local result, seen = {{}}, {[""] = true}
     local function add(set)
         if #result >= MAX_VARIANTS then return end
-        local ids = copy(set); table.sort(ids)
+        local ids = Sort(copy(set))
         local key = table.concat(ids, ",")
         if not seen[key] and #result < MAX_VARIANTS then seen[key] = true; result[#result + 1] = copy(set) end
     end
     local function prefixes(descending)
-        local order = copy(eligible)
-        table.sort(order, function(a, b)
-            if math.abs(self.items[a].weight - self.items[b].weight) > EPS then
-                if descending then return self.items[a].weight > self.items[b].weight end
-                return self.items[a].weight < self.items[b].weight
-            end
-            return self.items[a].key < self.items[b].key
+        local order = Sort(copy(eligible), function(index)
+            local rank = weightRank(self.items[index].weight)
+            return descending and -rank or rank, self.items[index].key
         end)
         local total, set = 0, {}
         local needed = math.max(0, state.used[destination] + self.items[incoming].weight - self.nodes[destination].capacity)

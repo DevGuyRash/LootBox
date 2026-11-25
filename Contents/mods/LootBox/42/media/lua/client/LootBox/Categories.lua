@@ -1,3 +1,5 @@
+local Sort = require "LootBox/Sort"
+
 local Categories = {}
 local Graph = {}
 Graph.__index = Graph
@@ -95,6 +97,81 @@ function Categories.new(definitions)
         end
     end
     return graph
+end
+
+local function cleanList(value, validate, refused)
+    local result, seen = {}, {}
+    if type(value) ~= "table" then
+        if value ~= nil then refused("is not a list") end
+        return result
+    end
+    local indexes = {}
+    for index in pairs(value) do
+        if type(index) == "number" then indexes[#indexes + 1] = index else refused("has a named entry") end
+    end
+    for _, index in ipairs(Sort(indexes)) do
+        local entry = value[index]
+        if not validate(entry) then refused("has an unusable value " .. tostring(entry))
+        elseif seen[entry] then refused("repeats " .. entry)
+        else seen[entry] = true; result[#result + 1] = entry end
+    end
+    return result
+end
+
+-- Keeps every usable part of damaged definitions. Returns a graph and a list of
+-- plain notes, one per category dropped or value removed. No notes means nothing was lost.
+function Categories.salvage(definitions)
+    local notes, kept, byId = {}, {}, {}
+    local function note(text) notes[#notes + 1] = text end
+    if type(definitions) ~= "table" then
+        note("Dropped every category: the saved list is unreadable")
+        definitions = {}
+    end
+    local indexes = {}
+    for index in pairs(definitions) do
+        if type(index) == "number" then indexes[#indexes + 1] = index else note("Dropped the unnumbered entry " .. tostring(index)) end
+    end
+    for _, index in ipairs(Sort(indexes)) do
+        local source = definitions[index]
+        if type(source) ~= "table" or type(source.id) ~= "string" or not source.id:match("^custom:.+") then
+            note("Dropped entry " .. tostring(index) .. ": it has no category ID")
+        elseif byId[source.id] then note("Dropped a second copy of " .. source.id)
+        else
+            local entry = {id = source.id, name = source.name}
+            if not nonempty(entry.name) then
+                entry.name = source.id:sub(8)
+                note("Renamed a category without a name to " .. entry.name)
+            end
+            local function refused(list) return function(why) note(entry.name .. ": its " .. list .. " " .. why) end end
+            entry.types = cleanList(source.types, nonempty, refused("item list"))
+            entry.includes = cleanList(source.includes, categoryId, refused("included categories"))
+            kept[#kept + 1], byId[entry.id] = entry, entry
+        end
+    end
+    -- Follow each chain once; an inclusion that leads back into its own chain is the one that closes a cycle.
+    local state = {}
+    for _, root in ipairs(kept) do
+        local stack = not state[root.id] and {{entry = root, at = 1}} or {}
+        if stack[1] then state[root.id] = "open" end
+        while #stack > 0 do
+            local top = stack[#stack]
+            local child = top.entry.includes[top.at]
+            if not child then state[top.entry.id] = "done"; table.remove(stack)
+            elseif child:sub(1, 7) ~= "custom:" then top.at = top.at + 1
+            elseif not byId[child] or state[child] == "open" then
+                note(top.entry.name .. ": removed the included category " .. child
+                    .. (byId[child] and ", which includes it in return" or ", which no longer exists"))
+                table.remove(top.entry.includes, top.at)
+            else
+                top.at = top.at + 1
+                if not state[child] then
+                    state[child] = "open"
+                    stack[#stack + 1] = {entry = byId[child], at = 1}
+                end
+            end
+        end
+    end
+    return Categories.new(kept), notes
 end
 
 local function matches(graph, id, descriptor, labels, visited)
