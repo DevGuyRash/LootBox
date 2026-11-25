@@ -4,7 +4,7 @@ Some stock actions keep an item, some replace it. Unsealing a soda keeps the ite
 
 ## How a result is found
 
-`Items.watch` notes the ID of everything carried and everything lying on and around the player's tile before the action is queued. After the action performs, `watch:find()` looks first for the original under its old ID, if the action keeps it (`ready`), and then for an item whose ID is new and that fits (`makes`). Of several it takes the best fit, then the one in the main inventory, then one in a bag, then one on the ground. Two equally good answers are equally good: both belong to the player, are of the right kind, and did not exist when the action started.
+`Items.watch` notes the ID of everything carried and everything lying on and around the player's tile before the action is queued. After the action performs, `watch:find()` looks first for the original under its old ID, if the action keeps it (`ready`), and then for an item whose ID is new and that fits (`makes`). A carried answer comes before one on the player's own tile, then the best fit, then the main inventory before a bag. Two equally good answers are equally good: both belong to the player, are of the right kind, and did not exist when the action started.
 
 Nothing else in the inventory matters. Items may arrive, leave or move meanwhile. An earlier version refused unless nothing but the expected change happened anywhere in the carried tree; a nail arriving during the action cancelled it.
 
@@ -16,7 +16,9 @@ In single player the result exists when the action completes. In multiplayer the
 
 ## Owning an action
 
-`Act` owns the stock actions of one step. It takes each in hand while `ISTimedActionQueue.add` is being called, because `IsoGameCharacter.StartAction` may start the first one inside that call. It checks at the last moment before the game commits (in multiplayer, before the request is sent), leaves the player's own queued actions alone even when the stock stop resets the queue, and keeps follow-ups that must still happen, such as putting a mask back on.
+`Act` owns the stock actions of one step. It takes each in hand while `ISTimedActionQueue.add` is being called, because `IsoGameCharacter.StartAction` may start the first one inside that call. It checks at the last moment before the game commits (in multiplayer, before the request is sent). Stock stop resets the whole queue, and after the player walks, runs or aims the engine also clears whatever started inside it. So what must survive waits in `Act.spare` and goes back once the player is calm: follow-ups such as putting a mask back on, and the player's own queued actions unless their own movement or fight ended them, as it always does. `Native` uses the same.
+
+Finishing can make the game call an action invalid an instant before the server reports it done: a bottle drunk dry, a source poured out, a barrel emptied. Such actions are `lasting`.
 
 `Flow` runs one thing the player asked for as a series of such steps. Between steps it waits for the player's own queue and movement; aiming, fighting or running ends it. `TillFull`, `Pour`, `Fixture` and `Dispenser` are flows; `Vessels` holds the steps they share (fetch, pour, put back).
 

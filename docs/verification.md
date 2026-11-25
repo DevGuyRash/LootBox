@@ -365,3 +365,27 @@ Played in isolated 42.22.2 clients with mouse input:
 | Windows | Every page in game and in the main menu; 1280x720, 1600x900 and 1920x1080 with small, 3x and 4x fonts; Escape closes. |
 
 Not exercised: controller, split screen, real modded menus other than NeatUI, vehicle relocking and gear recovery in live multiplayer.
+
+## Result finding, engine, packing and cleaning sweep (November 25, 2026)
+
+`python3 tools/verify.py --game ...` passes every suite in Lua 5.1 and in the installed 42.22.2 Kahlua. `tests/support/game.lua` models the stock queue, the engine's action loop (including starting an action inside the call that queues it, and clearing the stack after a walk, run or aim), and a server that sends changes in order and then reports an action done. `til-full`, `dispenser` and `pouring` drive whole flows over it in both modes; `job-engine` drives whole jobs; Condense is compared with brute force.
+
+Played on a disposable dedicated 42.22.2 server as an ordinary non-admin player. The first version (main at `db46ee6`) was played first: opening a can or refilling a dispenser was cancelled by one unrelated nail arriving meanwhile, and a ration that was drunk was reported as failed.
+
+| Path, with a nail arriving mid-action where it matters | Observed |
+| --- | --- |
+| Open and eat: chili, beans, unlabelled can, stack of chili | Finished, right item, through a relay adding 90-150 ms each way and 1% loss |
+| Dispenser: one source; two sources with a twin bottle already carried | 6 + 3.8 + 3 = 12.8 L on the server; the twin untouched |
+| Dispenser after its source emptied, interrupted pour | Bottle back on its stand |
+| Overloaded opening | Result found at the feet and said so |
+| Two bottles to the last drop | Two portions, confirmed by the need |
+| Shelf bottles poured into and returned; main, worn bag and shelf bottles filled from a sink | All confirmed on the server |
+| 60 nails and 6 planks from a shelf | 66 of 66; the nails in three actions |
+| Table to dresser, both in reach | Straight across |
+| Put away into labelled counter and wardrobe | One stop each |
+| Condense | Bag filled to exactly 15 of 15; a second click moved nothing |
+| Clean a room into an outdoor can | 23 of 23, one trip, can emptied |
+
+Single player: open and eat, canned milk, sardines, ration, refill; a paused game no longer uses up a step's time.
+
+Not exercised live: controller, split screen, masks, automatic intake, vehicles, gear staging, huge buildings, other modded menus. A refitted dispenser may show a stale amount on a lagging client until the area reloads; the server's amount is right, and the stock actions do the same.
