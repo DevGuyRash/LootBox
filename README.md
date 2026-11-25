@@ -24,8 +24,8 @@ Right-click an item, a container, a container's icon or title, a vehicle, or the
 
 | You right-click | You can get |
 | --- | --- |
-| An item | All of that type, of its category, or of one of your categories: put in the open container, put away, haul, drop, throw away, or take. Also **On my loot list**, **Keep**, and **Categories** ticks. |
-| A container, its icon, its NeatUI title or its empty space | The object's original options (for example Turn on, Settings, Disassemble), then **Take everything**, **Take my loot list**, **Take what I already carry**, **Move contents**, **Put in**, **Throw away contents**, and **Belongs here** ticks. |
+| An item | All of that type, of its category, or of one of your categories: put in the open container, put away, haul, drop, throw away, or take. Then **Belongs here** (one click: every one of its kind goes in the container it lies in, or the open one), **Where it goes** (any of your storage, for its kind, its category or only this one, with Show me), **Pick up when looting** and **Keep** (each for every one of its kind or only this one), and **Categories**. |
+| A container, its icon, its NeatUI title or its empty space | The object's original options (for example Turn on, Settings, Disassemble), then **Take everything**, **Take my loot list**, **Take what I already carry**, **Move contents**, **Put in**, **Throw away contents**, and **Belongs here**: its labels, labelling it with the categories or the exact items inside, anything else, when to fill it, and copy, paste and clear. |
 | A vehicle | **Load**, **My vehicle**, and the compartments you can reach. |
 | The ground | **Around here**: within reach, this room, this building, or an area you mark. |
 | The ground, while a job runs | **Job: ...** with Pause, Resume, Stop and Show progress. |
@@ -41,13 +41,25 @@ Open it with the job key, from **Around here > Plan a job**, or from **Options >
 - **Plan a job:** choose what, from where and to where. The list below shows what would move, what stays and why. Presets save the whole job and then appear in right-click menus where they fit.
 - **Loot list:** categories and items to pick up whenever you loot.
 - **Categories:** groups of items, game categories and your other categories. Deleting one removes it wherever it was used.
-- **Storage:** every labelled container, where it is, and what belongs in it.
+- **Storage:** every container you labelled or named, open or out of sight: its name, what belongs in it (categories and items), whether it takes anything else, when to fill it, and **Show me**, which points the way.
 - **Settings:** each switch applies as soon as you click it.
 - **Help:** short walkthroughs.
 
 ## Inventory buttons
 
 **Smart Take All** and **Smart Take Matching** take from the open containers into your bags. **Match Displayed** and **Match Nearby** put carried items where the same kind already is. They appear only while they have something to do. **Condense** packs loose items into the bags that reduce weight most, keeping the same things together where the weight is equal; Settings adds rearranging what is already in bags, unworn bags and bags inside bags. Keys stay in main inventory or go on a key ring, because the game looks for them nowhere else, and a labelled bag takes only what its label names.
+
+## Storage
+
+A container's labels say what belongs in it: one item, a kind of item, one of your categories, a game category, or **Anything else**. Labelled containers show it in their title and tooltip and carry a small mark on their icon, and every item's tooltip says where it goes, that it is in its place, or that its place is full. A fixture's name is the game's own container name, so every player sees it; a bag keeps its own name; a vehicle part gets a name from LootBox.
+
+One ranking decides for tooltips, menus, the button and jobs alike. A place for that very item comes first, then a label for its kind, then where the same thing already lies with one of your categories or a game category, then storage for anything else. Among equals, storage set to fill **first** comes before the rest and storage set to fill **last** waits for the others, then the nearest. Something already in storage moves only to storage meant for it more closely. The bags you carry are for bringing loot home: there only a label for an item or its kind makes one its place, and what a bag labelled by category collected goes on to storage that stays put. Keys go only where keys are named.
+
+**Put Away** in the inventory window shows how many things you carry have a place within 20 tiles; its tooltip says what goes where. The same job is **Around here > Put away what I carry**.
+
+**Settings > Storage > Put away what I bring home by myself** is off unless you turn it on. Home is near storage you labelled that stays put. Leaving it, LootBox notes what you carry and what is in the vehicle you leave in; none of that is ever moved. Back home and standing still for three seconds, out of danger, what you brought home is put away, and so is what came home in your vehicle once you take it out. Moving, acting, a menu, a drag, a text box, crafting or a LootBox window stops it for good; zombies only put it off. Keep, favorite, worn and held things are never touched.
+
+**Keep** on one item stops LootBox moving or deleting it. **Keep** for every one of a kind holds on to the ones you carry and never throws one away; the others are still picked up and put away, and it still eats, drinks and pours them.
 
 ## Container icons and titles
 
@@ -93,7 +105,7 @@ The native trash command empties the whole server bin and does not accept an ato
 
 Item discovery is limited to physically loaded, permitted native locations. Building geometry comes from native metadata; walking can stream distant sections before inspecting their sources. Source fixtures, bags, keyed vehicle storage, and floor locations are resolved again after a long delivery trip, while item IDs and types remain strict. Unkeyed vehicles can be used through their live handle but are not adopted after unloading. Multiplayer's Lua API does not acknowledge an empty container-content response, and its normal inventory UI marks exploration before synchronization completes. Jobs move observed eligible items and report newly searched sources as unconfirmed; they cannot certify a fully cleared building from an empty local list. Human corpse hauling is excluded because its special native action can change held equipment. Native failure remains visible instead of becoming a direct inventory mutation.
 
-Categories, interface preferences, checklists, and setups are private local data. Container and instance labels and named setups persist per world and player; they are not automatically shared with other clients. Optional setup and preference documents are separate from labels and Keep, so a damaged optional file does not block ordinary item handling. Native fixture identity has no persistent UUID, so an identical replacement in the same location and slot cannot always be distinguished across reconnect. Vehicle memory and labels use the native key ID and model. Lookup requires a unique loaded match and never adopts a nearby car by its appearance or position. Native key IDs are key associations rather than guaranteed UUIDs; keyed-alike modded vehicles can remain ambiguous. Explicit rekeying or a model change requires remembering and labeling the vehicle again. Unloaded remembered locations remain unverified, and observed missing trash cans are retired.
+Categories, interface preferences, checklists, and setups are private local data. Container and instance labels, fill order, vehicle part names, kinds kept, and named setups persist per world and player; they are not automatically shared with other clients. Optional setup and preference documents are separate from labels and Keep, so a damaged optional file does not block ordinary item handling. Native fixture identity has no persistent UUID, so an identical replacement in the same location and slot cannot always be distinguished across reconnect. Vehicle memory and labels use the native key ID and model. Lookup requires a unique loaded match and never adopts a nearby car by its appearance or position. Native key IDs are key associations rather than guaranteed UUIDs; keyed-alike modded vehicles can remain ambiguous. Explicit rekeying or a model change requires remembering and labeling the vehicle again. Unloaded remembered locations remain unverified, and observed missing trash cans are retired.
 
 ## Logs
 

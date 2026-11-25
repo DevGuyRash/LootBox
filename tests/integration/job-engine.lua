@@ -1272,6 +1272,14 @@ case("loot waiting in a carried bag goes on to storage that stays put, not to a 
     assert(f.world:putAway()[1].storage.container == pantry)
 end)
 
+case("storage for anything else takes no keys", function(f)
+    labelled(f, f.crate(f.square(3, 0), "rest"), "rest:")
+    local key = f.item(f.inventory, "Base.Key1", {class = "Key"})
+    local sock = f.item(f.inventory, "Base.Sock", {category = "Clothing"})
+    local entries = f.world:putAway()
+    assert(#entries == 1 and entries[1].item == sock and not f.world:home(key))
+end)
+
 case("Put Away counts only what fits", function(f)
     labelled(f, f.crate(f.square(3, 0), "box"), "native:Material").capacity = 3
     for _ = 1, 10 do f.item(f.inventory) end
