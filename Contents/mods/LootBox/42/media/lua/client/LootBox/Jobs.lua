@@ -428,21 +428,19 @@ function Jobs:previewCondense(options)
     if engineBusy(self) then return nil, "Finish or cancel the current job before condensing" end
     local controller, err = Condense.new(self.world, options)
     if not controller then return nil, err end
-    local info
-    info, err = controller:preview()
-    if not info then return nil, err end
+    local info = controller:preview()
     local request = {scope = "inventory", shortcutIntent = "condense", includeBags = true, filter = {all = true, ids = {}, types = {}},
         destination = {kind = "inventory"}}
     local display = {}
     for _, key in ipairs({"mode", "eligible", "bagCount", "beforeWeight", "estimatedSaving", "useUnequipped", "nested", "reason"}) do display[key] = info[key] end
     display.useUnequipped, display.nested = options ~= nil and options.useUnequipped == true, options ~= nil and options.nested == true
     local plan = {owner = self, action = "condense", condense = display,
-        request = cloneRequest(request), moves = {}, skipped = {}, warnings = {}, pending = info.planning and 1 or 0}
+        request = cloneRequest(request), moves = {}, skipped = {}, warnings = {}, pending = 0}
     for _, row in ipairs(info.steps or {}) do
         plan.moves[#plan.moves + 1] = {itemName = row.itemName, from = row.from, to = row.to,
-            status = row.temporary and "Temporary buffer" or "Reposition", tone = row.temporary and "warning" or "success"}
+            status = row.temporary and "Put aside for a moment" or "Move", tone = row.temporary and "warning" or "success"}
     end
-    plan.warnings[1] = "This shows the first arrangement. Condense checks current items, bag eligibility and native capacity before every transfer."
+    plan.warnings[1] = "Every move is checked again just before it is made."
     remember(self, plan, {action = "condense", condense = controller, request = request,
         graph = Categories.new(self.graph:list()), bins = {}, skipped = {}})
     return plan
@@ -491,10 +489,11 @@ function Jobs:start(plan, options)
     Log.info(self.interaction, "START", "action", reviewed.action or "transfer", "records", #(reviewed.records or {}),
         "skipped", #reviewed.skipped, "unopened", #(reviewed.unknownSources or {}), "bins", #reviewed.bins, "player", Log.player(self.player))
     if reviewed.action == "condense" then
+        reviewed.condense.interaction = self.interaction
         local info = reviewed.condense:status()
-        self.view = {state = "running", done = 0, moved = 0, cleared = 0, total = info.eligible or 0,
+        self.view = {state = "running", done = 0, moved = 0, cleared = 0, total = info.planned,
             skipped = 0, reasons = {}, carried = 0, unconfirmedSources = 0, condense = info,
-            reason = "Planning carried-item condensation."}
+            reason = "Packing your bags."}
         self.execution = {phase = "condense", condense = reviewed.condense, batch = {}, reviewBins = false, unlocked = {}}
         return true
     end
@@ -516,30 +515,26 @@ function Jobs:condenseStep()
     if op then
         op.condense = true
         self.view.itemName = tostring(op.item:getName())
-        self.view.reason = "Reorganizing carried items using the current Condense settings."
+        self.view.reason = "Packing your bags."
         self:action(op, function(ok, failure)
             local continuing, problem = controller:settle(op, ok, failure)
             local status = controller:status()
             self.view.condense = status
             self.view.done, self.view.moved = status.transfers or 0, status.transfers or 0
-            self.view.total = math.max(self.view.total, self.view.done)
-            if not continuing then self:finishWhenSettled("paused", problem or "Condense needs a fresh check before continuing") end
+            self.view.total = math.max(status.planned, self.view.done)
+            if not continuing then self:finishWhenSettled("paused", problem) end
         end)
     elseif done then
         local status = self.view.condense
-        if (status.buffered or 0) > 0 then self:finishWhenSettled("paused", reason or "A bag arrangement is incomplete; buffered items remain carried")
-        else
-            if status.limited then self:skip({itemName = "Condense"}, reason or status.reason or "The bounded improvement search reached its limit") end
-            self:complete(self.view.skipped > 0 and "finished_with_skips" or "finished", reason or status.reason or "Condense completed.")
-        end
-    elseif reason then self:finishWhenSettled("paused", reason)
-    else self.view.reason = "Planning useful capacity-safe bag arrangements." end
+        if status.limited then self:skip({itemName = "Condense"}, reason) end
+        self:complete(status.limited and "finished_with_skips" or "finished", reason)
+    else self:finishWhenSettled("paused", reason) end
 end
 
 function Jobs:checkCondense(op)
     if not op.condense then return true end
     local controller = self.execution and self.execution.condense
-    if not controller then return nil, "The Condense arrangement is no longer active" end
+    if not controller then return nil, "Condense is no longer running" end
     return controller:validate(op)
 end
 
@@ -2033,8 +2028,7 @@ function Jobs:complete(state, reason, trigger)
     if self.execution and self.execution.condense then
         self.view.condense = self.execution.condense:status()
         if (self.view.condense.buffered or 0) > 0 then
-            reason = (reason or "Condense stopped") .. "; a bag arrangement is incomplete and buffered items remain carried."
-            if state == "paused" then reason = reason .. " Resume to finish or repair it." end
+            reason = (reason or "Condense stopped") .. "; " .. self.view.condense.buffered .. " items put aside for a moment are still in your inventory."
         end
     end
     if state == "failed" and self.execution and self.execution.recoveryOnly then
