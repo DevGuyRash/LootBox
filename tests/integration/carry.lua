@@ -19,6 +19,7 @@ local function inventory(location)
     local value = {items = {}, point = location or square(0, 0), capacity = 50}
     function value:getItems() return list(self.items) end
     function value:isRemoveItemAllowed() return not self.refuseRemoval end
+    function value:isItemAllowed(selected) return not self.accepts or self.accepts(selected) end
     function value:getEffectiveCapacity() return self.capacity end
     function value:getCapacityWeight()
         local result = 0
@@ -46,6 +47,13 @@ local function item(id, source, mass)
     function value:hasTag(tag) return self.tags and self.tags[tag] == true or false end
     if source then source.items[#source.items + 1] = value end
     return value
+end
+
+-- What is still to be carried: this many things of one kilogram.
+local function load(count)
+    local result = {}
+    for index = 1, count do result[index] = item(1000 + index) end
+    return result
 end
 
 local function bag(id, source, slot, capacity, reduction, fullType)
@@ -122,7 +130,7 @@ end
 case("A free worn bag location is prepared before either free hand", function()
     local actor, world, records = fixture()
     local selected = bag(1, actor.inventory)
-    local op = Carry.new(actor, world):next(records(selected), 15, 0)
+    local op = Carry.new(actor, world):next(records(selected), load(15), 0)
     equal(op.item, selected)
     equal(op.mode, "wear")
     equal(op.slot, "base:Back")
@@ -132,7 +140,7 @@ case("A full personal bag still gets equipped when its existing contents reduce 
     local actor, world, records = fixture()
     local selected = bag(2, actor.inventory, "base:Back", 20)
     item(3, selected.inventory, 20)
-    local op = Carry.new(actor, world):next(records(selected), 1)
+    local op = Carry.new(actor, world):next(records(selected), load(1))
     equal(op.item, selected)
     equal(op.mode, "wear")
     equal(selected.inventory:getCapacityWeight(), 20)
@@ -145,7 +153,7 @@ case("A declared custom lower location works alongside an occupied back", functi
     local selected = bag(5, actor.inventory)
     selected.extras = {"Bag_CustomLower"}
     prototypes["Base.Bag_CustomLower"] = bag(-1, nil, "custom:LowerBack", 20, 70, "Base.Bag_CustomLower")
-    local op = Carry.new(actor, world):next(records(existing, selected), 40)
+    local op = Carry.new(actor, world):next(records(existing, selected), load(40))
     equal(op.item, selected)
     equal(op.mode, "wear")
     equal(op.variant, "Base.Bag_CustomLower")
@@ -161,7 +169,7 @@ case("A smaller native variant cannot shrink a bag below the weight of its conte
     item(8, selected.inventory, 12)
     selected.extras = {"Bag_TinyLower"}
     prototypes["Base.Bag_TinyLower"] = bag(-1, nil, "custom:LowerBack", 10, 90, "Base.Bag_TinyLower")
-    local op = Carry.new(actor, world):next(records(existing, selected), 40)
+    local op = Carry.new(actor, world):next(records(existing, selected), load(40))
     equal(op.item, selected)
     equal(op.variant, nil)
     equal(op.mode, "secondary")
@@ -173,7 +181,7 @@ case("Free primary remains usable while a one-handed secondary item is retained"
     actor:wear(existing)
     actor.secondary = item(10, actor.inventory)
     local selected = bag(11, actor.inventory)
-    local op = Carry.new(actor, world):next(records(existing, selected), 40)
+    local op = Carry.new(actor, world):next(records(existing, selected), load(40))
     equal(op.item, selected)
     equal(op.mode, "primary")
     equal(actor.secondary:getID(), 10)
@@ -185,7 +193,7 @@ case("Existing occupied hands are not displaced to prepare another bag", functio
     actor:wear(existing)
     actor.primary, actor.secondary = item(13, actor.inventory), item(14, actor.inventory)
     local selected = bag(15, actor.inventory)
-    equal(Carry.new(actor, world):next(records(existing, selected), 40), nil)
+    equal(Carry.new(actor, world):next(records(existing, selected), load(40)), nil)
     equal(actor.primary:getID(), 13)
     equal(actor.secondary:getID(), 14)
 end)
@@ -196,7 +204,7 @@ case("A free hand is not used when native equip would drop the other held heavy 
     actor:wear(existing)
     actor.primary = item(17, actor.inventory)
     actor.primary.forceDrop = true
-    equal(Carry.new(actor, world):next(records(existing, bag(18, actor.inventory)), 40), nil)
+    equal(Carry.new(actor, world):next(records(existing, bag(18, actor.inventory)), load(40)), nil)
 end)
 
 case("A short load uses existing worn capacity instead of preparing another hand bag", function()
@@ -204,16 +212,40 @@ case("A short load uses existing worn capacity instead of preparing another hand
     local existing = bag(19, actor.inventory, "base:Back", 20)
     actor:wear(existing)
     local spare = bag(20, actor.inventory)
-    equal(Carry.new(actor, world):next(records(existing, spare), 2), nil)
+    equal(Carry.new(actor, world):next(records(existing, spare), load(2)), nil)
     equal(actor.primary, nil)
     equal(actor.secondary, nil)
+end)
+
+case("A bag is worn for what it adds to the worn bags with room, not for its own size", function()
+    local actor, world, records = fixture()
+    local existing = bag(35, actor.inventory, "base:Back", 20, 80)
+    actor:wear(existing)
+    local same = bag(36, actor.inventory, "custom:LowerBack", 20, 80)
+    equal(Carry.new(actor, world):next(records(existing, same), load(3)), nil)
+    equal(Carry.new(actor, world):next(records(existing, same), load(30)).item, same)
+    local stronger = bag(37, actor.inventory, "custom:LowerBack", 20, 90)
+    equal(Carry.new(actor, world):next(records(existing, same, stronger), load(3)).item, stronger)
+end)
+
+case("A bag gains nothing from things it does not accept or that are too large for it", function()
+    local actor, world, records = fixture()
+    local strap = bag(38, actor.inventory)
+    strap.inventory.accepts = function(selected) return selected.fullType == "Base.Bullets" end
+    equal(Carry.new(actor, world):next(records(strap), load(10)), nil)
+    local bullets = load(10)
+    for _, selected in ipairs(bullets) do selected.fullType = "Base.Bullets" end
+    equal(Carry.new(actor, world):next(records(strap), bullets).item, strap)
+    local pouch = bag(39, actor.inventory)
+    function pouch:getMaxItemSize() return 0.5 end
+    equal(Carry.new(actor, world):next(records(pouch), load(10)), nil)
 end)
 
 case("A held bag can move to a free worn location to free its hand", function()
     local actor, world, records = fixture()
     local selected = bag(21, actor.inventory)
     actor.secondary = selected
-    local op = Carry.new(actor, world):next(records(selected), 30)
+    local op = Carry.new(actor, world):next(records(selected), load(30))
     equal(op.item, selected)
     equal(op.mode, "wear")
 end)
@@ -223,9 +255,9 @@ case("Keep and favorite found bags are retained at their source", function()
     local source = inventory()
     local selected = bag(22, source)
     selected.favorite = true
-    equal(Carry.new(actor, world):next(records(selected), 30), nil)
+    equal(Carry.new(actor, world):next(records(selected), load(30)), nil)
     selected.favorite, world.state.keep["22"] = false, true
-    equal(Carry.new(actor, world):next(records(selected), 30), nil)
+    equal(Carry.new(actor, world):next(records(selected), load(30)), nil)
     equal(selected:getContainer(), source)
 end)
 
@@ -233,20 +265,20 @@ case("A native removal refusal excludes a found bag", function()
     local actor, world, records = fixture()
     local source = inventory()
     source.refuseRemoval = true
-    equal(Carry.new(actor, world):next(records(bag(23, source)), 30), nil)
+    equal(Carry.new(actor, world):next(records(bag(23, source)), load(30)), nil)
 end)
 
 case("A tiny job does not detour to a distant bag", function()
     local actor, world, records = fixture()
     local distant = inventory(square(100, 100))
-    equal(Carry.new(actor, world):next(records(bag(24, distant)), 1), nil)
+    equal(Carry.new(actor, world):next(records(bag(24, distant)), load(1)), nil)
 end)
 
 case("Zero remaining work does not prepare a full personal bag", function()
     local actor, world, records = fixture()
     local selected = bag(25, actor.inventory)
     item(26, selected.inventory, 20)
-    equal(Carry.new(actor, world):next(records(selected), 0), nil)
+    equal(Carry.new(actor, world):next(records(selected), load(0)), nil)
 end)
 
 case("Native exclusive locations protect the existing worn bag", function()
@@ -254,7 +286,7 @@ case("Native exclusive locations protect the existing worn bag", function()
     local existing = bag(27, actor.inventory, "custom:LowerBack")
     actor:wear(existing)
     group.exclusive["base:Back:custom:LowerBack"] = true
-    local op = Carry.new(actor, world):next(records(existing, bag(28, actor.inventory)), 40)
+    local op = Carry.new(actor, world):next(records(existing, bag(28, actor.inventory)), load(40))
     equal(op.mode, "secondary")
     equal(op.variant, nil)
     equal(actor.worn[1].item, existing)
@@ -265,7 +297,7 @@ case("Native multi-item locations allow another bag without evicting the first",
     local existing, selected = bag(29, actor.inventory), bag(30, actor.inventory)
     actor:wear(existing)
     group.multi["base:Back"] = true
-    local op = Carry.new(actor, world):next(records(existing, selected), 40)
+    local op = Carry.new(actor, world):next(records(existing, selected), load(40))
     equal(op.item, selected)
     equal(op.mode, "wear")
     equal(actor.worn[1].item, existing)
@@ -275,22 +307,22 @@ case("A capacity-blocked bag retries once after capacity changes and never spins
     local actor, world, records = fixture()
     local selected = bag(31, inventory())
     local setup, source = Carry.new(actor, world), records(selected)
-    local first = setup:next(source, 30, 4)
+    local first = setup:next(source, load(30), 4)
     assert(first)
     setup:complete(first, false, "capacity", 4)
-    equal(setup:next(source, 30, 4), nil)
-    local second = setup:next(source, 30, 5)
+    equal(setup:next(source, load(30), 4), nil)
+    local second = setup:next(source, load(30), 5)
     assert(second)
     setup:complete(second, false, "capacity", 5)
-    equal(setup:next(source, 30, 5), nil)
+    equal(setup:next(source, load(30), 5), nil)
 end)
 
 case("A generic bag failure is not retried just because carrying capacity changed", function()
     local actor, world, records = fixture()
     local selected = bag(32, actor.inventory)
     local setup, source = Carry.new(actor, world), records(selected)
-    setup:complete(assert(setup:next(source, 30, 1)), false, nil, 1)
-    equal(setup:next(source, 30, 2), nil)
+    setup:complete(assert(setup:next(source, load(30), 1)), false, nil, 1)
+    equal(setup:next(source, load(30), 2), nil)
 end)
 
 case("Only an observed successful replacement supplies an identity migration", function()

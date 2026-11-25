@@ -1,7 +1,7 @@
 -- Til Full, beside the game's own Eat and Drink amounts and only where the
 -- item would be consumed right now.
 local TillFull = require "LootBox/TillFull"
-local OpenFull = require "LootBox/OpenFull"
+local Opening = require "LootBox/Opening"
 local Log = require "LootBox/Log"
 
 local Menu = {}
@@ -83,16 +83,9 @@ local function add(playerIndex, parent, items, app, preferences)
     local function extend(menu, root, anchor, kind, recipe)
         local snapshot = selectedStack(items, anchor)
         if not snapshot or #snapshot == 0 then return end
-        -- Multiplayer only names the new item for some openings. For the rest
-        -- the game's own Open row stays the way in.
-        local mapped
-        if recipe and isClient() and not OpenFull.keeps(player, anchor, recipe) then
-            mapped = OpenFull.replacement(player, anchor, recipe)
-            if not mapped then return end
-        end
         local source = anchor:getContainer()
-        local offered, why = Log.guard("TillFull.offers", TillFull.offers, player, app.world, snapshot, kind,
-            preferences.tillFullBothNeeds, recipe, source)
+        local offered, why = Log.guard("TillFull.offers", TillFull.offers, player, app.world, snapshot,
+            { kind = kind, both = preferences.tillFullBothNeeds, recipe = recipe, source = source })
         if not offered then
             Log.trace(nil, "MENU", "menu", "til-full", "item", Log.item(anchor, player), "kind", kind, "omitted", why)
             return
@@ -108,7 +101,6 @@ local function add(playerIndex, parent, items, app, preferences)
         if recipe and nativeMenu.addToolTip then
             local tip = nativeMenu.addToolTip()
             tip.description = "Opens the selected item, then " .. (drink and "drinks for your thirst" or "eats for your hunger") .. " at that moment."
-                .. (mapped and " Keep the opener in your main inventory." or "")
             option.toolTip = tip
         end
     end
@@ -126,7 +118,7 @@ local function add(playerIndex, parent, items, app, preferences)
                 local action, item
                 if nativeMenu.onEatItems and option.onSelect == nativeMenu.onEatItems then
                     item = inventoryItem((ISInventoryPane.getActualItems(option.target) or {})[1])
-                    action = item and OpenFull.drinkFood(item, option.param3) and "drinkFood" or "food"
+                    action = item and Opening.drinks(item, option.param3) and "drinkFood" or "food"
                 elseif nativeMenu.onDrinkFluid and option.onSelect == nativeMenu.onDrinkFluid then
                     action, item = "fluid", inventoryItem(option.target)
                     if option.param4 and item ~= option.param4 then item = nil end
@@ -134,8 +126,8 @@ local function add(playerIndex, parent, items, app, preferences)
                     and option.param2 == playerIndex and option.param3 == false then
                     local selected = inventoryItem(option.target)
                     local r = option.param1
-                    local k = selected and r and OpenFull.recipeKind(player, selected, r)
-                    if k and OpenFull.recipeMenuAllowed(player, selected, k, nil, r) then
+                    local k = selected and r and Opening.kind(player, selected, r)
+                    if k and Opening.allowed(player, selected, k) then
                         local p = plain[selected]
                         if p and p.recipe ~= r then p.ambiguous = true
                         elseif not p then plain[selected] = {menu = menu, root = option, recipe = r, kind = k} end

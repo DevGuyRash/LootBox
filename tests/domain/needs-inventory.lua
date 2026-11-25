@@ -1,4 +1,5 @@
 package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.path
+for _, name in ipairs({ 'TimedActions/ISTimedActionQueue', 'TimedActions/ISInventoryTransferUtil' }) do package.loaded[name] = package.loaded[name] or true end
 
 local sampled = 0
 package.loaded["LootBox/TillFull"] = {automaticEffects = function(item, kind, opening)
@@ -7,16 +8,12 @@ package.loaded["LootBox/TillFull"] = {automaticEffects = function(item, kind, op
     if item.kind == kind and not item.unsafe then return {hunger=0.2, thirst=0.2} end
 end}
 local Open = {}
-function Open.plan(_, options, kind, _, item, callbacks)
-    if item.kind ~= kind or (not item.sealed and not item.cantEat) or not item.openingTool
-        or not callbacks.toolAccessible(item.openingTool) or item.risky and not options.autoConsumeRiskyOpen then return nil end
-    return {item=item, kind=kind, tool=item.openingTool, risky=item.risky}
+function Open.automatic(_, item, risky, allowed)
+    if item.kind ~= "food" or (not item.sealed and not item.cantEat) or not item.openingTool
+        or (item.risky == true) ~= risky or not allowed(item.openingTool) then return nil end
+    return { item = item, kind = "food", tool = item.openingTool, risky = item.risky }
 end
-function Open.validate(player, options, kind, world, item, plan, callbacks)
-    local fresh = Open.plan(player, options, kind, world, item, callbacks)
-    return fresh ~= nil and fresh.tool == plan.tool and fresh.risky == plan.risky
-end
-package.loaded["LootBox/NeedsOpening"] = Open
+package.loaded["LootBox/Opening"] = Open
 local Inventory = require "LootBox/NeedsInventory"
 
 local function list(items)
@@ -33,6 +30,7 @@ local function container(bag)
         end
         return items
     end
+    function c:contains(item) return self:getItems():contains(item) end
     function c:getContainingItem() return self.bag end
     function c:isLockedToCharacter() return self.lock == true end
     return c
@@ -56,7 +54,7 @@ local function fixture()
     function p:getPrimaryHandItem() return self.primary end
     function p:getSecondaryHandItem() return self.secondary end
     function p:isAttachedItem(i) return self.attached[i] == true end
-    function p:isEquippedClothing(i) return self.worn[i] == true end
+    function p:isEquipped(i) return self.worn[i] == true or i == self.primary or i == self.secondary end
     local world={}
     function world:protected(i, flags)
         if i.keep then return true, "Keep" end
@@ -151,7 +149,6 @@ test("unsafe, protected, stale, external, locked and excluded items never qualif
         assert(not Inventory.eligible(p,opts,"fluid",w,invalid))
     end
     assert(Inventory.select(p,opts,"fluid",w)==g)
-    assert(Inventory.select(p,opts,"fluid",w,{[g]=true})==nil)
     g.source=external
     assert(not Inventory.eligible(p,opts,"fluid",w,g))
 end)
@@ -229,10 +226,6 @@ test("opening is a fallback, requires an exact carried tool, and prefers normal 
 end)
 test("exact attached hydration bag uses its own fluid without admitting its pouch contents", function()
     local p,w=fixture()
-    p.isAttachedItem=nil
-    function p:getAttachedItems()
-        return {contains=function(_, item) return p.attached[item] == true end}
-    end
     local pack=bag(p.main)
     local bottled=item(pack.contents,"fluid")
     p.attached[pack]=true
@@ -259,15 +252,3 @@ end)
 
 print("PASS " .. count .. " NeedsInventory scenarios")
 
-test("after MP opening a fresh selection considers only ready food, never even calls a crafting planner",function()
-    local p,w=fixture();local opts={autoConsumeCarried=true,autoConsumeNested=true,autoConsumeRiskyOpen=true}
-    local can=item(p.main,"food");can.sealed=true;can.openingTool=item(p.main)
-    assert(Inventory.select(p,opts,"food",w)==can)
-    local old=Open.plan;local planned=0
-    Open.plan=function(...) planned=planned+1;return old(...) end
-    assert(Inventory.select(p,opts,"food",w,nil,nil,true)==nil and planned==0)
-    local inner=bag(bag(p.main).contents);local safe=item(inner.contents,"food")
-    assert(Inventory.select(p,opts,"food",w,nil,nil,true)==safe and planned==0)
-    safe.keep=true;assert(Inventory.select(p,opts,"food",w,nil,nil,true)==nil and planned==0)
-    Open.plan=old
-end)

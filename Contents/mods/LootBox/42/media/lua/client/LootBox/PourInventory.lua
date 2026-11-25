@@ -1,32 +1,15 @@
 local Stacks = require "LootBox/PourStacks"
+local Items = require "LootBox/Items"
+local Vessels = require "LootBox/Vessels"
+local call = require "LootBox/Safe"
 local Pour = {}
 local MAX_ITEMS, MAX_CONTAINERS, MAX_DEPTH = 4096, 48, 8
 local MAX_TARGETS, MAX_CHOICE_WORK = 512, 8192
-
-local function index(object, key) return object[key] end
-local function call(object, method, arg, second)
-    if not object then return nil end
-    local ok, fn = pcall(index, object, method)
-    if not ok or not fn then return nil end
-    local value
-    if arg == nil then ok, value = pcall(fn, object)
-    elseif second == nil then ok, value = pcall(fn, object, arg)
-    else ok, value = pcall(fn, object, arg, second) end
-    if ok then return value end
-end
 
 local function finite(n) return type(n) == "number" and n == n and math.abs(n) < math.huge end
 local function count(list)
     local n = call(list, "size")
     return finite(n) and math.max(0, math.floor(n)) or nil
-end
-
-local function equipped(player, item)
-    return item == call(player, "getPrimaryHandItem") or item == call(player, "getSecondaryHandItem")
-        or call(player, "isEquippedClothing", item) == true or call(player, "isAttachedItem", item) == true
-        or call(player, "isEquipped", item) == true
-        or call(call(player, "getWornItems"), "contains", item) == true
-        or call(call(player, "getAttachedItems"), "contains", item) == true
 end
 
 local function text(value) return type(value) == "string" and value ~= "" and value or nil end
@@ -65,7 +48,7 @@ end
 
 local function entryFor(player, item, container, scope, path)
     local id,fullType = call(item, "getID"), call(item,"getFullType")
-    local object,groundAnchor,groundSquare = item,nil,nil
+    local object,spot,groundSquare = item,nil,nil
     if not finite(id) or call(item, "isSealed") ~= false then return nil end
     local fluid=call(item,"getFluidContainer")
     if call(container, "getType") == "floor" then
@@ -78,8 +61,8 @@ local function entryFor(player, item, container, scope, path)
             if call(component,"isMultiTileMoveable")~=false then return nil end
             object,fluid,groundSquare=floorObject,component,call(floorObject,"getSquare")
         elseif fluid and (not component or component==fluid) then
-            groundAnchor=require("LootBox/PourGround").capture(player,item,container)
-            if not groundAnchor then return nil end
+            spot=Vessels.spot(player,item)
+            if not spot then return nil end
         else return nil end
     end
     if not fluid or call(fluid,"isMultiTileMoveable")==true or call(fluid, "getOwner") ~= object
@@ -89,15 +72,11 @@ local function entryFor(player, item, container, scope, path)
     local where=path or (scope=="main" and "Main inventory" or scope=="equipped" and "Equipped" or scope=="carried" and "Carried" or "Displayed loot")
     local label=itemName(item) .. " | " .. where
     return {id=id, fullType=fullType, item=item, object=object, container=container, scope=scope, fluid=fluid,
-        groundAnchor=groundAnchor,groundSquare=groundSquare,
+        spot=spot,groundSquare=groundSquare,
         capacity=capacity, amount=amount, free=free, label=label, place=where}
 end
 
-local function round(n)
-    if not FluidUtil or not FluidUtil.roundTransfer then return 0 end
-    local ok, value = pcall(FluidUtil.roundTransfer, n)
-    return ok and finite(value) and value or 0
-end
+local function round(n) return Vessels.amount(n, n) or 0 end
 
 function Pour.compatible(source, target)
     if not source or not target or source.item == target.item or source.id == target.id
@@ -148,9 +127,9 @@ local function scan(player, world, loot, allowLoot)
                     local bag = scope~="loot" and call(item,"getInventory") or nil
                     local vessel = Pour.hasFluid(item)
                     -- Ordinary cargo is neither, and most of an inventory is cargo.
-                    local gear = (vessel or bag) and container == main and equipped(player,item)
+                    local gear = (vessel or bag) and container == main and Items.equipped(player,item)
                     local entry = vessel and entryFor(player,item,container,scope or (gear and "equipped" or "main"),current.path)
-                    if entry and (scope~="loot" or (world and (call(container,"getType")=="floor" and not entry.groundAnchor
+                    if entry and (scope~="loot" or (world and (call(container,"getType")=="floor" and not entry.spot
                         or (call(item,"isFavorite")~=true and call(world,"protected",item)~=true))
                         and call(world,"consumptionSource",item,container)==true)) then
                         result[#result+1]=entry
@@ -348,81 +327,23 @@ function Pour.choose(snapshot, items, options, extraTarget)
     return nil,"No selected vessel can pour into an eligible destination."
 end
 
-function Pour.collect(player, world, sourceItem, lootPane, options)
-    local snapshot=Pour.snapshot(player,world,call(sourceItem,"getContainer"),lootPane)
-    return Pour.plan(snapshot,sourceItem,options)
-end
-
-local function member(container, item)
-    local list = call(container,"getItems")
-    local result = call(list,"contains",item)
-    if type(result)=="boolean" then return result end
-    for index=0,math.min(count(list) or 0,MAX_ITEMS)-1 do if call(list,"get",index)==item then return true end end
-    return false
-end
-
--- Returns true and the live reading, or false and the check that failed.
-function Pour.accessible(player, world, entry, lootPane, allowFluidRefresh)
-    if not entry or call(entry.item,"getContainer")~=entry.container then return false,"item-moved" end
-    local main, container, child=call(player,"getInventory"), entry.container, entry.item
-    if not main or not member(container, child) then return false,"item-not-in-container" end
-    local scope
-    if entry.scope=="loot" then
-        if container~=lootPane then return false,"loot-pane-changed" end
-        if not world or world:consumptionSource(child,container)~=true then return false,"loot-unreachable" end
-        if call(container,"isLockedToCharacter",player)~=false then return false,"container-locked" end
-        scope="loot"
-    else
-        local seen={}
-        for depth=0,MAX_DEPTH do
-            if not container or seen[container] then return false,"bag-chain-broken" end
-            if call(container,"isLockedToCharacter",player)~=false then return false,"container-locked" end
-            if container==main then
-                local gear=equipped(player,child)
-                scope=gear and "equipped" or depth>0 and "carried" or "main"
-                break
-            end
-            seen[container]=true
-            child=call(container,"getContainingItem")
-            if not child or call(child,"getInventory")~=container then return false,"bag-chain-broken" end
-            container=call(child,"getContainer")
-            if not member(container,child) then return false,"bag-chain-broken" end
-        end
+-- The vessel as it is now, wherever within reach it has got to, or nil and why.
+function Pour.current(player, world, entry)
+    local item,holder,place=Items.find(player,entry.id,{entry.container})
+    if not item or item:getFullType()~=entry.fullType then return nil,"The vessel moved or is gone" end
+    holder=holder or place=="ground" and entry.container or nil
+    if place=="carried" then
+        local main=player:getInventory()
+        local scope=holder==main and (Items.equipped(player,item) and "equipped" or "main") or "carried"
+        local live=entryFor(player,item,holder,scope)
+        if live then return live end
+        return nil,"The vessel cannot be used now"
     end
-    if scope~=entry.scope then return false,"scope-changed: "..tostring(entry.scope).."->"..tostring(scope) end
-    local live=entryFor(player,entry.item,entry.container,scope)
-    if not live then return false,"vessel-unavailable" end
-    if live.id~=entry.id or live.fullType~=entry.fullType then return false,"vessel-identity" end
-    if not allowFluidRefresh and live.fluid~=entry.fluid then return false,"fluid-component" end
-    if live.object~=entry.object or live.groundSquare~=entry.groundSquare then return false,"ground-object" end
-    if (entry.groundAnchor or live.groundAnchor)
-        and not require("LootBox/PourGround").sameAnchor(entry.groundAnchor,live.groundAnchor) then return false,"ground-anchor" end
-    return true,live
-end
-
-function Pour.stillHere(player, world, entry, lootPane, options)
-    local ok=Pour.accessible(player,world,entry,lootPane)
-    return ok == true
-end
-
-function Pour.rebind(player, world, entry, returnedItem, holder, lootPane, groundLoan)
-    local main=call(player,"getInventory")
-    -- A verified fixture loan may cross the native ground/item component
-    -- ownership boundary. The original ground wrapper is never used in main.
-    local worldLoan=groundLoan and groundLoan.worldFluid and entry and entry.groundSquare==groundLoan.square
-        and entry.object==groundLoan.world and entry.item==groundLoan.item and entry.container==groundLoan.floor
-    if not entry or not returnedItem or not holder or (entry.object~=entry.item and not worldLoan)
-        or (holder~=main and (entry.scope~="loot" or holder~=entry.container or holder~=lootPane))
-        or call(returnedItem,"getContainer")~=holder or not member(holder,returnedItem) then return nil end
-    local fresh=entryFor(player,returnedItem,holder,holder==main and "main" or "loot")
-    if not fresh or fresh.id~=entry.id or type(fresh.fullType)~="string"
-        or fresh.fullType~=entry.fullType then return nil end
-    if worldLoan and holder~=main then
-        if fresh.groundSquare~=groundLoan.square or fresh.object~=returnedItem:getWorldItem()
-            or fresh.fluid:getOwner()~=fresh.object then return nil end
-    elseif fresh.object~=returnedItem then return nil end
-    local ok=Pour.accessible(player,world,fresh,lootPane)
-    if ok then return fresh end
+    local ok,why=world:consumptionSource(item,holder)
+    if ok~=true then return nil,why or "The vessel is out of reach" end
+    local live=entryFor(player,item,holder,"loot")
+    if live then return live end
+    return nil,"The vessel cannot be used now"
 end
 
 function Pour.mix(entry)
@@ -441,28 +362,6 @@ function Pour.mix(entry)
     end)
     local released=pcall(function() sample:release() end)
     if ok and released then return ratios end
-end
-
-function Pour.sameMix(entry, original)
-    local current=type(original)=="table" and Pour.mix(entry)
-    if not current then return false end
-    for fluid,ratio in pairs(original) do
-        if not current[fluid] or math.abs(ratio-current[fluid])>.00001 then return false end
-    end
-    for fluid in pairs(current) do if not original[fluid] then return false end end
-    return true
-end
-
-function Pour.revalidate(player, world, entry, lootPane, options, sourceEntry, clickedReceiver)
-    local admitted,live=Pour.accessible(player,world,entry,lootPane)
-    if not admitted then return false end
-    if sourceEntry then
-        local sourceAllowed,source=Pour.accessible(player,world,sourceEntry,lootPane)
-        if not sourceAllowed or not Pour.legalScope(source,live,options or {},clickedReceiver) or not Pour.compatible(source,live) then
-            return false
-        end
-    elseif round(live.amount)<=0 then return false end
-    return true,live
 end
 
 return Pour

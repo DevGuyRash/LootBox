@@ -15,18 +15,19 @@ require "TimedActions/ISEquipWeaponAction"
 require "TimedActions/ISUnequipAction"
 
 local Carry = require "LootBox/Carry"
+local Clock = require "LootBox/Clock"
 local Facts = require "LootBox/Facts"
 local Log = require "LootBox/Log"
 
 local Native = {}
 Native.__index = Native
 
-local WALK_IDLE_TIMEOUT, WALK_MAX_TIMEOUT = 60000, 600000
+-- The game merges up to twenty items of one type, each at most 0.1, into one action.
+Native.BATCH = 20
+local WALK_IDLE_TIMEOUT, WALK_MAX_TIMEOUT, SETTLE = 60000, 600000, 2000
 local timeouts = { approach = WALK_IDLE_TIMEOUT, transfer = 120000, trash = 15000, vehicle = 180000, gear = 180000 }
 
-local function now()
-    return getTimestampMs()
-end
+local now = Clock.now
 
 local function queueFor(self)
     return ISTimedActionQueue.getTimedActionQueue(self.player)
@@ -75,10 +76,7 @@ local function location(value)
 end
 
 local function approachLocations(op)
-    if op.location == nil and op.locations == nil then return nil end
-    if op.container or op.square or (op.location ~= nil and op.locations ~= nil) then
-        return nil, "Choose one approach target"
-    end
+    if op.square then return { { x = op.square:getX(), y = op.square:getY(), z = op.square:getZ() } } end
     if op.location ~= nil then
         local point = location(op.location)
         if not point then return nil, "Approach coordinates must be finite native integers" end
@@ -210,21 +208,24 @@ local function worldItem(square, state)
 end
 
 local function transferred(self, state)
-    local item = self:transferResult(state.op, state.itemId, state.fullType)
-    if not item then return false end
-    local op = state.op
-    op.resultItem = item
-    return true
+    local op, complete = state.op, true
+    for index, entry in ipairs(state.entries) do
+        local item = self:transferResult(op, entry.itemId, entry.fullType)
+        if index == 1 then op.resultItem = item end
+        complete = complete and item ~= nil
+    end
+    return complete
 end
 
-local function freezeFloorDestinations(op, action)
-    local point = op.destinationPoint
-    local result = {}
+-- The game drops on and around the player's tile.
+local function freezeFloorDestinations(self, op, action)
+    local here, result = self.player:getCurrentSquare(), {}
     for dy = -1, 1 do
         for dx = -1, 1 do
-            local square = getCell():getGridSquare(point.x + dx, point.y + dy, point.z)
+            local x, y, z = here:getX() + dx, here:getY() + dy, here:getZ()
+            local square = getCell():getGridSquare(x, y, z)
             if square and action:canDropOnFloor(square) then
-                result[#result + 1] = {x = point.x + dx, y = point.y + dy, z = point.z}
+                result[#result + 1] = {x = x, y = y, z = z}
             end
         end
     end
@@ -266,12 +267,15 @@ local function stopOwned(self, state)
     if current and state.owned[current] and current.action then current:forceStop() end
 end
 
-local function submit(self, state, action, check, nextPhase)
-    if hasForeign(self, state) then return nil, "Another player action is queued" end
-    local queue = queueFor(self)
-    if #queue.queue > 0 then return nil, "The previous native action is still running" end
-    local nativeStop = action.stop
+-- The server refused this transfer, or it was never sent, so nothing is on its way.
+local function rejected(action)
+    return isClient() and action.transactionId ~= nil and isItemTransactionRejected(action.transactionId) == true
+end
+
+local function own(self, state, action)
+    local queue, nativeStop = queueFor(self), action.stop
     action.stop = function(stopped)
+        state.rejected = rejected(stopped)
         local pending = {}
         local current = queue.current
         for _, candidate in ipairs(queue.queue) do
@@ -288,22 +292,30 @@ local function submit(self, state, action, check, nextPhase)
         if not ok then error(err) end
     end
     state.owned[action] = true
+end
+
+local function submit(self, state, action, check, nextPhase)
+    if hasForeign(self, state) then return nil, "Another player action is queued" end
+    local queue = queueFor(self)
+    if #queue.queue > 0 then return nil, "The previous native action is still running" end
+    own(self, state, action)
     state.action = action
     state.check = check
     state.nextPhase = nextPhase
     state.stepStopped = false
     state.stepYielded = false
-    state.actionGoneAt = nil
-    state.pathFailed = false
+    state.actionGoneAt, state.rejected = nil, nil
+    state.walk, state.pathFailed = false, false
     ISTimedActionQueue.add(action)
-    if queue:indexOf(action) < 0 then return nil, "The game refused to start the native action" end
+    if queue:indexOf(action) < 0 then return nil, "The game would not start the action", "refused" end
     return true
 end
 
 local function submitPath(self, state, action, check, nextPhase)
     if not action then return nil, "No reachable approach is available" end
     action:setOnFail(function() state.pathFailed = true end)
-    local accepted, reason = submit(self, state, action, check, nextPhase)
+    local accepted, reason, code = submit(self, state, action, check, nextPhase)
+    state.walk = true
     if accepted and state.op.kind == "approach" then
         local point = position(self.player)
         state.walking, state.walkStamp = action, now()
@@ -312,12 +324,18 @@ local function submitPath(self, state, action, check, nextPhase)
         state.walkProgressDistance = state.walkObservation.distance
         state.walkHardDeadline = state.walkHardDeadline or now() + WALK_MAX_TIMEOUT
     end
-    return accepted, reason
+    return accepted, reason, code
+end
+
+-- Merged transfers leave the queue as they join the one that is running.
+local function working(self, state)
+    for _, action in ipairs(queueFor(self).queue) do if state.owned[action] then return true end end
+    return false
 end
 
 local function observeAction(self, state)
     if not state.action then return true end
-    if queueFor(self):indexOf(state.action) >= 0 then return nil end
+    if working(self, state) then return nil end
     if state.check() then
         state.walking = nil
         state.action = nil
@@ -325,81 +343,75 @@ local function observeAction(self, state)
         return true
     end
     state.actionGoneAt = state.actionGoneAt or now()
-    if state.stepStopped and state.op.kind == "transfer" and isClient()
-        and now() - state.actionGoneAt < 2000 then return nil end
     if state.pathFailed then return false, "No path to the destination", "unreachable" end
+    -- Only a server can still show the result of something that has ended here.
+    if isClient() and not state.walk and not state.rejected and (not state.stepStopped or state.op.kind == "transfer")
+        and now() - state.actionGoneAt < SETTLE then return nil end
     if state.stepStopped then
         if state.stepYielded then return false, "Waiting for your movement or queued action to finish", "yielded" end
-        return false, "The game stopped the native action before completing it"
+        return false, "The game stopped the action before it was done", "refused"
     end
-    if now() - state.actionGoneAt < 2000 then return nil end
-    return false, "The native action ended without the expected result"
+    if state.walk then return false, "The way there ended somewhere else", "unreachable" end
+    return false, "The action ended without doing anything", "refused"
+end
+
+-- The middle of a tile is often furniture, which the game will not walk to.
+local function walkNear(self, square)
+    return ISPathFindAction:pathAdjacentToSquares(self.player, { square }, true)
+        or ISPathFindAction:pathToLocationF(self.player, square:getX() + 0.5, square:getY() + 0.5, square:getZ())
 end
 
 local SEATED = "Get out of the vehicle to continue"
 
 local function approach(self, state)
     local op = state.op
-    if op.location ~= nil or op.locations ~= nil then
-        local points, reason = approachLocations(op)
-        if not points then return nil, reason end
-        local arrived = op.exact and onSquare or nearSquare
-        local function reached()
-            for _, point in ipairs(points) do
-                local square = getCell():getGridSquare(point.x, point.y, point.z)
-                if square and arrived(self.player, square) then return true end
-            end
-            return false
-        end
-        if reached() then return true end
-        if self.player:getVehicle() then return nil, SEATED, "seated" end
-        local action
-        if op.locations then
-            local targets = {}
-            for _, point in ipairs(points) do
-                targets[#targets + 1], targets[#targets + 2], targets[#targets + 3] = point.x + 0.5, point.y + 0.5, point.z
-            end
-            action = ISPathFindAction:pathToNearest(self.player, targets)
-        else
-            local point = points[1]
-            action = ISPathFindAction:pathToLocationF(self.player, point.x + 0.5, point.y + 0.5, point.z)
-        end
-        return submitPath(self, state, action, reached, "done")
+    if (op.container and 1 or 0) + (op.square and 1 or 0) + (op.location ~= nil and 1 or 0) + (op.locations ~= nil and 1 or 0) ~= 1 then
+        return nil, "Choose one approach target"
     end
     if op.container then
         if containerReachable(self.player, op.container) then return true end
         local anchor = containerAnchor(self.player, op.container)
         if not anchor then return nil, "The container is locked or has no live outer location" end
+        if self.player:getVehicle() then return nil, SEATED, "seated" end
         local part = anchor.container:getVehiclePart()
         if part then
-            if self.player:getVehicle() then return nil, SEATED, "seated" end
             if not part:getArea() then return nil, "The vehicle storage has no native access area" end
             state.pathArrived = false
             local action = ISPathFindAction:pathToVehicleArea(self.player, part:getVehicle(), part:getArea())
             action:setOnComplete(function() state.pathArrived = true end)
             return submitPath(self, state, action, function() return state.pathArrived end, "access")
         end
-        if self.player:getVehicle() then return nil, SEATED, "seated" end
-        local object = anchor.object
-        if anchor.floorBag then
-            local square = anchor.square
-            return submitPath(self, state,
-                ISPathFindAction:pathToLocationF(self.player, square:getX() + 0.5, square:getY() + 0.5, square:getZ()),
-                function() return containerReachable(self.player, op.container) end, "done")
-        elseif object and anchor.square then
-            return submitPath(self, state,
-                ISPathFindAction:pathAdjacentToMultiTileObject(self.player, object, true),
-                function() return containerReachable(self.player, op.container) end, "done")
-        end
-        return nil, "The source container has no reachable location"
+        if not anchor.square then return nil, "The source container has no reachable location" end
+        return submitPath(self, state, walkNear(self, anchor.square),
+            function() return containerReachable(self.player, op.container) end, "done")
     end
-    if not op.square then return nil, "No approach location was supplied" end
-    local arrived = op.exact and onSquare or nearSquare
-    if arrived(self.player, op.square) then return true end
+    local points, reason = approachLocations(op)
+    if not points then return nil, reason end
+    local function exact(square) return op.exact and square:isFree(false) end
+    local function reached()
+        for _, point in ipairs(points) do
+            local square = getCell():getGridSquare(point.x, point.y, point.z)
+            local arrived = square and (exact(square) and onSquare or nearSquare)
+            if arrived and arrived(self.player, square) then return true end
+        end
+        return false
+    end
+    if reached() then return true end
     if self.player:getVehicle() then return nil, SEATED, "seated" end
-    return submitPath(self, state,
-        ISPathFindAction:pathToLocationF(self.player, op.square:getX() + 0.5, op.square:getY() + 0.5, op.square:getZ()),
-        function() return arrived(self.player, op.square) end, "done")
+    local action
+    if op.locations then
+        local targets = {}
+        for _, point in ipairs(points) do
+            targets[#targets + 1], targets[#targets + 2], targets[#targets + 3] = point.x + 0.5, point.y + 0.5, point.z
+        end
+        action = ISPathFindAction:pathToNearest(self.player, targets)
+    else
+        local point = points[1]
+        local square = getCell():getGridSquare(point.x, point.y, point.z)
+        if square and not exact(square) then action = walkNear(self, square)
+        else action = ISPathFindAction:pathToLocationF(self.player, point.x + 0.5, point.y + 0.5, point.z) end
+    end
+    return submitPath(self, state, action, reached, "done")
 end
 
 -- The operation remembers what it unlocked so the owner can lock it again afterwards.
@@ -433,7 +445,7 @@ local function approachAccess(self, state, container, arrivedPhase)
     if doorPart and doorPart:getInventoryItem() and doorPart:getDoor() then
         local door = doorPart:getDoor()
         if door:isLocked() then
-            if not vehicle:canUnlockDoor(doorPart, self.player) then return nil, "The storage door is locked; prepare the remembered vehicle first" end
+            if not vehicle:canUnlockDoor(doorPart, self.player) then return nil, "The vehicle is locked", "locked" end
             return unlock(self, state, vehicle, doorPart, "access")
         end
         if not door:isOpen() then
@@ -701,13 +713,7 @@ local function gearStep(self, state)
                 action:setOnComplete(function() state.gearPathArrived = true end)
                 return submitPath(self, state, action, function() return state.gearPathArrived end, "access")
             end
-            local point = anchor.square
-            local action
-            if anchor.object and not anchor.floorBag then
-                action = ISPathFindAction:pathAdjacentToMultiTileObject(player, anchor.object, true)
-            else action = ISPathFindAction:pathToLocationF(player, point:getX() + 0.5, point:getY() + 0.5, point:getZ()) end
-            return submitPath(self, state,
-                action,
+            return submitPath(self, state, walkNear(self, anchor.square),
                 function() return containerReachable(player, source) end, "prepare")
         end
         local anchor = containerAnchor(player, source)
@@ -766,7 +772,7 @@ function Native:transferResult(op, itemId, fullType)
         local points = op.floorDestinations or {origin}
         for _, candidate in ipairs(points) do
             local point = location(candidate)
-            if point and point.z == origin.z and math.abs(point.x - origin.x) <= 1 and math.abs(point.y - origin.y) <= 1 then
+            if point and point.z == origin.z and math.abs(point.x - origin.x) <= 2 and math.abs(point.y - origin.y) <= 2 then
                 local item = worldItem(getCell():getGridSquare(point.x, point.y, point.z), identity)
                 if item then return item end
             end
@@ -810,12 +816,36 @@ function Native:reachable(container)
     return false
 end
 
--- Deadlines are wall clock, but a paused game runs no ticks.
-function Native:extend(milliseconds)
-    local state = self.active
-    if not state then return end
-    for _, field in ipairs({"deadline", "walkHardDeadline", "walkStamp", "actionGoneAt"}) do
-        if state[field] then state[field] = state[field] + milliseconds end
+-- The same for a tile and what lies on it.
+function Native:beside(square) return nearSquare(self.player, square) == true end
+
+-- What the player has to finish before the game accepts any action at all.
+function Native:obstacle()
+    if playerFlag(self.player, "isDraggingCorpse") then return "Put down the corpse to continue", "corpse" end
+    local trade = isClient() and ISTradingUI and ISTradingUI.GetUIForPlayer(self.player)
+    if trade and trade:isVisible() then return "Finish trading to continue", "trading" end
+end
+
+function Native.light(item)
+    local weight = item.getWeight and item:getWeight()
+    return weight ~= nil and weight < 0.1005
+end
+
+local function transferRefusal(self, op, item)
+    if ISInventoryTransferUtil.isCharacterGrabbingCorpseItem(self.player, item, op.source, op.destination)
+        or item:isHumanCorpse() then
+        return "Human corpse hauling is not supported by this item job"
+    end
+    if op.source == op.destination or item:getContainer() ~= op.source or not op.source:contains(item) then
+        return "The item is no longer in its selected source"
+    end
+    if op.source:getType() == "floor" then
+        local world = item:getWorldItem()
+        if not world or not nearSquare(self.player, world:getSquare()) then return "The floor item is out of reach" end
+    end
+    if op.destination:getType() ~= "floor" and not op.destination:hasRoomFor(self.player, item) then return "The destination is full", "capacity" end
+    if not op.source:isRemoveItemAllowed(item) or not op.destination:isItemAllowed(item) or op.destination:isInside(item) then
+        return "The native container rules refuse this item"
     end
 end
 
@@ -826,6 +856,8 @@ function Native:begin(op)
     if self:isPlayerBusy() then
         return nil, "Waiting for your current action to finish", "busy"
     end
+    local obstacle, kind = self:obstacle()
+    if obstacle then return nil, obstacle, kind end
     local state = { op = op, owned = {}, deadline = now() + timeouts[op.kind], phase = "prepare" }
     self.active = state
     local ok, result, reason, code = pcall(function()
@@ -837,7 +869,10 @@ function Native:begin(op)
         elseif op.kind == "transfer" then
             if not op.item or not op.source or not op.destination then return nil, "A transfer needs an item, source, and destination" end
             op.resultItem = nil
-            state.itemId, state.fullType = op.item:getID(), tostring(op.item:getFullType())
+            state.entries = {}
+            for index, item in ipairs(op.items or {op.item}) do
+                state.entries[index] = {itemId = item:getID(), fullType = tostring(item:getFullType())}
+            end
             local world = op.item:getWorldItem()
             if op.source:getType() == "floor" and world and not op.sourcePoint then
                 local square = world:getSquare()
@@ -855,32 +890,33 @@ function Native:begin(op)
                 if not state.destinationSquare then return nil, "The destination floor is no longer loaded" end
             end
             if transferred(self, state) then state.phase = "done"; return true end
-            if state.destinationSquare and not onSquare(self.player, state.destinationSquare) then
+            if state.destinationSquare and not nearSquare(self.player, state.destinationSquare) then
                 return nil, "Return to the selected floor location before placing this item"
             end
-            local current = op.source:getItemWithID(state.itemId)
-            if not sameItem(current, state) then return nil, "The item is no longer in its selected source" end
-            op.item = current
-            if ISInventoryTransferUtil.isCharacterGrabbingCorpseItem(self.player, op.item, op.source, op.destination)
-                or op.item:isHumanCorpse() then
-                return nil, "Human corpse hauling is not supported by this item job"
-            end
-            if op.source == op.destination or op.item:getContainer() ~= op.source or not op.source:contains(op.item) then
-                return nil, "The item is no longer in its selected source"
-            end
-            if op.source:getType() == "floor" then
-                local world = op.item:getWorldItem()
-                if not world or not nearSquare(self.player, world:getSquare()) then return nil, "The floor item is out of reach" end
-            elseif not containerReachable(self.player, op.source) then return nil, "The source is out of reach" end
-            if not containerReachable(self.player, op.destination) and op.destination:getType() ~= "floor" then return nil, "The destination is out of reach" end
-            if op.destination:getType() ~= "floor" and not op.destination:hasRoomFor(self.player, op.item) then return nil, "The destination is full", "capacity" end
+            if op.source:getType() ~= "floor" and not containerReachable(self.player, op.source) then return nil, "The source is out of reach" end
+            if op.destination:getType() ~= "floor" and not containerReachable(self.player, op.destination) then return nil, "The destination is out of reach" end
             if op.destination:isOccupiedVehicleSeat() then return nil, "The destination vehicle seat is occupied" end
-            if not op.source:isRemoveItemAllowed(op.item) or not op.destination:isItemAllowed(op.item) or op.destination:isInside(op.item) then
-                return nil, "The native container rules refuse this item"
+            local items, entries = {}, {}
+            for _, entry in ipairs(state.entries) do
+                local item = op.source:getItemWithID(entry.itemId)
+                local refusal, refusalCode = "The item is no longer in its selected source", nil
+                if sameItem(item, entry) then refusal, refusalCode = transferRefusal(self, op, item) end
+                if not refusal then
+                    items[#items + 1], entries[#entries + 1] = item, entry
+                elseif #items == 0 then return nil, refusal, refusalCode end
             end
-            local action = ISInventoryTransferUtil.newInventoryTransferAction(self.player, op.item, op.source, op.destination)
-            if op.destinationPoint then freezeFloorDestinations(op, action) end
-            return submit(self, state, action, function() return transferred(self, state) end, "done")
+            op.item, state.entries = items[1], entries
+            local actions = {}
+            for index, item in ipairs(items) do
+                actions[index] = ISInventoryTransferUtil.newInventoryTransferAction(self.player, item, op.source, op.destination)
+            end
+            if op.destinationPoint then freezeFloorDestinations(self, op, actions[1]) end
+            local accepted, refusal, refusalCode = submit(self, state, actions[1], function() return transferred(self, state) end, "done")
+            for index = 2, accepted and #actions or 0 do
+                own(self, state, actions[index])
+                ISTimedActionQueue.add(actions[index])
+            end
+            return accepted, refusal, refusalCode
         elseif op.kind == "gear" then
             if not op.item then return nil, "Choose an item to equip or remove" end
             state.itemId, state.fullType = op.item:getID(), tostring(op.item:getFullType())
@@ -1015,8 +1051,8 @@ local function poll(self, state)
     end
     if state.phase == "done" then return finish(self, state, not state.failure, state.failure) end
     if state.op.kind == "approach" and state.phase == "access" then
-        local accepted, err = approachAccess(self, state)
-        if not accepted then return finish(self, state, false, err) end
+        local accepted, err, code = approachAccess(self, state)
+        if not accepted then return finish(self, state, false, err, code) end
         if state.phase == "done" then return finish(self, state, true) end
         return nil
     end

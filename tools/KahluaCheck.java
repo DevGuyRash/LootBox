@@ -34,8 +34,9 @@ public final class KahluaCheck {
                         loaded.rawset(name, value == null ? Boolean.TRUE : value);
                         return frame.push(loaded.rawget(name));
                     }
-                    Path file = modules.resolve(name + ".lua").normalize();
-                    if (!file.startsWith(modules)) throw new IllegalArgumentException("Module outside runtime");
+                    Path base = name.startsWith("support/") ? root.resolve("tests") : modules;
+                    Path file = base.resolve(name + ".lua").normalize();
+                    if (!file.startsWith(base)) throw new IllegalArgumentException("Module outside runtime");
                     try {
                         LuaClosure closure = LuaCompiler.loadstring(Files.readString(file), name, environment);
                         Object value = thread.call(closure, new Object[0]);

@@ -1,7 +1,6 @@
 local Focus = require "LootBox/ContainerFocus"
 local Neat = require "LootBox/NeatContainerHeaders"
 local Clicks = {}
-local attached = setmetatable({}, { __mode = "k" })
 
 local function pack(...) return { n = select("#", ...), ... } end
 
@@ -89,8 +88,8 @@ function Clicks.attach(pane)
     local canSelect = pane.inventoryPage.selectContainer ~= nil
     local v = NeatInventory and NeatInventory.enabled and NeatInventory.Views
     if not canSelect and not (v and v.isGrid and v.multi and v.combined and v.grid and v.headAt) then return end
-    local state = attached[pane] or {}
-    attached[pane] = state
+    local state = pane.lootBoxClicks or {}
+    pane.lootBoxClicks = state
     attach(pane, state, "onRightMouseUp", right)
     if canSelect then attach(pane, state, "onMouseUp", left) end
 end

@@ -1,6 +1,7 @@
 -- Owns the stock actions one step of ours queued, from the click to the end.
 -- Everything else in the player's queue is theirs and is never disturbed.
 require "TimedActions/ISTimedActionQueue"
+local Clock = require "LootBox/Clock"
 local Log = require "LootBox/Log"
 
 local Act = {}
@@ -61,7 +62,7 @@ end
 local function allowed(self, phase)
     if self.problem then return false end
     if not self.allow then return true end
-    local ok, why, check = Log.guard("Act.allow", self.allow, phase)
+    local ok, why, check = Log.guard("Act.allow", self.allow, phase, self.action)
     if ok then return true end
     self.problem, self.check = why or "The game or your selection changed", check
     return false
@@ -109,41 +110,54 @@ end
 
 -- Queues stock actions and follows them.
 --   begin    queues the actions with the game's own functions
---   main     main(action): which of them does the work; default the last one
---   allow    allow(phase) with phase "start" or "run"; false, reason stops it
---   keep     keep(action): a follow-up that must happen even if the work stops
+--   main     main(action): which of them does the work; default the first
+--   allow    allow(phase, action), phase "start" or "run"; false, reason stops it
+--   keepAfter  what is queued behind it must happen even if the work stops
 --   onStart, onPerform, limitMs
 function Act.run(player, opts)
-    local queue = queueOf(player)
     if not Act.idle(player) then return nil, "Finish the current action first", "busy" end
     local blocked = Act.blocked(player)
     if blocked then return nil, blocked, "blocked" end
     local self = setmetatable({ player = player, op = opts.op, interaction = opts.interaction, allow = opts.allow, owned = {}, keep = {},
-        onStart = opts.onStart, onPerform = opts.onPerform, startedAt = getTimestampMs(),
+        onStart = opts.onStart, onPerform = opts.onPerform, startedAt = Clock.now(),
         limit = opts.limitMs or Act.LIMIT_MS }, Act)
+    -- The game may start the first action inside the call that queues it, so
+    -- each is taken in hand on its way there.
+    local add = ISTimedActionQueue.add
+    ISTimedActionQueue.add = function(action)
+        if action.character == player then
+            local after = self.action ~= nil
+            self.owned[action] = true
+            if after and opts.keepAfter then self.keep[action] = true end
+            hook(self, action)
+            if not after and (not opts.main or opts.main(action)) then
+                self.action = action
+                hookMain(self, action)
+            end
+        end
+        return add(action)
+    end
     local ok, why = pcall(opts.begin)
+    ISTimedActionQueue.add = add
     if not ok then
         Log.fault(self.interaction, "Act.begin:" .. tostring(opts.op), why)
         why = "The game could not start this action"
     end
-    local main
-    for _, action in ipairs(queue.queue) do
-        self.owned[action] = true
-        if not opts.main or opts.main(action) then main = action end
-    end
-    for action in pairs(self.owned) do
-        if action ~= main and opts.keep and opts.keep(action, main) then self.keep[action] = true end
-        hook(self, action)
-    end
-    if main then hookMain(self, main) end
-    self.action = main
+    local main = self.action
+    if main and not self.performed and not self.stopped and not queued(queueOf(player), main) then main = nil end
     if not ok or not main then
-        why = not ok and why or "The game did not start this action"
+        why = not ok and why or self.problem or "The game did not start this action"
         self:cancel(why)
         return nil, why, "not-started"
     end
     Log.trace(self.interaction, "OP", "op", self.op, "action", main.Type, "queue", Log.queue(player))
     return self
+end
+
+-- Something the player queued behind ours.
+function Act:foreign()
+    for _, entry in ipairs(queueOf(self.player).queue) do if not self.owned[entry] then return true end end
+    return false
 end
 
 function Act:cancel(reason)
@@ -170,7 +184,7 @@ function Act:poll()
     for action in pairs(self.owned) do if queued(queue, action) then busy = true; break end end
     if busy then
         if not self.performed then
-            if getTimestampMs() - self.startedAt >= self.limit then self:cancel("The action took too long")
+            if Clock.now() - self.startedAt >= self.limit then self:cancel("The action took too long")
             elseif self.problem or not allowed(self, "run") then self:cancel(self.problem) end
         end
         return nil
@@ -179,7 +193,7 @@ function Act:poll()
     local why = not ok and (self.problem or "The action ended early") or nil
     local emit = ok and Log.trace or Log.warn
     emit(self.interaction, "OP-END", "op", self.op, "ok", ok, "reason", why, "check", not ok and self.check or nil,
-        "started", self.started == true, "stopped", self.stopped == true, "elapsedMs", getTimestampMs() - self.startedAt,
+        "started", self.started == true, "stopped", self.stopped == true, "elapsedMs", Clock.now() - self.startedAt,
         "player", not ok and Log.player(self.player) or nil)
     return ok, why, self.check
 end

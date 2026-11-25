@@ -1,4 +1,5 @@
 -- Til Full rows on the game's own Eat, Drink and Open menus. The menus, items
+for _, name in ipairs({ 'TimedActions/ISTimedActionQueue', 'TimedActions/ISInventoryTransferUtil' }) do package.loaded[name] = package.loaded[name] or true end
 -- and recipes are doubles; ConsumeMenu and, where named, TillFull are real.
 package.path = "Contents/mods/LootBox/42/media/lua/client/?.lua;" .. package.path
 local Menu = {}
@@ -18,7 +19,6 @@ function getSpecificPlayer() return current.player end
 function getText(key) return key end
 ISInventoryPaneContextMenu = { addToolTip = function() return {} end }
 CharacterStat = { HUNGER = { getMinimumValue = function() return 0 end }, THIRST = { getMinimumValue = function() return 0 end } }
-package.loaded["LootBox/TillFullNative"] = { new = function() return {} end }
 package.loaded["LootBox/App"] = { get = function() return current.app end }
 local TillFull = require "LootBox/TillFull"
 local ConsumeMenu = require "LootBox/ConsumeMenu"
@@ -186,13 +186,6 @@ test("Til Full follows a native Open and Eat or Drink recipe without relying on 
         local added=child.options[2];assert(added.name==(kind=="food" and "Open and Eat Til Full" or "Open and Drink Til Full") and added.itemForTexture==f.apple)
         assert(added.onSelect(added.target) and f.consumeKind==kind)
     end
-    isClient=function() return true end
-    local parent,child=Menu:new(),Menu:new()
-    local root=parent:addOption("Open and eat",nil,nil);root.subOption=7
-    parent.getSubMenu=function() return child end
-    child:addOption("All",{f.apple},ISInventoryPaneContextMenu.onEatItems).param3=recipe
-    add(parent, {f.apple})
-    assert(#child.options==1,"an opening this session cannot follow shows nothing")
     ISInventoryPane, getScriptManager, isClient = oldPane, oldManager, oldClient
 end)
 
@@ -324,7 +317,6 @@ test("stock plain recipe rows retain the exact source for mapped MP opening and 
             add(parent, rows);add(parent, rows)
             assert(recipes.options[1]==standard and standard.onSelect==ISInventoryPaneContextMenu.OnNewCraft)
             local supported=mode=="plain" or mode=="multiplayer" or mode=="unmapped-mp" or mode=="amount-and-plain"
-            if mode=="unmapped-mp" and name~="Pop" then supported=false end
             assert(#recipes.options==(supported and not both and 2 or 1),name..":"..mode)
             assert(#amounts.options==(both and 2 or 0))
             if supported then
@@ -429,6 +421,11 @@ local function meal(f)
     apple.getHungerChange = function(self) return -self.relief end
     apple.getThirstChange = function(self) return -self.quench end
     apple.getScriptItem = function() return { isCantEat = function() return false end } end
+    apple.getRequireInHandOrInventory = function() end
+    local held = { getItems = function() return { size = function() return 0 end } end, hasRoomFor = function() return true end }
+    f.player.getInventory = function() return held end
+    f.player.getCurrentSquare = function() end
+    apple.source.getItemWithID = function(_, id) return id == 7 and apple or nil end
     TillFull.offers = realOffers
     return apple
 end
