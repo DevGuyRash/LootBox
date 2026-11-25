@@ -87,18 +87,26 @@ test("the next session uses the next of five files", function()
     assert(files["LootBox/log/index.txt"] == "1")
 end)
 
-test("a full log stops growing and an unwritable one never breaks an action", function()
+test("a full file continues in the next one, and a new session starts fresh", function()
+    files["LootBox/log/index.txt"] = "2"
     package.loaded["LootBox/Log"] = nil
     local small = require "LootBox/Log"
     small.maxBytes = 300
-    for index = 1, 50 do small.trace(1, "OP", "n", index) end
+    for index = 1, 20 do small.trace(1, "OP", "n", index) end
     small.flush()
-    local size = #files["LootBox/log/" .. (files["LootBox/log/index.txt"] == "2" and "session-2.txt" or "session-1.txt")]
-    assert(size < 700)
+    assert(files["LootBox/log/session-3.txt"]:find("continues in the next file", 1, true) and files["LootBox/log/session-4.txt"])
+    assert(#files["LootBox/log/session-3.txt"] < 700)
+    local before = files["LootBox/log/index.txt"]
+    small.reset(); small.info(nil, "session"); small.flush()
+    assert(files["LootBox/log/index.txt"] ~= before)
+end)
+
+test("an unwritable log never breaks an action and never claims to have saved", function()
     getFileWriter = function() error("read only") end
     package.loaded["LootBox/Log"] = nil
     local blocked = require "LootBox/Log"
-    blocked.warn(1, "REFUSED"); blocked.flush(); blocked.info(1, "END")
+    blocked.warn(1, "REFUSED"); blocked.info(1, "END")
+    assert(blocked.flush() == false)
 end)
 
 print = nativePrint

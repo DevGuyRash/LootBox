@@ -3,7 +3,7 @@ local Setups = {}
 Setups.defaults = { pourLootToLoot = false, pourMainOnly = false, pourEquippedFirst = false, pourMostRoomFirst = false,
     autoDrinkEquipped = false, autoConsumeCarried = false, autoConsumeNested = false, autoConsumeRiskyOpen = false,
     tillFullEnabled = true, tillFullBothNeeds = false, contextMenus = true, inventoryShortcuts = true, worldShortcuts = true,
-    vehicleShortcuts = true, confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
+    vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true, confirmQuickMoves = false, confirmQuickCleanup = false, confirmBinReviews = false,
     smartTakeAllContainers = true, matchingTransferButtons = true, jobBar = true, rememberLastSetup = true, detailedLog = true,
     condenseButton = true, condenseRebalance = false, condenseUseUnequipped = false, condenseNested = false }
 

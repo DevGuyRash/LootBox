@@ -245,6 +245,7 @@ end
 -- Containers ---------------------------------------------------------------
 
 local function presetRows(host, s, fits, context)
+    if not s.preferences.savedShortcuts then return end
     local saved = s.app:getSetups()
     local child = host:sub("preset", "Presets")
     for _, preset in ipairs(saved.presets) do
@@ -497,7 +498,7 @@ local function itemRows(host, s, items, item)
         allRows(s, { filter = { ids = {}, types = order, all = false }, clicked = clicked, mine = mine, everywhere = everywhere },
             label .. " (" .. total .. ")", carried, total, picked, source, target, descriptor), item)
 
-    if #order == 1 then
+    if #order == 1 and s.preferences.categoryShortcuts then
         local groups = { { id = Catalog.categoryId(item) } }
         for _, definition in ipairs(s.world.graph:list()) do
             if #groups < 4 and s.world.graph:matches(definition.id, descriptor) then groups[#groups + 1] = { id = definition.id } end
@@ -666,7 +667,6 @@ Menus.inventoryMenu = guarded("menu.item", function(playerIndex, parent, items)
     end
     local host = root(parent)
     Log.guard("PourMenu", require("LootBox/PourMenu").add, fluids(s, parent, host, { items = items }))
-    jobRows(host, s)
     itemRows(host, s, chosen, item)
     if #chosen == 1 and native(item, "InventoryContainer") then
         local contents = item:getInventory()
@@ -682,7 +682,6 @@ local function containerMenu(playerIndex, parent, container, square)
     if not s then return false end
     s.square = square or s.player:getCurrentSquare()
     local host = root(parent)
-    jobRows(host, s)
     containerRows(host, s, container, "menu.container")
     return host.context ~= nil
 end

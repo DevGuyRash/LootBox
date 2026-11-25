@@ -81,7 +81,7 @@ test("quick reviews default off while interface features stay on and copies rema
     local preferences, err = App.getPreferences()
     assert(not err)
     for _, name in ipairs({ "tillFullEnabled", "contextMenus", "inventoryShortcuts", "worldShortcuts", "vehicleShortcuts",
-        "matchingTransferButtons", "rememberLastSetup", "jobBar", "detailedLog" }) do
+        "categoryShortcuts", "savedShortcuts", "matchingTransferButtons", "rememberLastSetup", "jobBar", "detailedLog" }) do
         assert(preferences[name] == true)
     end
     for _, name in ipairs({"tillFullBothNeeds", "confirmQuickMoves", "confirmQuickCleanup", "confirmBinReviews"}) do assert(preferences[name] == false) end

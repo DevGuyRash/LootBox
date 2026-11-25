@@ -257,16 +257,17 @@ end
 
 function Log.flush()
     lastFlush = stamp()
-    if #buffer == 0 then return end
+    if #buffer == 0 then return slot ~= nil and not stopped end
     local lines = buffer
     buffer = {}
-    if not getFileWriter or not getFileReader or stopped then return end
+    if not getFileWriter or not getFileReader or stopped then return false end
     local ok, err = pcall(function()
         local writer = getFileWriter(DIRECTORY .. "session-" .. choose() .. ".txt", true, true)
         writer:write(table.concat(lines, "\n") .. "\n")
         writer:close()
     end)
     if not ok then stopped = true; print("[LootBox] log file unavailable: " .. tostring(err)) end
+    return ok
 end
 
 function Log.path() return slot and ("Zomboid/Lua/" .. DIRECTORY .. "session-" .. slot .. ".txt") or nil end
@@ -292,9 +293,9 @@ local function write(level, id, event, ...)
     if stopped then return end
     bytes = bytes + #line
     if bytes > Log.maxBytes then
-        buffer[#buffer + 1] = "log limit reached for this session"
-        Log.flush(); stopped = true
-        return
+        buffer[#buffer + 1] = "continues in the next file"
+        Log.flush()
+        slot, bytes = nil, #line
     end
     buffer[#buffer + 1] = line
     if level >= LEVEL.warn or #buffer >= MAX_BUFFER then Log.flush() end
@@ -346,7 +347,7 @@ end
 
 function Log.reset()
     Log.flush()
-    seenErrors = {}
+    slot, bytes, stopped, seenErrors = nil, 0, false, {}
 end
 
 if Events then

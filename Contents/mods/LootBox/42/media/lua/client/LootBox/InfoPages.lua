@@ -12,7 +12,9 @@ local groups = {
         { "contextMenus", "Show LootBox in right-click menus" },
         { "inventoryShortcuts", "On items and containers" },
         { "worldShortcuts", "In the world" },
-        { "vehicleShortcuts", "On vehicles" } } },
+        { "vehicleShortcuts", "On vehicles" },
+        { "categoryShortcuts", "Rows for whole categories" },
+        { "savedShortcuts", "Presets" } } },
     { "Inventory buttons", {
         { "matchingTransferButtons", "Smart Take and Match buttons", "Shown only while there is something for them to do." },
         { "smartTakeAllContainers", "Smart Take uses every open container", "Off takes only from the selected one." },

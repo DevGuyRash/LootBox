@@ -213,19 +213,19 @@ function Page.start(page)
     local ok, err = Page.ready(page)
     if not ok then page.message:set(err, "bad"); return end
     local id = Log.intent("window.plan", Describe.title(page.request, App.category), app.player, "request", Log.request(page.request))
-    page.request.interaction = id
-    local plan
-    plan, err = app:preview(page.request)
-    if plan and #plan.moves == 0 and (plan.pending or 0) == 0 then
+    local UI = require "LootBox/UI"
+    local what = copy(page.request)
+    what.interaction = id
+    local outcome
+    ok, err, outcome = UI.act(page.win.playerIndex, what, { interaction = id, quiet = true })
+    if not ok then page.message:set(tostring(err), "bad"); return end
+    if outcome == "nothing" then
         Page.refresh(page)
-        page.message:set("There is nothing to move right now.", "warn")
+        page.message:set(err or "There is nothing to move right now.", "warn")
         return
     end
-    if plan then ok, err = app:start(plan, { interaction = id }) else ok = nil end
-    if not ok then page.message:set(tostring(err), "bad"); return end
-    app:rememberSetup(page.request)
     page.win:close()
-    require("LootBox/UI").showJob(page.win.playerIndex)
+    if outcome == "started" then UI.showJob(page.win.playerIndex) end
 end
 
 -- Menus ------------------------------------------------------------------
@@ -387,8 +387,9 @@ function Page.toMenu(page)
     local function to(value)
         return function() value.labels = value.labels or {}; request.destination = value; Page.changed(page) end
     end
+    local function carriedOnly() request.scope, request.includeBags, request.includeInventory = "inventory", true, false end
     if request.scope ~= "inventory" then
-        checked(menu, K.option(menu, "My bags", to({ kind = "inventory" })), destination.kind == "inventory")
+        checked(menu, K.option(menu, "My bags", function() request.includeInventory = false; to({ kind = "inventory" })() end), destination.kind == "inventory")
     end
     local carried = carriedContainers(page.win.playerIndex)
     if #carried > 0 then
@@ -411,9 +412,9 @@ function Page.toMenu(page)
         checked(menu, K.option(menu, "Where it belongs", to({ kind = "labels" }), nil, "Storage whose labels match each item."), destination.kind == "labels")
     end
     local match = K.submenu(menu, "Containers with the same items")
-    checked(match, K.option(match, "All nearby", function() request.scope = "inventory"; to({ kind = "matching", mode = "nearby" })() end),
+    checked(match, K.option(match, "All nearby", function() carriedOnly(); to({ kind = "matching", mode = "nearby" })() end),
         destination.kind == "matching" and destination.mode == "nearby")
-    checked(match, K.option(match, "Only the open one", function() request.scope = "inventory"; to({ kind = "matching", mode = "displayed" })() end),
+    checked(match, K.option(match, "Only the open one", function() carriedOnly(); to({ kind = "matching", mode = "displayed" })() end),
         destination.kind == "matching" and destination.mode == "displayed")
     local vehicles = app:knownVehicles()
     if app.state.vehicle or #vehicles > 0 then

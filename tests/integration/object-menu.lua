@@ -164,12 +164,16 @@ test("moved furniture, the ground and bags add nothing", function()
     assert(ObjectMenu.append(0, menu, container) == 0 and #menu.options == before)
 end)
 
-test("a vehicle part shows the vehicle's own menu, only from outside", function()
+test("a vehicle part shows only that part's options, only from outside", function()
     local menu = setup()
     local car = native("BaseVehicle", {})
-    getmetatable(container).__index.getVehiclePart = function() return {getVehicle = function() return car end} end
-    ISVehicleMenu = {FillMenuOutsideVehicle = function(_, m, vehicle) assert(vehicle == car); m:addOption("Siphon gas", nil, function() end) end}
-    assert(ObjectMenu.append(0, menu, container) == 1)
+    local trunk, tank = {getVehicle = function() return car end}, {}
+    getmetatable(container).__index.getVehiclePart = function() return trunk end
+    ISVehicleMenu = {FillMenuOutsideVehicle = function(_, m, vehicle)
+        assert(vehicle == car)
+        m:addOption("Siphon gas", player, function() end, tank); m:addOption("Wash", player, function() end, car); m:addOption("Unlock trunk", player, function() end, trunk)
+    end}
+    assert(ObjectMenu.append(0, menu, container) == 1 and menu.options[#menu.options].name == "Unlock trunk")
     getmetatable(player).__index.getVehicle = function() return car end
     assert(ObjectMenu.append(0, menu, container) == 0)
     ISVehicleMenu = nil

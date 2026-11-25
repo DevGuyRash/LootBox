@@ -79,7 +79,7 @@ local function setup()
     local square = {getRoom = function() return f.room end, getBuilding = function() return f.room end, getX = function() return 1 end, getY = function() return 2 end, getZ = function() return 0 end}
     local player = {getInventory = function() return main end, getCurrentSquare = function() return square end, isDead = function() return false end, getVehicle = function() end}
     f = {main = main, square = square, player = player, carried = {}, carriedCategory = {}, matching = 0, jobs = {state = "idle"}, presets = {},
-        checklist = {ids = {}, types = {}}, labels = {}, preferences = {contextMenus = true, inventoryShortcuts = true, worldShortcuts = true, vehicleShortcuts = true, tillFullEnabled = true}}
+        checklist = {ids = {}, types = {}}, labels = {}, preferences = {contextMenus = true, inventoryShortcuts = true, worldShortcuts = true, vehicleShortcuts = true, categoryShortcuts = true, savedShortcuts = true, tillFullEnabled = true}}
     local world = {graph = {list = function() return {} end, matches = function() return false end}}
     function world:owns(c) return c.facts.owned end
     function world:containerFacts(c) return c.facts end
@@ -316,7 +316,7 @@ test("a clicked vehicle replaces place actions with its own", function()
     IsoObjectPicker = nil
 end)
 
-test("a job in progress is one row at the top; an idle LootBox has none", function()
+test("a job in progress is one row in the world menu and never on containers or items", function()
     local crate = container("crate", {takeable = 1})
     open(crate)
     f.jobs = {state = "running", hasJob = true, canPause = true, label = "Clean kitchen"}
@@ -324,6 +324,9 @@ test("a job in progress is one row at the top; an idle LootBox has none", functi
     function f.app:cancel() f.cancelled = true; return true end
     local menu = newMenu()
     Menus.containerMenu(0, menu, crate)
+    assert(not has(tree(menu), "Job:"))
+    menu = newMenu()
+    Menus.worldMenu(0, menu, {})
     local t = tree(menu)
     assert(menu.options[1].child.options[1].name == "Job: Clean kitchen")
     has(t, "Job: Clean kitchen > Pause").onSelect()
@@ -399,6 +402,23 @@ test("the empty space of a container gives the same options as its icon", functi
     local menu = newMenu()
     Menus.paneMenu(0, menu, true)
     assert(menu.options[1].name == "Disassemble" and menu.options[2].name == "LootBox" and f.objectFor == crate)
+end)
+
+test("category rows and presets can be switched off on their own", function()
+    f.carried["Base.Nails"], f.carriedCategory["native:Material"] = 30, 50
+    f.presets = {{id = "setup:1", name = "Crate to car", setup = {scope = "container", destination = {kind = "vehicle"}}}}
+    local crate = container("crate", {takeable = 1})
+    open(crate)
+    local menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    assert(has(tree(menu), "All Material (50)"))
+    f.preferences.categoryShortcuts, f.preferences.savedShortcuts = false, false
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", f.main)})
+    assert(not has(tree(menu), "All Material") and has(tree(menu), "All Nails"))
+    menu = newMenu()
+    Menus.containerMenu(0, menu, crate)
+    assert(not has(tree(menu), "Presets"))
 end)
 
 test("switching menus off removes every entry", function()

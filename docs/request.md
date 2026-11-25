@@ -184,3 +184,15 @@ For this continuation the user again explicitly waived Claude: "no claude for th
 ## Resume through repeated toolbar clicks
 
 "I don't like how doduble clicking it can open the menu. If I move after clicking it for example on accident and need to re-click a button for anything at all then it opens the menu instead of just resuming the job if there is one or starting a new one"
+
+## Interface rebuild, logging and container icons
+
+Claude was asked in November 2026:
+
+"assist in a complete UI revamp! Also, look for bugs and improvements in not just code logic but high level logic in the way where you look at something and say "Why did you even do it like that when it could've been done like this?""
+
+"The UI is extremely cluttered when working with this mod, doesn't take advantage of submenus, the actual jobs menu sucks and is extremely ugly and difficult to work with, etc. I don't want an improvement, I want it thrown away and a new one made from scratch. Contextual awareness needs to be improved so it's not always shoved in your face and such that relevant actions are shown depending on external conditions like how zomboid already only shows relevant actions right clicking things and what not."
+
+"also, I keep noticing the logging is extremely terrible (for further improving the mod itself), doesn't tell us enough about state of interactions, intent, what happened, state of containers and objects, state of player, etc. Only abstract things that don't truly help."
+
+"another thing that's broken too is adding contextual commands that exist when you right click in a container bck to right clicking a container icon in the loot pane or it's pill/tab. It just adds global only when all it should do is just make available the original contextual options"

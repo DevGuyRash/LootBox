@@ -60,7 +60,7 @@ function UI.act(playerIndex, request, options)
     plan, err = app:preview(request)
     if not plan then
         Log.warn(id, "REFUSED", "reason", err)
-        UI.say(playerIndex, err)
+        if not options.quiet then UI.say(playerIndex, err) end
         return nil, err
     end
     if #plan.moves == 0 and (plan.pending or 0) == 0 then
@@ -68,16 +68,16 @@ function UI.act(playerIndex, request, options)
         local reason = first and (#plan.skipped == 1 and (tostring(first.itemName) .. ": " .. tostring(first.reason))
             or (#plan.skipped .. " items stay put. " .. tostring(first.reason))) or "Nothing to move"
         Log.info(id, "END", "state", "nothing-to-do", "reason", reason)
-        UI.say(playerIndex, reason)
-        return true
+        if not options.quiet then UI.say(playerIndex, reason) end
+        return true, reason, "nothing"
     end
     app:rememberSetup(request)
     local wanted, preference = App.reviewPreference(request)
     if not wanted and not options.review then
         local ok
         ok, err = begin(playerIndex, app, plan, id)
-        if not ok then UI.say(playerIndex, err) end
-        return ok, err
+        if not ok and not options.quiet then UI.say(playerIndex, err) end
+        return ok, err, "started"
     end
     return Review.show(playerIndex, { kind = "plan", plan = plan, request = request, interaction = id, preference = wanted and preference or nil,
         title = "LootBox", heading = plan.label,
@@ -134,6 +134,8 @@ function UI.snapshot(playerIndex)
     local app = App.get(playerIndex)
     local player = getSpecificPlayer(playerIndex)
     local id = Log.intent("settings", "snapshot", player)
+    local detailed = Log.detailed
+    Log.detailed = true
     Log.info(id, "SNAPSHOT", "version", getCore():getVersion(), "screen", getCore():getScreenWidth() .. "x" .. getCore():getScreenHeight())
     local mods = getActivatedMods and getActivatedMods()
     if mods then
@@ -162,8 +164,8 @@ function UI.snapshot(playerIndex)
         for _, bin in ipairs(app.world:knownBins()) do Log.trace(id, "trash-can", "key", bin.key, "at", Log.point(bin.point)) end
         Log.trace(id, "saved", "vehicle", app.state.vehicle and app.state.vehicle.script, "lootList", Log.request({ filter = app:getChecklist(), destination = {} }))
     end
-    Log.flush()
-    return Log.path()
+    Log.detailed = detailed
+    return Log.flush() and Log.path() or nil
 end
 
 function UI.closeAll()
