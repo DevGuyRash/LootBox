@@ -161,7 +161,7 @@ function JobBar:read(status)
             .. (status.state == "paused" and (". " .. pausedLine(status.reason)) or "")
     end
     local survey = status.survey
-    if survey and status.state == "running" then line = "Room " .. tostring(math.min(survey.roomsTotal, survey.roomsDone + 1)) .. " of " .. tostring(survey.roomsTotal) .. ". " .. line end
+    if survey and survey.roomsTotal > 1 and not survey.complete and status.state == "running" then line = "Room " .. tostring(math.min(survey.roomsTotal, survey.roomsDone + 1)) .. " of " .. tostring(survey.roomsTotal) .. ". " .. line end
     if total > 0 then fraction = math.min(1, done / total) end
     self.line, self.lineTone, self.fraction = self.problem or status.warning or line, self.problem and "bad" or tone, fraction
     self.count = total > 0 and (tostring(done) .. " / " .. tostring(total)) or nil

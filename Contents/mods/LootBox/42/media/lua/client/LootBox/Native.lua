@@ -15,6 +15,7 @@ require "TimedActions/ISEquipWeaponAction"
 require "TimedActions/ISUnequipAction"
 
 local Carry = require "LootBox/Carry"
+local Facts = require "LootBox/Facts"
 local Log = require "LootBox/Log"
 
 local Native = {}
@@ -169,9 +170,7 @@ local function trashObject(self, state)
     if not sprite or not sprite:getProperties() or not sprite:getProperties():has("IsTrashCan") then
         return nil, "The destination is not a native trash can"
     end
-    if isClient() and not getServerOptions():getBoolean("TrashDeleteAll") then
-        return nil, "The server disables trash deletion (TrashDeleteAll)"
-    end
+    if not Facts:deletionAllowed() then return nil, "This server does not let players empty trash cans" end
     if isClient() and (not SafeHouse or not SafeHouse.isSafehouseAllowLoot
         or not SafeHouse.isSafehouseAllowLoot(object:getSquare(), self.player)) then
         return nil, "Safehouse permissions do not allow emptying this trash can"

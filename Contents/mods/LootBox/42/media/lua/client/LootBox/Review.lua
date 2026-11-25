@@ -27,12 +27,11 @@ function Review:build()
     self.sub = K.text(self, "", "dim")
     self.rows = K.list(self, self)
     if options.kind == "bin" then
-        local bin, existing = plan.bin, #(plan.moves or {})
+        local bin = plan.bin
         self.heading:set("Empty this trash can?")
         local space = bin.capacity and bin.used and string.format("%.1f of %.1f full. ", bin.used, bin.capacity) or ""
         self.sub:set(space .. (#(plan.skipped or {}) > 0 and "It holds protected items, so it cannot be used."
-            or existing > 0 and "Everything in it now is deleted together with what you throw away."
-            or "It looks empty. Only what you throw away is deleted."), #(plan.skipped or {}) > 0 and "warn" or "dim")
+            or "Everything in it now is deleted together with what you throw away."), #(plan.skipped or {}) > 0 and "warn" or "dim")
         self.rows:fill(PlanList.rows(plan, { heading = "Already in there", tone = "bad" }))
         self.rows.emptyText = "Nothing in it."
     else

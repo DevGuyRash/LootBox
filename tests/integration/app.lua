@@ -31,7 +31,7 @@ Events = nil
 package.loaded["LootBox/World"] = { new = function(_, state)
     return { key = function(_, container) return container.id end, itemId = function(_, item) return item.id end,
         discover = function() end, observeNearby = function() return false end,
-        protected = function(_, item) return state.keep[item.id] == true end, hasKnownBins = function() return false end,
+        protected = function(_, item) return state.keep[item.id] == true end,
         rememberVehicle = function(_, vehicle)
             if not vehicle then return nil, "Vehicle unavailable" end
             state.vehicle = { id = 1, x = 1, y = 2, z = 0, script = "Base.Car" }
@@ -249,19 +249,39 @@ test("deleting a category clears it from storage, tags, loot list and other cate
     same(app:getChecklist().ids, {}); same(App.category(holder).includes, {"native:Food"})
 end)
 
+test("cans noticed while walking are saved together, with a job, or when play ends", function()
+    App.reset()
+    local previous, clock, writes = getTimestampMs, 1000000, 0
+    getTimestampMs = function() return clock end
+    local app = assert(App.get(0))
+    local persist = app.persist
+    function app:persist() writes = writes + 1; return persist(self) end
+    app.world.observeNearby = function() return true end
+    for _ = 1, 29 do App.tick(); clock = clock + 1000 end
+    assert(writes == 0, "Every sighting wrote the whole file")
+    for _ = 1, 3 do App.tick(); clock = clock + 1000 end
+    assert(writes == 1)
+    App.tick()
+    assert(app:start({}) and writes == 2, "A job saves what it relies on")
+    clock = clock + 1000
+    App.tick()
+    App.reset()
+    assert(writes == 3)
+    getTimestampMs = previous
+end)
+
 test("one damaged saved value costs only itself", function()
     App.reset()
     local app = assert(App.get(0))
     local path = app.path
     local data = assert(Store.load(path))
-    data.trash = {good = {x = 1, y = 2, z = 0}, bad = {x = "east"}}
     data.containerLabels = {["crate:ok"] = {"native:Food", "custom:99999"}, ["crate:bad"] = "Food"}
     data.vehicle = {id = "broken"}
     assert(Store.save(path, data))
     assert(Store.save("LootBox/preferences", {contextMenus = false, retiredOption = true, jobBar = "sometimes"}))
     App.reset()
     app = assert(App.get(0))
-    assert(app.state.trash.good and not app.state.trash.bad and app.state.vehicle == nil)
+    assert(app.state.vehicle == nil)
     same(app:labels({id = "crate:ok"}), {"native:Food"}); same(app:labels({id = "crate:bad"}), {})
     local preferences = App.getPreferences()
     assert(preferences.contextMenus == false and preferences.jobBar == true and preferences.retiredOption == nil)

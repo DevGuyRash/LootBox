@@ -704,7 +704,7 @@ case("A multiplayer host can disable native trash deletion", function()
     client, allowTrash = true, false
     local actor, bin = player(), trash(square(0, 0))
     item(42, bin)
-    assertRejected(Native.new(actor), { kind = "trash", container = bin, approved = { ["42"] = true } }, "TrashDeleteAll")
+    assertRejected(Native.new(actor), { kind = "trash", container = bin, approved = { ["42"] = true } }, "does not let players empty")
     equal(#requests, 0)
     equal(bin:getItems():size(), 1)
 end)

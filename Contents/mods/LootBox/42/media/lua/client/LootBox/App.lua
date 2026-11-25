@@ -18,6 +18,8 @@ local sessions, definitions, graph, loadError = {}, nil, nil, nil
 local nextCategoryId = 1
 local preferences, preferencesError
 local lastNeedsUpdate = {}
+-- What was noticed while walking is saved in batches; every job and label change saves at once.
+local SIGHTINGS_MS = 30000
 
 local function copy(value)
     if type(value) ~= "table" then return value end
@@ -224,12 +226,6 @@ local function repairState(state)
         if type(key) == "string" and flag == true then keep[key] = true end
     end
     state.keep = keep
-    local trash = {}
-    for key, bin in pairs(type(state.trash) == "table" and state.trash or {}) do
-        if type(key) == "string" and type(bin) == "table" and type(bin.x) == "number" and type(bin.y) == "number" and type(bin.z) == "number" then trash[key] = bin
-        else note("trash can dropped") end
-    end
-    state.trash = trash
     local vehicle = state.vehicle
     if vehicle ~= nil then
         local valid = type(vehicle) == "table" and type(vehicle.script) == "string"
@@ -288,7 +284,7 @@ function App.get(playerIndex, passiveNeeds)
     instance.jobs = instance:newRunner()
     sessions[playerIndex or 0] = instance
     Log.info(nil, "session", "player", Log.player(player), "storageLabels", instance:labelCount(), "categories", #definitions,
-        "knownBins", instance.world.hasKnownBins and instance.world:hasKnownBins(), "vehicle", state.vehicle and state.vehicle.script)
+        "knownBins", instance.world.knownBins and #instance.world:knownBins(), "vehicle", state.vehicle and state.vehicle.script)
     return instance
 end
 
@@ -311,6 +307,7 @@ end
 
 -- A failed write is reported and retried with the next change. It never blocks work.
 function Instance:persist()
+    self.seenAt = nil
     local ok, err = Store.save(self.path, self.state)
     if not ok then
         self.warning = "Could not save LootBox data: " .. tostring(err)
@@ -862,13 +859,17 @@ function App.tick()
         if instance.borrowed then instance:lend() end
         if not instance.needsOnly and (not instance.lastObserve or stamp - instance.lastObserve >= 1000) then
             instance.lastObserve = stamp
-            if instance.world:observeNearby() then instance:persist() end
+            if instance.world:observeNearby() then instance.seenAt = instance.seenAt or stamp end
+            if instance.seenAt and stamp - instance.seenAt >= SIGHTINGS_MS then instance:persist() end
         end
     end
 end
 
 function App.reset()
-    for _, instance in pairs(sessions) do instance:cancel(true) end
+    for _, instance in pairs(sessions) do
+        instance:cancel(true)
+        if instance.seenAt then instance:persist() end
+    end
     sessions, definitions, graph, loadError, merged, nativeCatalog = {}, nil, nil, nil, nil, nil
     preferences, preferencesError = nil, nil
     App.escapeDown, lastNeedsUpdate = false, {}

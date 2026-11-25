@@ -30,6 +30,7 @@ local function fixture()
         function value:getStaticMovingObjects() return list(self.corpses) end
         function value:getWorldObjects() return list(self.ground) end
         function value:isSeen() return self.seen end
+        function value:getTrashReceptacle() for _, object in ipairs(self.objects) do if object.trash then return object end end end
         function value:getRoom() return self.room end
         function value:getBuilding() return self.building end
         function value:getFloor() if not self.noFloor then return {} end end
@@ -419,25 +420,16 @@ local function building()
     return definition, native, room
 end
 
-local function nextSection(survey)
-    for _ = 1, 100 do
-        local section = survey:next()
-        if section ~= false then return section end
-    end
-    error("A small building survey did not yield a section")
-end
+local function binsHere(f, noLook) return f.world:bins({scope = "room"}, noLook) end
 
-case("Building preview captures metadata without scanning its full bounding box", function(f)
+case("Building preview reads what was seen and leaves the rest to be searched, never the bounding box", function(f)
     local _, _, room = building()
     local _, attach = room("living room", 0, 0, 0, 2, 1)
     attach(f.origin)
-    local before = #f.lookups
     local scan = assert(f.world:scan({scope = "building"}))
     equal(#scan.items, 0)
-    equal(#scan.sources, 0)
-    equal(#f.lookups, before)
     equal(scan.survey:status().roomsTotal, 1)
-    local section = assert(nextSection(scan.survey))
+    local section = assert(scan.survey:next(f.world:point()))
     local outside = f.square(1, 0)
     f.item(f.crate(outside, "outside storage"), "OutsideFood")
     local partial, missing, denied = f.world:scanSection(section, {scope = "building"})
@@ -445,6 +437,13 @@ case("Building preview captures metadata without scanning its full bounding box"
     equal(#partial.sources, 3)
     equal(missing, 1)
     equal(denied, 0)
+    attach(outside)
+    outside.seen = false
+    equal(#assert(f.world:scan({scope = "building"})).items, 0, "A room the player has not seen is not read in advance")
+    outside.seen = true
+    local whole = assert(f.world:scan({scope = "building"}))
+    equal(f.names(whole), "Beans,Cake,OutsideFood,Scrap,Soup")
+    equal(whole.survey, nil, "Nothing is left to search")
 end)
 
 case("A building section includes native floor 31 and excludes another building", function(f)
@@ -460,7 +459,7 @@ case("A building section includes native floor 31 and excludes another building"
     attachOther(neighbor)
     f.item(f.crate(neighbor, "other house storage"), "OtherFood")
     local survey = assert(f.world:scan({scope = "building"})).survey
-    local section = assert(nextSection(survey))
+    local section = assert(survey:next(f.world:point()))
     equal(section.room, upper)
     equal(section.z, 31)
     local scan, missing = f.world:scanSection(section, {scope = "building"})
@@ -488,46 +487,35 @@ case("A distant upper destination first uses a loaded intermediate floor", funct
     equal(targets[1].z, 1)
 end)
 
-case("Known outside trash on another floor is discovered without changing the source floor", function(f)
+case("Known outside trash on another floor is found without changing the source floor", function(f)
     local _, _, room = building()
     local _, attach = room("upstairs", 1, 0, 0, 1, 1)
     local upstairs = f.square(0, 0, 1)
     attach(upstairs)
     f.player.location = upstairs
-    local ground = f.square(3, 0, 0)
-    local bin = f.crate(ground, "outside-bin")
+    local bin = f.crate(f.square(3, 0, 0), "outside-bin")
     bin.parent.trash = true
-    local bins = f.world:trashCandidates()
+    local bins = assert(binsHere(f))
     equal(#bins, 1)
-    equal(bins[1], bin)
+    equal(f.world:resolveBin(bins[1]), bin)
     equal(f.player:getCurrentSquare(), upstairs)
-    equal(f.world:trashTarget(bin).point.z, 0)
+    equal(bins[1].point.z, 0)
 end)
 
 case("Unseen outside trash is found from upstairs without enumerating its contents", function(f)
     local _, _, room = building()
     local _, attach = room("upstairs", 1, 0, 0, 1, 1)
-    local upstairs = f.square(0, 0, 1)
-    attach(upstairs)
-    f.player.location = upstairs
+    f.player.location = f.square(0, 0, 1)
+    attach(f.player.location)
     local ground = f.square(4, 0, 0)
     ground.seen = false
     local bin = f.crate(ground, "unseen outside bin")
     bin.parent.trash = true
-    local contents = f.item(bin, "Unseen bin contents")
-    local reads = 0
-    function bin:getItems() reads = reads + 1; error("Static discovery must not enumerate bin contents") end
-    local bins = f.world:trashCandidates()
+    f.item(bin, "Unseen bin contents")
+    function bin:getItems() error("Finding a can must not read what it holds") end
+    local bins = assert(binsHere(f))
     equal(#bins, 1)
-    equal(bins[1], bin)
-    equal(reads, 0)
-    equal(bin.items[1], contents)
-    equal(f.player:getCurrentSquare(), upstairs)
-    local target = assert(f.world:trashTarget(bin))
-    equal(target.point.z, 0)
-    equal(target.needsInspection, true)
-    equal(target.approved, nil)
-    equal(reads, 0)
+    equal(bins[1].key, "4:0:0")
 end)
 
 case("Unseen ordinary storage does not become an observed source during bin discovery", function(f)
@@ -538,7 +526,7 @@ case("Unseen ordinary storage does not become an observed source during bin disc
     local reads = 0
     function storage:getItems() reads = reads + 1; error("Bin discovery must not inspect ordinary storage") end
     f.state.containerLabels = {[assert(f.world:key(storage))] = {"native:Junk"}}
-    equal(#f.world:trashCandidates(), 0)
+    equal(binsHere(f), nil)
     local scan = assert(f.world:scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
     equal(#scan.sources, 0)
     equal(#scan.items, 0)
@@ -559,10 +547,9 @@ case("A nearby static trash destination may belong to another building", functio
     neighbor.seen = false
     local bin = f.crate(neighbor, "neighbor bin")
     bin.parent.trash = true
-    local bins = f.world:trashCandidates()
+    local bins = assert(binsHere(f))
     equal(#bins, 1)
-    equal(bins[1], bin)
-    equal(f.world:trashTarget(bin).needsInspection, true)
+    equal(f.world:resolveBin(bins[1]), bin)
 end)
 
 case("Safehouse denial excludes unseen static trash destinations", function(f)
@@ -573,9 +560,9 @@ case("Safehouse denial excludes unseen static trash destinations", function(f)
     local previous = SafeHouse
     isClient = function() return true end
     SafeHouse = {isSafehouseAllowLoot = function(square) return square ~= location end}
-    local bins = f.world:trashCandidates()
+    local bins = binsHere(f)
     SafeHouse = previous
-    equal(#bins, 0)
+    equal(bins, nil)
     local remembered = 0
     for _ in pairs(f.state.trash) do remembered = remembered + 1 end
     equal(remembered, 0)
@@ -586,63 +573,20 @@ case("A remembered bin is unavailable during safehouse denial without losing its
     location.seen = false
     local bin = f.crate(location, "remembered permission bin")
     bin.parent.trash = true
-    equal(f.world:trashCandidates()[1], bin)
-    local key = assert(f.world:key(bin))
+    equal(assert(binsHere(f))[1].key, "4:0:0")
+    local key = "4:0:0"
     local previous, allowed = SafeHouse, false
     isClient = function() return true end
     SafeHouse = {isSafehouseAllowLoot = function(square) return square ~= location or allowed end}
-    local denied = f.world:trashCandidates()
+    local denied = binsHere(f)
     local retained = f.state.trash[key] ~= nil
     allowed = true
-    local restored = f.world:trashCandidates()
+    local restored = binsHere(f)
     SafeHouse = previous
-    equal(#denied, 0)
+    equal(denied, nil)
     assert(retained, "Temporary permission changes must retain the remembered location")
     equal(#restored, 1)
-    equal(restored[1], bin)
-end)
-
-case("Bin inspection requires the real floor adjacency and reachable access", function(f)
-    local bin = f.crate(f.origin, "inspection bin")
-    bin.parent.trash = true
-    local target = assert(f.world:trashTarget(bin))
-    f.player.location = f.square(0, 0, 1)
-    equal(f.world:binReachable(target), false)
-    assert(not f.world:markTrashInspected(target))
-    equal(f.world:trashTarget(bin).needsInspection, true)
-    f.player.location = f.square(2, 0, 0)
-    equal(f.world:binReachable(target), false)
-    assert(not f.world:markTrashInspected(target))
-    local adjacent = f.square(1, 0, 0)
-    f.player.location = adjacent
-    local reachable = adjacent.canReachTo
-    function adjacent:canReachTo() return false end
-    equal(f.world:binReachable(target), false)
-    assert(not f.world:markTrashInspected(target))
-    equal(f.world:trashTarget(bin).needsInspection, true)
-    adjacent.canReachTo = reachable
-    equal(f.world:binReachable(target), true)
-    equal(f.world:markTrashInspected(target), true)
-    assert(not f.world:trashTarget(bin).needsInspection)
-    equal(target.approved, nil)
-end)
-
-case("Inspection knowledge stays local to the session and unloaded bins need another inspection", function(f)
-    local location = f.square(1, 0, 0)
-    local bin = f.crate(location, "session bin")
-    bin.parent.trash = true
-    local target = assert(f.world:trashTarget(bin))
-    equal(f.world:markTrashInspected(target), true)
-    f.player.location = f.square(5, 0, 0)
-    assert(not f.world:trashTarget(bin).needsInspection)
-    local reconnected = World.new(f.player, f.state)
-    equal(reconnected:trashTarget(bin).needsInspection, true)
-    f.squares["1:0:0"] = nil
-    local unloaded = f.world:unloadedTrashTargets()
-    equal(#unloaded, 1)
-    equal(unloaded[1].key, target.key)
-    equal(unloaded[1].needsInspection, true)
-    equal(unloaded[1].approved, nil)
+    equal(f.world:resolveBin(restored[1]), bin)
 end)
 
 case("Source storage rebinds after unloading and rejects a changed fixture", function(f)
@@ -807,89 +751,6 @@ case("Zero-reduction and nested carried bags precede main inventory on equal car
     for index = 1, 4 do equal(repeated[index], destinations[index]) end
 end)
 
-case("A live replacement bin cannot inherit inspection or an active target identity", function(f)
-    local location = f.square(3, 0)
-    local original = f.crate(location, "identical bin")
-    original.parent.trash = true
-    f.player.location = location
-    local target = assert(f.world:trashTarget(original))
-    assert(f.world:markTrashInspected(target))
-    f.player.location = f.far
-    assert(not f.world:trashTarget(original).needsInspection)
-    local replacement = f.crate(location, "identical bin")
-    replacement.parent.trash = true
-    table.remove(location.objects, 1)
-    local resolved, reason = f.world:resolveTrashTarget(target)
-    equal(resolved, nil)
-    assert(reason and reason:find("replaced", 1, true))
-    local fresh = assert(f.world:trashTarget(replacement))
-    equal(fresh.key, target.key)
-    equal(fresh.needsInspection, true)
-end)
-
-case("A bin retired as missing requires inspection if the same object returns", function(f)
-    local location = f.square(3, 0)
-    local original = f.crate(location, "returning bin")
-    original.parent.trash = true
-    f.player.location = location
-    local target = assert(f.world:trashTarget(original))
-    assert(f.world:markTrashInspected(target))
-    f.player.location = f.far
-    location.objects = {}
-    equal(#f.world:trashCandidates(), 0)
-    equal(f.state.trash[target.key], nil)
-    location.objects[1] = original.parent
-    equal(f.world:trashTarget(original).needsInspection, true)
-end)
-
-case("Observed unloading retires inspection even when the original square returns", function(f)
-    local location = f.square(3, 0)
-    local original = f.crate(location, "reloaded original bin")
-    original.parent.trash = true
-    f.player.location = location
-    local target = assert(f.world:trashTarget(original))
-    assert(f.world:markTrashInspected(target))
-    f.player.location = f.far
-    f.squares["3:0:0"] = nil
-    equal(#f.world:trashCandidates(), 0)
-    assert(f.state.trash[target.key])
-    f.squares["3:0:0"] = location
-    equal(f.world:trashTarget(original).needsInspection, true)
-end)
-
-case("Resolving an unloaded target retires inspection before its square returns", function(f)
-    local location = f.square(3, 0)
-    local original = f.crate(location, "target lookup bin")
-    original.parent.trash = true
-    f.player.location = location
-    local target = assert(f.world:trashTarget(original))
-    assert(f.world:markTrashInspected(target))
-    f.player.location = f.far
-    f.squares["3:0:0"] = nil
-    local resolved, reason = f.world:resolveTrashTarget(target)
-    equal(resolved, nil)
-    equal(reason, "unloaded")
-    f.squares["3:0:0"] = location
-    equal(f.world:trashTarget(original).needsInspection, true)
-end)
-
-case("Moving a bin away and back cannot revive inspection at its former key", function(f)
-    local first, second = f.square(3, 0), f.square(6, 0)
-    local original = f.crate(first, "moved bin")
-    original.parent.trash = true
-    f.player.location = first
-    local target = assert(f.world:trashTarget(original))
-    assert(f.world:markTrashInspected(target))
-    f.player.location = f.far
-    first.objects, second.objects[1], original.parent.square = {}, original.parent, second
-    local away = assert(f.world:trashTarget(original))
-    assert(away.key ~= target.key and away.needsInspection)
-    second.objects, first.objects[1], original.parent.square = {}, original.parent, first
-    local returned = assert(f.world:trashTarget(original))
-    equal(returned.key, target.key)
-    equal(returned.needsInspection, true)
-end)
-
 case("A carried nested source bag resolves its recreated native inventory by item ID", function(f)
     local outer, outerStorage = bag(f, f.inventory, "Outer carried")
     local inner, innerStorage = bag(f, outerStorage, "Inner carried")
@@ -956,29 +817,46 @@ case("An unkeyed source vehicle remains usable only while its actual handle is l
     assert(reason and reason:find("unkeyed", 1, true))
 end)
 
-case("An unloaded trash target retains identity and refreshes capacity after reloading", function(f)
-    local location = f.square(5, 0)
-    local original = f.crate(location, "bin")
+case("A can out of sight keeps its place and size, and both are refreshed once it can be seen", function(f)
+    local original = f.crate(f.square(5, 0), "bin")
     original.parent.trash, original.capacity = true, 10
-    local target = assert(f.world:trashTarget(original))
+    local target = assert(binsHere(f))[1]
     f.squares["5:0:0"] = nil
-    local resolved, reason = f.world:resolveTrashTarget(target)
+    local resolved, reason = f.world:resolveBin(target)
     equal(resolved, nil)
     equal(reason, "unloaded")
-    local remembered = f.world:unloadedTrashTargets()
+    local remembered = assert(binsHere(f))
     equal(#remembered, 1)
-    equal(remembered[1].key, target.key)
+    equal(remembered[1].key, "5:0:0")
     equal(remembered[1].capacity, 10)
     local reloaded = f.square(5, 0)
-    local replacement = f.crate(reloaded, "bin")
+    local replacement = f.crate(reloaded, "another kind of bin")
     replacement.parent.trash, replacement.capacity = true, 40
-    f.item(replacement, "Existing")
-    equal(f.world:resolveTrashTarget(target), replacement)
+    equal(f.world:resolveBin(target), replacement)
     equal(target.capacity, 40)
-    equal(target.used, 1)
+    equal(f.state.trash["5:0:0"], 40)
     reloaded.objects = {}
-    f.world:trashCandidates()
-    equal(f.state.trash[target.key], nil)
+    equal(binsHere(f), nil)
+    equal(f.state.trash["5:0:0"], nil)
+end)
+
+case("A bag in a can belongs to the can, and nothing else does", function(f)
+    local bin = f.crate(f.square(5, 0), "bin")
+    bin.parent.trash = true
+    local bag = f.item(bin, "Bag", "Container")
+    bag.inventory = f.container("bag")
+    bag.inventory.bag = bag
+    equal(f.world:binKey(bin), "5:0:0")
+    equal(f.world:binKey(bag.inventory), "5:0:0")
+    equal(f.world:binKey(f.junk), nil)
+    equal(f.world:binKey(f.inventory), nil)
+end)
+
+case("A marked area beyond the loaded world is left to walk to, not dropped", function(f)
+    local scan = assert(f.world:scan({scope = "area", area = {x1 = 0, x2 = 9, y1 = 0, y2 = 0, z = 0}}))
+    equal(#scan.items, 0)
+    equal(scan.survey:status().complete, false)
+    equal(f.names((f.world:scanSection(scan.survey:next(f.world:point()), {scope = "area"}))), "Beans,Cake,Scrap,Soup")
 end)
 
 case("Direct selected-container preview observes current safehouse permission", function(f)
@@ -1012,8 +890,10 @@ case("Moving outside does not change the captured building source scope", functi
     local _, _, room = building()
     local _, attach = room("original", 0, 0, 0, 1, 1)
     attach(f.origin)
+    f.origin.seen = false
     local survey = assert(f.world:scan({scope = "building"})).survey
-    local section = assert(nextSection(survey))
+    local section = assert(survey:next(f.world:point()))
+    f.origin.seen = true
     local _, _, neighbor = building()
     local _, attachOther = neighbor("other", 0, 50, 50, 1, 1)
     attachOther(f.far)
@@ -1046,6 +926,8 @@ case("Safe staging uses ordinary accessible world storage and excludes trash and
         assert(candidate == f.tools or candidate == f.unlabeled or candidate == f.remote)
         assert(f.world:canAccess(candidate))
     end
+    function f.tools:isExplored() return false end
+    equal(#f.world:safeStagingContainers(), 2, "Nothing is set down in a container that was never opened")
 end)
 
 case("A recovery reservation protects its items and excludes its container from ordinary jobs", function(f)

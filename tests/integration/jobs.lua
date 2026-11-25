@@ -83,7 +83,10 @@ function Native:isBusy() return self.active ~= nil end
 function Native:isPlayerBusy() return active.playerBusy == true end
 function Native:takeoverReason() return active.takeover, active.takeoverKind end
 function Native:extend(milliseconds) active.extended = (active.extended or 0) + milliseconds end
-function Native:reachable(container) return active.reachable and active.reachable[container] == true end
+function Native:reachable(container)
+    return active.reachable and active.reachable[container] == true
+        or container.trash == true and not active.unloaded[container.position] and active.position == container.position
+end
 function Native:transferResult(op, id, fullType)
     if op.sourcePoint then
         for _, value in ipairs(active.ground) do
@@ -258,7 +261,7 @@ end} end
 
 local function fixture(capacity)
     local f = { now = 0, position = "source", visits = {}, transfers = {}, deletions = {}, scheduled = {}, ground = {}, squares = {}, nearby = {},
-        grid = {}, unloaded = {}, blockedPositions = {}, approaches = {}, operations = {}, sourceLocations = {}, binLocations = {}, unloadedBins = {}, inspectedBins = {}, floorDrops = {} }
+        grid = {}, unloaded = {}, blockedPositions = {}, approaches = {}, operations = {}, sourceLocations = {}, binLocations = {}, floorDrops = {} }
     local nextPosition = 0
     function f:ensureSquare(name, point)
         if self.squares[name] then
@@ -365,39 +368,27 @@ local function fixture(capacity)
     function world:safeStagingContainers() return f.safeCandidates or {} end
     function world:isTrash(value) return value.trash == true end
     function world:vehicle() return {} end
-    function world:trashCandidates()
-        local bins = {}
-        for _, bin in ipairs(f.bins) do if not f.unloaded[bin.position] then bins[#bins + 1] = bin end end
-        return bins, {}
-    end
-    function world:trashTarget(bin)
-        local point = self:square(bin)
-        f.binLocations[bin.name] = f.binLocations[bin.name] or bin
-        return {key = bin.name, container = bin, point = {x = point.x, y = point.y, z = point.z},
-            capacity = bin.capacity, used = bin:getCapacityWeight(), needsInspection = bin.uninspected and not f.inspectedBins[bin.name] or nil}
-    end
-    function world:unloadedTrashTargets()
-        local targets = {}
-        for _, bin in ipairs(f.unloadedBins) do
-            local target = self:trashTarget(bin)
-            target.container, target.needsInspection = nil, true
-            targets[#targets + 1] = target
+    function world:deletionAllowed() return not f.client or f.allowTrash ~= false end
+    function world:binKey(value) return value.trash and value.name or nil end
+    function world:bins()
+        local result, here = {}, self:point()
+        for _, bin in ipairs(f.bins) do
+            f.binLocations[bin.name] = f.binLocations[bin.name] or bin
+            local at = self:square(bin)
+            if f.binLocations[bin.name].trash then
+                result[#result + 1] = {key = bin.name, point = {x = at.x, y = at.y, z = at.z}, capacity = bin.capacity,
+                    away = math.sqrt((at.x - here.x) ^ 2 + (at.y - here.y) ^ 2)}
+            end
         end
-        return targets
+        if #result > 0 then return result end
+        return nil, "No trash can is known yet"
     end
-    function world:resolveTrashTarget(target)
+    function world:resolveBin(target)
         local current = f.binLocations[target.key]
-        if current and f.unloaded[current.position] then return nil, "unloaded" end
-        if not current or not current.trash then return nil, "missing" end
-        target.container, target.capacity, target.used = current, current.capacity, current:getCapacityWeight()
+        if f.unloaded[current.position] then return nil, "unloaded" end
+        if not current.trash then return nil, "The trash can is gone" end
+        target.capacity = current.capacity
         return current
-    end
-    function world:binReachable(target)
-        local current = f.binLocations[target.key]
-        return current and not f.unloaded[current.position] and f.position == current.position
-    end
-    function world:markTrashInspected(target)
-        if self:binReachable(target) then f.inspectedBins[target.key] = true; return true end
     end
     function world:records(source)
         local result = {}
@@ -475,14 +466,12 @@ local function fixture(capacity)
     return f
 end
 
-local function building(f, sections, yields)
+local function building(f, sections)
     local index, pending, processed, searched, unsearched, failures = 0, nil, 0, 0, 0, {}
-    local remainingYields = yields or 0
     for _, section in ipairs(sections) do f:addSquare(section.target) end
     local survey = {building = {}, complete = false}
     function survey:next()
         assert(not pending, "A section cannot be skipped while its result is pending")
-        if remainingYields > 0 then remainingYields = remainingYields - 1; return false end
         index = index + 1
         pending = sections[index]
         if not pending then self.complete = true end
@@ -547,6 +536,11 @@ local function start(f, input)
     assert(plan, err)
     assert(f.jobs:start(plan))
     return plan
+end
+
+-- Starts without asking at trash cans, which is how the mod is set by default.
+local function quick(f, input)
+    assert(f.jobs:start(assert(f.jobs:preview(input)), {reviewBins = false}))
 end
 
 local function test(name, body)
@@ -673,7 +667,7 @@ test("cleanup fills bins before deleting batches", function()
     local bin = container("trash", 2); bin.trash = true; f.bins = { bin }
     item(bin, "Base.ExistingTrash")
     for _ = 1, 5 do item(f.source) end
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.done == 5 and status.skipped == 0 and #f.source.items == 0 and #bin.items == 0)
     assert(#f.deletions == 3)
@@ -687,7 +681,7 @@ test("cleanup approves recreated destination identities and empties whole batche
     start(f, request("trash"))
     local status = finish(f)
     assert(status.done == 5 and status.skipped == 0 and #f.source.items == 0 and #bin.items == 0)
-    assert(#f.deletions == 3 and f.deletions[1].count == 2 and f.deletions[2].count == 2 and f.deletions[3].count == 1)
+    assert(#f.deletions == 3 and f.deletions[1].count == 2 and f.deletions[2].count == 1 and f.deletions[3].count == 2)
 end)
 
 test("choose a fitting larger bin without emptying an unused undersized bin", function()
@@ -708,9 +702,9 @@ test("newly protected bin contents stop whole-bin deletion", function()
     local existing = item(bin, "Base.ExistingTrash")
     item(f.source); item(f.source)
     f.onTransfer = function(op) if op.destination == bin then existing.protected = true end end
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
-    assert(status.skipped > 0 and #f.deletions == 0 and bin:contains(existing))
+    assert(status.state == "paused" and status.carried == 1 and #f.deletions == 0 and bin:contains(existing))
 end)
 
 test("reviewed requests resist later UI mutation", function()
@@ -888,19 +882,6 @@ test("an unloaded building section is walked to and inspected after streaming", 
     assert(f.approaches[section.target.name] == 1 and not f.unloaded[section.target.name])
 end)
 
-test("metadata yielding leaves building jobs cancellable before movement", function()
-    local f = fixture(2)
-    local input = building(f, {{roomId = "one", roomName = "Room", z = 0,
-        target = square("section", 1, 0), sources = {f.source}}}, 100)
-    item(f.source)
-    start(f, input)
-    for _ = 1, 20 do tick(f) end
-    assert(f.jobs:status().state == "running" and #f.operations == 0)
-    assert(f.jobs:cancel())
-    local status = finish(f)
-    assert(status.state == "cancelled" and status.done == 0 and #f.source.items == 1)
-end)
-
 test("cancelling a building approach waits for native cleanup without searching the room", function()
     local f = fixture(2)
     local section = {roomId = "remote", roomName = "Unloaded room", z = 1,
@@ -942,7 +923,7 @@ test("upstairs building cleanup returns between an outside bin and the selected 
     end
     assert(status.state == "finished" and status.done == 4 and status.skipped == 0)
     assert(upperVisits == 4 and outsideVisits == 4, "Capacity one requires four actual upstairs/outside deliveries")
-    assert(#f.ground == 0 and #bin.items == 0 and #f.deletions == 2)
+    assert(#f.ground == 0 and #bin.items == 0 and #f.deletions == 4)
     assert(status.survey.roomsDone == 2 and status.survey.sectionsSearched == 2)
 end)
 
@@ -1113,12 +1094,12 @@ test("a selected full bin is emptied before the next item is deposited", functio
     f.onTransfer = function(op)
         if op.destination == bin then assert(not bin:contains(existing), "Chosen full bin must be emptied before deposit") end
     end
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.done == 1 and #f.deletions == 2 and f.deletions[1].count == 1 and f.deletions[2].count == 1)
 end)
 
-test("failed bin routes are not repeated from the same hauling origin", function()
+test("a can that could not be reached is not tried again in the same run", function()
     local f = fixture(1)
     local blocked, reachable = container("blocked bin", 10), container("reachable bin", 10)
     blocked.trash, reachable.trash, f.bins = true, true, {blocked, reachable}
@@ -1128,38 +1109,8 @@ test("failed bin routes are not repeated from the same hauling origin", function
     start(f, request("trash"))
     local status = finish(f)
     assert(status.done == 3 and status.skipped == 0 and f.approaches[blocked.position] == 1)
-    assert(#f.deletions == 1 and f.deletions[1].bin == reachable and f.deletions[1].count == 3)
-end)
-
-test("remembered unloaded bins are inspected before any source pickup", function()
-    local f = fixture(2)
-    local bin = container("remembered bin", 4); bin.trash = true
-    f:addSquare(square(bin.position, 20, 0)); f.unloaded[bin.position] = true; f.unloadedBins = {bin}
-    local unseen = item(bin, "Base.Unseen")
-    local selected = item(f.source)
-    start(f, request("trash"))
-    local status = awaitState(f, "needs_review")
-    assert(status.done == 0 and status.carried == 0 and f.approaches[bin.position])
-    assert(f.source:contains(selected) and bin:contains(unseen) and #f.transfers == 0 and #f.deletions == 0)
-    local review = assert(f.jobs:reviewBin())
-    assert(review.canApprove and #review.moves == 1 and review.moves[1].itemName == "Base.Unseen")
-    assert(f.jobs:rejectBin(review))
-    assert(finish(f).state == "finished_with_skips" and f.source:contains(selected) and bin:contains(unseen))
-end)
-
-test("an empty remembered bin accepts cleanup only after a fresh explicit review", function()
-    local f = fixture(2)
-    local bin = container("remembered empty bin", 4); bin.trash = true
-    f:addSquare(square(bin.position, 20, 0)); f.unloaded[bin.position] = true; f.unloadedBins = {bin}
-    item(f.source); item(f.source)
-    start(f, request("trash"))
-    local paused = awaitState(f, "needs_review")
-    assert(paused.done == 0 and #f.transfers == 0 and #f.deletions == 0)
-    local review = assert(f.jobs:reviewBin())
-    assert(review.canApprove and #review.moves == 0 and #review.skipped == 0)
-    assert(f.jobs:approveBin(review))
-    local status = finish(f)
-    assert(status.done == 2 and status.skipped == 0 and #f.deletions == 1 and f.deletions[1].bin == bin)
+    assert(#f.deletions == 3)
+    for _, deletion in ipairs(f.deletions) do assert(deletion.bin == reachable and deletion.count == 1) end
 end)
 
 test("a recreated bin is resolved before depositing or deleting", function()
@@ -1181,7 +1132,7 @@ test("a recreated bin is resolved before depositing or deleting", function()
     assert(#f.deletions == 1 and f.deletions[1].bin == fresh and #original.items == 0)
 end)
 
-test("new unapproved bin contents are never deleted during cleanup", function()
+test("new bin contents are never deleted without asking when asking is on", function()
     local f = fixture(2)
     local bin = container("changing bin", 2); bin.trash, f.bins = true, {bin}
     for _ = 1, 2 do item(f.source) end
@@ -1190,9 +1141,14 @@ test("new unapproved bin contents are never deleted during cleanup", function()
         if op.destination == bin and not outsider then outsider = item(bin, "Base.Unapproved") end
     end
     start(f, request("trash"))
-    local status = finish(f)
-    assert(status.done == 1 and status.skipped > 0 and outsider and bin:contains(outsider))
-    assert(#f.deletions == 0, "Whole-bin deletion cannot include a newly unapproved item")
+    awaitState(f, "needs_review")
+    assert(f.jobs:rejectBin(assert(f.jobs:reviewBin())))
+    local status = awaitState(f, "paused")
+    assert(status.done == 1 and status.carried == 1 and bin:contains(outsider) and #f.deletions == 0)
+    assert(f.jobs:resume())
+    awaitState(f, "needs_review")
+    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
+    assert(finish(f).done == 2 and not outsider:getContainer())
 end)
 
 test("completed native walks improve later bin choices beyond straight-line proximity", function()
@@ -1236,10 +1192,10 @@ test("a newly discovered nonempty bin pauses without expanding the cleanup appro
     assert(#review.moves == 1 and review.moves[1].itemName == "Base.UnseenExisting")
     assert(f.jobs:rejectBin(review))
     local ended = finish(f)
-    assert(ended.state == "finished_with_skips" and ended.carried == 1 and #f.deletions == 0)
+    assert(ended.state == "paused" and ended.canResume and ended.carried == 1 and #f.deletions == 0)
 end)
 
-test("a newly discovered empty bin can replace an inaccessible bin after explicit approval", function()
+test("a newly discovered empty bin replaces an inaccessible bin without a question", function()
     local f = fixture(2)
     local blocked, fresh = container("original inaccessible bin", 2), container("new empty bin", 10)
     blocked.trash, fresh.trash, f.bins = true, true, {blocked}
@@ -1252,39 +1208,16 @@ test("a newly discovered empty bin can replace an inaccessible bin after explici
         end
     end
     start(f, request("trash"))
-    local paused = awaitState(f, "needs_review")
-    assert(paused.done == 0 and paused.carried == 1 and f.inventory:contains(selected))
-    assert(#f.transfers == 1 and #f.deletions == 0)
-    local review = assert(f.jobs:reviewBin())
-    assert(review.canApprove and #review.moves == 0)
-    assert(f.jobs:approveBin(review))
     local status = finish(f)
     assert(status.done == 1 and status.skipped == 0 and status.carried == 0)
     assert(#f.deletions == 1 and f.deletions[1].bin == fresh and f.deletions[1].count == 1)
-    assert(#f.transfers == 2, "Approving a destination must continue the carried item instead of picking it up again")
-end)
-
-test("a loaded uninspected bin pauses before collecting any source items", function()
-    local f = fixture(2)
-    local bin = container("uninspected loaded bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
-    f:addSquare(square(bin.position, 10, 0))
-    local selected = item(f.source)
-    start(f, request("trash"))
-    local paused = awaitState(f, "needs_review")
-    assert(paused.done == 0 and paused.carried == 0 and f.source:contains(selected))
-    assert(f.approaches[bin.position] and f.inspectedBins[bin.name])
-    local review = assert(f.jobs:reviewBin())
-    for _ = 1, 120 do tick(f) end
-    assert(f.jobs:status().state == "needs_review" and #f.transfers == 0 and #f.deletions == 0)
-    assert(f.jobs:approveBin(review))
-    assert(finish(f).done == 1 and #f.deletions == 1)
+    assert(#f.transfers == 2, "The carried item continues to the other can")
 end)
 
 test("approving a bin preserves the building survey and original item selection", function()
     local f = fixture(1)
-    local bin = container("outside uninspected bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    local bin = container("outside bin", 4)
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     f:addSquare(square(bin.position, 10, 0))
     local upper, lower = container("upper source", 100), container("lower source", 100)
     f:addSquare(square(upper.position, 20, 0, 1)); f:addSquare(square(lower.position, 20, 0, 0))
@@ -1297,7 +1230,7 @@ test("approving a bin preserves the building survey and original item selection"
     input.filter, input.destination = {all = false, ids = {}, types = {"Base.Selected"}}, {kind = "trash"}
     local plan = start(f, input)
     local paused = awaitState(f, "needs_review")
-    assert(paused.survey.roomsDone == 0 and paused.survey.roomsTotal == 2 and #f.transfers == 0)
+    assert(paused.survey.roomsTotal == 2 and paused.carried == 1 and #f.deletions == 0)
     input.filter.types[1], plan.request.filter.types[1] = "Base.Other", "Base.Other"
     assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
     local status = finish(f)
@@ -1310,7 +1243,7 @@ end)
 test("public bin review mutation cannot approve contents added after the snapshot", function()
     local f = fixture(2)
     local bin = container("reviewed destination", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     local selected = item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
@@ -1318,36 +1251,19 @@ test("public bin review mutation cannot approve contents added after the snapsho
     local added = item(bin, "Base.NewUnapproved")
     review.moves[1], review.canApprove = {itemName = added.fullType, from = "Bin", to = "Delete"}, true
     assert(not f.jobs:approveBin(review))
-    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected) and bin:contains(added))
-    assert(#f.transfers == 0 and #f.deletions == 0)
+    assert(f.jobs:status().state == "needs_review" and f.inventory:contains(selected) and bin:contains(added))
+    assert(#f.deletions == 0)
     local fresh = assert(f.jobs:reviewBin())
-    assert(#fresh.moves == 1 and fresh.moves[1].itemName == added.fullType)
+    assert(#fresh.moves == 2 and fresh.moves[2].itemName == added.fullType)
     assert(not f.jobs:approveBin(review) and not f.jobs:rejectBin(review), "Refreshing review invalidates its older token")
     assert(f.jobs:cancel() and finish(f).state == "cancelled")
-    assert(bin:contains(added) and f.source:contains(selected))
-end)
-
-test("protected existing contents remain blocked even if the public review is altered", function()
-    local f = fixture(2)
-    local bin = container("protected uninspected bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
-    local kept = item(bin, "Base.Kept"); kept.protected = true
-    local selected = item(f.source)
-    start(f, request("trash"))
-    awaitState(f, "needs_review")
-    local review = assert(f.jobs:reviewBin())
-    assert(not review.canApprove and #review.skipped == 1 and #review.moves == 0)
-    review.canApprove, review.skipped = true, {}
-    assert(not f.jobs:approveBin(review))
-    assert(f.jobs:status().state == "needs_review" and #f.transfers == 0 and #f.deletions == 0)
-    assert(f.jobs:rejectBin(review))
-    assert(finish(f).state == "finished_with_skips" and bin:contains(kept) and f.source:contains(selected))
+    assert(bin:contains(added) and f.inventory:contains(selected))
 end)
 
 test("contents that become protected after review require another decision", function()
     local f = fixture(2)
     local bin = container("changing protected review", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}
     local existing = item(bin, "Base.Existing")
     item(f.source)
     start(f, request("trash"))
@@ -1357,30 +1273,32 @@ test("contents that become protected after review require another decision", fun
     existing.protected = true
     assert(not f.jobs:approveBin(review))
     local fresh = assert(f.jobs:reviewBin())
-    assert(not fresh.canApprove and #fresh.skipped == 1)
+    assert(not fresh.canApprove and #fresh.skipped == 1 and fresh.skipped[1].status == "Protected")
+    fresh.canApprove, fresh.skipped = true, {}
+    assert(not f.jobs:approveBin(fresh), "Changing the shown review approves nothing")
     assert(f.jobs:cancel() and finish(f).state == "cancelled")
-    assert(bin:contains(existing) and #f.transfers == 0 and #f.deletions == 0)
+    assert(bin:contains(existing) and #f.deletions == 0)
 end)
 
 test("rejecting a reviewed bin inspects another without discarding source selection", function()
     local f = fixture(2)
-    local first, second = container("first uninspected bin", 4), container("second uninspected bin", 4)
-    first.trash, second.trash, first.uninspected, second.uninspected = true, true, true, true
+    local first, second = container("first bin", 4), container("second bin", 4)
+    first.trash, second.trash = true, true
     f.bins = {first, second}
     f:addSquare(square(first.position, 10, 0)); f:addSquare(square(second.position, 20, 0))
     local retained = item(first, "Base.ExistingFirst")
-    item(f.source, "Base.Selected")
+    item(second, "Base.ExistingSecond"); item(f.source, "Base.Selected")
     start(f, request("trash"))
     awaitState(f, "needs_review")
     local declined = assert(f.jobs:reviewBin())
-    assert(declined.bin.name == first.name and #f.transfers == 0)
+    assert(declined.bin.name == first.name and #f.transfers == 1)
     assert(f.jobs:rejectBin(declined))
     awaitState(f, "needs_review")
     local accepted = assert(f.jobs:reviewBin())
-    assert(accepted.bin.name == second.name and accepted.canApprove and #f.transfers == 0)
+    assert(accepted.bin.name == second.name and accepted.canApprove and #f.transfers == 1)
     assert(f.jobs:approveBin(accepted))
     local status = finish(f)
-    assert(status.done == 1 and status.skipped == 1 and first:contains(retained))
+    assert(status.done == 1 and status.skipped == 0 and first:contains(retained))
     assert(#f.deletions == 1 and f.deletions[1].bin == second)
     assert(f.approaches[first.position] == 1, "The rejected bin must not be selected again by the current job")
 end)
@@ -1388,14 +1306,14 @@ end)
 test("moving away from the bin blocks approval without losing the paused job", function()
     local f = fixture(2)
     local bin = container("reachable review bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     local selected = item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
     local review = assert(f.jobs:reviewBin())
     f.position = "source"
     assert(not f.jobs:approveBin(review))
-    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected) and #f.deletions == 0)
+    assert(f.jobs:status().state == "needs_review" and f.inventory:contains(selected) and #f.deletions == 0)
     f.position = bin.position
     assert(f.jobs:approveBin(review))
     assert(finish(f).done == 1)
@@ -1404,7 +1322,7 @@ end)
 test("cancelling a paused review invalidates its approval and rejection tokens", function()
     local f = fixture(2)
     local bin = container("cancelled review bin", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     local selected = item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
@@ -1413,32 +1331,7 @@ test("cancelling a paused review invalidates its approval and rejection tokens",
     assert(not f.jobs:approveBin(review) and not f.jobs:rejectBin(review))
     assert(finish(f).state == "cancelled")
     assert(not f.jobs:reviewBin() and not f.jobs:approveBin(review) and not f.jobs:rejectBin(review))
-    assert(f.source:contains(selected) and #f.transfers == 0 and #f.deletions == 0)
-end)
-
-test("waiting for an empty multiplayer inspection never substitutes for explicit approval", function()
-    local f = fixture(2); f.client = true
-    local bin = container("unconfirmed multiplayer bin", 4)
-    bin.trash, bin.uninspected, bin.explored, f.bins = true, true, false, {bin}
-    local selected = item(f.source)
-    start(f, request("trash"))
-    for _ = 1, 30 do tick(f); if bin.requested then break end end
-    assert(bin.requested == 1 and f.jobs:status().state == "running")
-    for _ = 1, 8 do tick(f) end
-    assert(f.jobs:status().state == "running" and #f.transfers == 0)
-    awaitState(f, "needs_review")
-    local waited = f.now - bin.lastRequestAt
-    assert(waited >= 1000 and waited < 3000, "A reply gets about a second, not three")
-    local review = assert(f.jobs:reviewBin())
-    local uncertainty = false
-    for _, warning in ipairs(review.warnings) do
-        if warning:find("Empty replies", 1, true) and warning:find("not acknowledged", 1, true) then uncertainty = true end
-    end
-    assert(uncertainty and #review.moves == 0 and review.canApprove)
-    for _ = 1, 60 do tick(f) end
-    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected))
-    assert(#f.transfers == 0 and #f.deletions == 0)
-    assert(f.jobs:cancel() and finish(f).state == "cancelled")
+    assert(f.inventory:contains(selected) and #f.deletions == 0)
 end)
 
 test("a custom eleven-weight hard limit forces four trips", function()
@@ -1655,13 +1548,13 @@ end)
 test("nil cannot approve or reject a bin before a review token is issued", function()
     local f = fixture(2)
     local bin = container("unissued bin review", 4)
-    bin.trash, bin.uninspected, f.bins = true, true, {bin}
+    bin.trash, f.bins = true, {bin}; item(bin, "Base.Existing")
     local selected = item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
     assert(not f.jobs:approveBin(nil) and not f.jobs:rejectBin(nil))
-    assert(f.jobs:status().state == "needs_review" and f.source:contains(selected))
-    assert(#f.transfers == 0 and #f.deletions == 0)
+    assert(f.jobs:status().state == "needs_review" and f.inventory:contains(selected))
+    assert(#f.deletions == 0)
     local review = assert(f.jobs:reviewBin())
     assert(not f.jobs:approveBin(nil) and not f.jobs:rejectBin(nil))
     assert(f.jobs:approveBin(review) and finish(f).done == 1)
@@ -1840,59 +1733,6 @@ test("resuming a floor delivery keeps its original destination point", function(
     assert(f.position == "destination")
 end)
 
-test("resume retires a bin token and requires fresh approval", function()
-    local f = fixture(3)
-    local bin = container("reviewed bin", 4); bin.trash, bin.uninspected, f.bins = true, true, {bin}
-    local selected = item(f.source)
-    start(f, request("trash"))
-    awaitState(f, "needs_review")
-    local old = assert(f.jobs:reviewBin())
-    stopJob(f)
-    assert(not f.jobs:approveBin(old) and not f.jobs:rejectBin(old))
-    assert(f.jobs:resume())
-    awaitState(f, "needs_review")
-    local fresh = assert(f.jobs:reviewBin())
-    assert(fresh ~= old and not f.jobs:approveBin(old))
-    assert(f.jobs:approveBin(fresh))
-    local result = finish(f)
-    assert(result.done == 1 and result.skipped == 0 and not selected:getContainer())
-end)
-
-test("resume after an observed empty still reviews the next deposit", function()
-    local f = fixture(3)
-    local bin = container("full reviewed bin", 1); bin.trash, f.bins = true, {bin}
-    item(bin); local selected = item(f.source)
-    f.holdTrashResult, f.completeDuringCancel = true, true
-    start(f, request("trash"))
-    for _ = 1, 200 do tick(f); if #f.deletions == 1 then break end end
-    assert(#f.deletions == 1 and bin:isEmpty())
-    stopJob(f)
-    f.holdTrashResult = false
-    assert(f.jobs:resume())
-    awaitState(f, "needs_review")
-    assert(#f.deletions == 1 and not bin:contains(selected))
-    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
-    local result = finish(f)
-    assert(result.done == 1 and bin:isEmpty() and #f.deletions == 2)
-end)
-
-test("resumed final cleanup cannot silently reuse its old bin approval", function()
-    local f = fixture(3)
-    local bin = container("final reviewed bin", 4); bin.trash, f.bins = true, {bin}
-    item(f.source)
-    start(f, request("trash"))
-    awaitOperation(f, function(op) return op.kind == "trash" end)
-    assert(#f.deletions == 0)
-    stopJob(f)
-    assert(f.jobs:resume())
-    awaitState(f, "needs_review")
-    assert(#f.deletions == 0)
-    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())))
-    local result = finish(f)
-    assert(result.done == 1 and #f.deletions == 1 and bin:isEmpty())
-end)
-
-
 test("a resumed native adjacent floor result is counted without a duplicate drop", function()
     local f = fixture(3)
     local selected = item(f.inventory)
@@ -1930,21 +1770,23 @@ test("resuming a building walk retains its pending section and earlier rooms", f
     assert(result.survey.sectionsSearched == 2 and f.destination:contains(selected))
 end)
 
-test("a protected item added while stopped blocks resumed whole-bin approval", function()
+test("a protected item added while stopped keeps the can from being emptied after Resume", function()
     local f = fixture(3)
-    local bin = container("changed reviewed bin", 4); bin.trash, bin.uninspected, f.bins = true, true, {bin}
-    item(f.source)
+    local bin = container("changed reviewed bin", 4); bin.trash, f.bins = true, {bin}
+    item(bin, "Base.Existing"); item(f.source)
     start(f, request("trash"))
     awaitState(f, "needs_review")
     local old = assert(f.jobs:reviewBin())
     stopJob(f)
     local kept = item(bin); kept.protected = true
     assert(f.jobs:resume())
+    local status = awaitState(f, "paused")
+    assert(status.canResume and status.carried == 1 and not f.jobs:approveBin(old))
+    assert(bin:contains(kept) and #f.deletions == 0)
+    kept.protected = false
+    assert(f.jobs:resume())
     awaitState(f, "needs_review")
-    local review = assert(f.jobs:reviewBin())
-    assert(not review.canApprove and #review.skipped == 1 and review.skipped[1].status == "Protected")
-    assert(not f.jobs:approveBin(old) and not f.jobs:approveBin(review))
-    assert(bin:contains(kept) and #f.deletions == 0 and #f.transfers == 0)
+    assert(f.jobs:approveBin(assert(f.jobs:reviewBin())) and finish(f).done == 1)
 end)
 
 test("resumed cleanup follows the reacquired bin through approval and capacity updates", function()
@@ -1973,7 +1815,7 @@ test("cleanup clears selected bin contents in place without hauling", function()
     local bin = container("source trash", 4); bin.trash = true
     f.sources, f.bins = {bin}, {bin}
     local selected = item(bin)
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.state == "finished" and status.done == 1 and status.moved == 0 and status.cleared == 1)
     assert(status.skipped == 0 and #f.transfers == 0 and #f.deletions == 1 and not selected:getContainer())
@@ -1986,7 +1828,7 @@ test("source bins settle once regardless of source order", function()
         local existing, hauled = item(bin, "Base.Existing"), item(f.source)
         f.bins = {bin}
         f.sources = first and {bin, f.source} or {f.source, bin}
-        start(f, request("trash"))
+        quick(f, request("trash"))
         local status = finish(f)
         assert(status.done == 2 and status.total == 2 and status.moved == 1 and status.cleared == 1 and status.skipped == 0)
         assert(#f.transfers == 2 and not existing:getContainer() and not hauled:getContainer())
@@ -1999,7 +1841,7 @@ test("failed source-bin deletion retains its selected work and contents", functi
     f.sources, f.bins = {bin}, {bin}
     local selected = item(bin)
     f.rejectTrash = true
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.done == 0 and status.cleared == 0 and status.skipped == 1)
     assert(bin:contains(selected) and #f.transfers == 0 and #f.deletions == 0)
@@ -2011,7 +1853,7 @@ test("a protected copy added after trash work queues prevents dispatch", functio
     f.sources, f.bins = {bin}, {bin}
     local selected = item(bin)
     f.holdTrashBegin = true
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local queued = false
     for _ = 1, 100 do
         tick(f)
@@ -2057,38 +1899,38 @@ test("capacity refusal with no later progress finishes finitely and keeps the it
     assert(f.source:contains(selected) and f.rejectedPickups == 1 and #f.transfers == 0)
 end)
 
-test("skip-review is explicit per job and still freshly inspects bins", function()
+test("not asking is a choice for one job, and an unopened can is still opened first", function()
     local f = fixture(2)
-    local bin = container("uninspected skip bin", 4); bin.trash, bin.uninspected = true, true
-    f.bins = {bin}
-    local selected = item(f.source)
-    local plan = assert(f.jobs:preview(request("trash")))
-    assert(f.jobs:start(plan, {reviewBins = false}))
+    local bin = container("unopened bin", 4); bin.trash, bin.explored, f.bins = true, false, {bin}
+    local selected, revealed = item(f.source), nil
+    bin.reply = function() revealed = item(bin, "Base.Revealed") end
+    quick(f, request("trash"))
     local status = finish(f)
-    assert(status.done == 1 and status.skipped == 0 and f.inspectedBins[bin.name] and not selected:getContainer())
-    local nextItem = item(f.source)
-    bin.uninspected, f.inspectedBins[bin.name] = true, nil
+    assert(status.done == 1 and status.skipped == 0 and bin.explored and not selected:getContainer() and not revealed:getContainer())
+    f.position, bin.explored = "source", false
+    item(f.source)
     start(f, request("trash"))
     local paused = awaitState(f, "needs_review")
-    assert(paused.done == 0 and f.source:contains(nextItem))
+    assert(paused.done == 0 and bin:contains(revealed))
 end)
 
 test("skip-review never approves protected bin contents", function()
     local f = fixture(2)
-    local bin = container("protected skip bin", 4); bin.trash, bin.uninspected = true, true
-    local kept = item(bin); kept.protected = true
+    local bin = container("protected skip bin", 4); bin.trash = true
+    local kept = item(bin)
     local selected = item(f.source)
     f.bins = {bin}
     local plan = assert(f.jobs:preview(request("trash")))
     assert(f.jobs:start(plan, {reviewBins = false}))
+    kept.protected = true
     local status = finish(f)
-    assert(status.done == 0 and status.skipped > 0 and #f.transfers == 0 and #f.deletions == 0)
-    assert(bin:contains(kept) and f.source:contains(selected))
+    assert(status.state == "paused" and status.done == 0 and status.carried == 1 and #f.deletions == 0)
+    assert(bin:contains(kept) and f.inventory:contains(selected))
 end)
 
 test("invalid approval cannot turn off future bin reviews", function()
     local f = fixture(2)
-    local bin = container("policy token bin", 4); bin.trash, bin.uninspected = true, true
+    local bin = container("policy token bin", 4); bin.trash = true; item(bin, "Base.Existing")
     f.bins = {bin}; item(f.source)
     start(f, request("trash"))
     local first = awaitState(f, "needs_review")
@@ -2144,7 +1986,7 @@ test("shortcut readiness follows the running job and permits fresh work after se
     assert(f.source:contains(old) and f.destination:isEmpty())
     local reviewing = fixture(2)
     local bin = container("shortcut review bin", 4)
-    bin.trash, bin.uninspected = true, true
+    bin.trash = true; item(bin, "Base.Existing")
     reviewing.bins = {bin}; item(reviewing.source)
     start(reviewing, request("trash"))
     local binReview = awaitState(reviewing, "needs_review")
@@ -2170,7 +2012,7 @@ test("late observed trash completion during pause settles selected source IDs on
     local bin = container("delayed source trash", 4); bin.trash = true
     f.sources, f.bins = {bin}, {bin}
     local selected = item(bin)
-    start(f, request("trash"))
+    quick(f, request("trash"))
     awaitOperation(f, function(op) return op.kind == "trash" end)
     assert(#f.deletions == 0 and bin:contains(selected))
     f.trashReplyDuringCancel, f.completeDuringCancel = true, true
@@ -2188,25 +2030,10 @@ test("trash deletion cannot settle a same-ID copy registered at another source",
     local selected = item(f.source)
     local foreign = item(bin); foreign.id = selected.id
     f.bins = {bin}
-    start(f, request("trash"))
+    quick(f, request("trash"))
     local status = finish(f)
     assert(status.done == 1 and status.total == 1 and status.moved == 1 and status.cleared == 0 and status.skipped == 0)
     assert(#f.transfers == 2 and #f.deletions == 2 and not selected:getContainer() and not foreign:getContainer())
-end)
-
-test("bin-source settlement requires the registered full type as well as the ID", function()
-    local f = fixture(1)
-    local bin = container("type-changing source trash", 2); bin.trash = true
-    local selected, existing = item(f.source), item(bin, "Base.Original")
-    f.bins, f.sources = {bin}, {f.source, bin}
-    local changed = false
-    f.onApproach = function(op)
-        if op.container == bin and not changed then existing.fullType, changed = "Base.Replacement", true end
-    end
-    start(f, request("trash"))
-    local status = finish(f)
-    assert(status.done == 1 and status.moved == 1 and status.cleared == 0 and status.skipped == 1)
-    assert(#f.transfers == 2 and not selected:getContainer() and not existing:getContainer())
 end)
 
 local function recoveryFixture(f, personal)
@@ -2214,8 +2041,10 @@ local function recoveryFixture(f, personal)
     local point = f:ensureSquare(safe.position)
     f.safeCandidates = {safe}
     local recovery = {pending = false, personal = personal, safe = safe}
-    function recovery:status() return {pending = self.pending, point = {x = point.x, y = point.y, z = point.z}} end
+    function recovery:status() return {pending = self.pending, blocking = self.pending and not f.inventory:contains(personal),
+        point = self.pending and {x = point.x, y = point.y, z = point.z} or nil} end
     function recovery:endpoint() return safe end
+    function recovery:forget() self.pending, self.forgotten = false, true end
     function recovery:prepare() self.pending = true; return true end
     function recovery:allows(op)
         return self.pending and op.personalRecovery and op.item == personal and
@@ -2334,9 +2163,57 @@ test("a heavy cleanup restores personal gear only after deleting the delivered h
     assert(restoredAfterDelete and f.inventory:contains(personal) and not recovery.pending and #f.transfers == 4 and #f.deletions == 1)
 end)
 
+test("gear that cannot be put down costs only the heavy item and leaves nothing reserved", function()
+    local f = fixture(3)
+    local personal = item(f.inventory, "Base.Personal", 1); personal.protected = true
+    local heavy, other = item(f.source, "Base.Heavy", 3), item(f.source, "Base.Other", 1)
+    local bin = container("trash", 4); bin.trash = true; f.bins = {bin}
+    local recovery, safe = recoveryFixture(f, personal)
+    f.blockedPositions[safe.position] = true
+    quick(f, request("trash"))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and status.done == 1 and status.skipped == 1, status.reason)
+    assert(f.source:contains(heavy) and not other:getContainer() and f.inventory:contains(personal))
+    assert(recovery.forgotten and not recovery.pending)
+end)
+
+test("gear already put down is fetched back when staging the rest fails", function()
+    local f = fixture(3)
+    local personal = item(f.inventory, "Base.Personal", 1); personal.protected = true
+    local heavy = item(f.source, "Base.Heavy", 3)
+    local bin = container("trash", 4); bin.trash = true; f.bins = {bin}
+    local recovery, safe = recoveryFixture(f, personal)
+    function recovery:next(mode)
+        if mode == "stage" and safe:contains(personal) then return nil, "The cupboard is full" end
+        if mode == "restore" and f.inventory:contains(personal) then self.pending = false; return nil, nil, true end
+        local out = mode == "stage"
+        return {kind = "transfer", item = personal, source = out and f.inventory or safe, destination = out and safe or f.inventory, personalRecovery = true}
+    end
+    quick(f, request("trash"))
+    local status = finish(f)
+    assert(status.state == "finished_with_skips" and f.inventory:contains(personal) and f.source:contains(heavy))
+    assert(not recovery.pending and not recovery.forgotten)
+end)
+
+test("a heavy load still finishes after the player fetched the gear by hand", function()
+    local f = fixture(3)
+    local personal = item(f.inventory, "Base.Personal", 1); personal.protected = true
+    local heavy = item(f.source, "Base.Heavy", 3)
+    local bin = container("trash", 4); bin.trash = true; f.bins = {bin}
+    local recovery, safe = recoveryFixture(f, personal)
+    quick(f, request("trash"))
+    awaitOperation(f, function(op) return op.kind == "approach" and op.container == bin end)
+    stopJob(f)
+    assert(remove(safe.items, personal)); f.hardLimit = 4
+    f.inventory.items[#f.inventory.items + 1], personal.container, recovery.pending = personal, f.inventory, false
+    assert(f.jobs:resume())
+    local status = finish(f)
+    assert(status.state == "finished" and status.done == 1 and not heavy:getContainer(), status.reason)
+end)
+
 test("pausing a bin review requires a new generation and token before Resume continues", function()
     local f = fixture(2)
-    local bin = container("paused generation bin", 4); bin.trash, bin.uninspected = true, true
+    local bin = container("paused generation bin", 4); bin.trash = true; item(bin, "Base.Existing")
     f.bins = {bin}; item(f.source)
     start(f, request("trash"))
     local before = awaitState(f, "needs_review")
@@ -3149,7 +3026,8 @@ end)
 test("leaving a bin during its multiplayer inspection goes back to it", function()
     local f = fixture(2); f.client = true
     local bin = container("inspected bin", 4)
-    bin.trash, bin.uninspected, bin.explored, f.bins = true, true, false, {bin}
+    bin.trash, bin.explored, f.bins = true, false, {bin}
+    bin.reply = function() item(bin, "Base.Revealed") end
     item(f.source)
     start(f, request("trash"))
     for _ = 1, 50 do tick(f); if bin.requested then break end end

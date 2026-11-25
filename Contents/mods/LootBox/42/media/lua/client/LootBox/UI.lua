@@ -172,7 +172,7 @@ function UI.snapshot(playerIndex)
         for _, entry in ipairs(app.world:labelledContainers()) do
             Log.trace(id, "label", "key", entry.key, "name", entry.name, "labels", table.concat(entry.labels, "+"), "loaded", entry.container ~= nil)
         end
-        for _, bin in ipairs(app.world:knownBins()) do Log.trace(id, "trash-can", "key", bin.key, "at", Log.point(bin.point)) end
+        for _, bin in ipairs(app.world:knownBins()) do Log.trace(id, "trash-can", "at", bin.key, "holds", bin.capacity, "away", bin.away) end
         Log.trace(id, "saved", "vehicle", app.state.vehicle and app.state.vehicle.script, "lootList", Log.request({ filter = app:getChecklist(), destination = {} }))
     end
     Log.detailed = detailed

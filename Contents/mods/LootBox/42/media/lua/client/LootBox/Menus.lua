@@ -7,6 +7,7 @@ require "ISUI/ISToolTip"
 local App = require "LootBox/App"
 local Catalog = require "LootBox/Catalog"
 local Describe = require "LootBox/Describe"
+local Facts = require "LootBox/Facts"
 local Log = require "LootBox/Log"
 local Selection = require "LootBox/Selection"
 local ObjectMenu = require "LootBox/ObjectMenu"
@@ -181,6 +182,9 @@ local function session(playerIndex)
     if not app then return nil end
     return { playerIndex = playerIndex, player = player, app = app, world = app.world, preferences = App.getPreferences() }
 end
+
+-- Throwing things away needs a can close enough to walk to.
+local function throwTip(away) return "Carried to a trash can and deleted for good. Nearest known can: " .. Facts.awayText(away) .. "." end
 
 local function listFilter(app)
     local list = app:getChecklist()
@@ -403,9 +407,9 @@ local function containerRows(host, s, container, origin)
         group(host, "putMenu", "Put in", rows)
     end
 
-    if has and facts.kind ~= "main" and facts.kind ~= "bin" and s.world:hasKnownBins() then
-        host:row("trash", "Throw away contents" .. count, go("throw away contents", request("container", "trash", everything(), from)),
-            "Carried to a trash can and deleted for good.")
+    local away = has and facts.kind ~= "main" and facts.kind ~= "bin" and s.world:binDistance()
+    if away then
+        host:row("trash", "Throw away contents" .. count, go("throw away contents", request("container", "trash", everything(), from)), throwTip(away))
     end
     labelRows(host, s, container, facts)
     presetRows(host, s, function(setup) return setup.scope == "container" or setup.destination.kind == "container" end,
@@ -426,9 +430,9 @@ end
 -- What can be done with "all of these": one rule set for a type, a selection of
 -- types, a game category and a custom category.
 local function allRows(s, what, label, carried, total, picked, source, target, descriptor)
-    local rows, clicked = {}, what.clicked
-    local function add(icon, title, single, made)
-        rows[#rows + 1] = { icon = icon, title = title, single = single, run = act(s, "menu.item", single, made, clicked) }
+    local rows, clicked, away = {}, what.clicked, s.world:binDistance()
+    local function add(icon, title, single, made, tip)
+        rows[#rows + 1] = { icon = icon, title = title, single = single, run = act(s, "menu.item", single, made, clicked), tip = tip }
     end
     local beyond = total > picked
     if carried then
@@ -443,7 +447,7 @@ local function allRows(s, what, label, carried, total, picked, source, target, d
             add("vehicle", "To my vehicle", "Haul all " .. label .. " to my vehicle", request("inventory", "vehicle", what.filter))
         end
         if beyond then add("drop", "Drop", "Drop all " .. label, request("inventory", "floor", what.filter, { ref = floorHere(s) })) end
-        if s.world:hasKnownBins() then add("trash", "Throw away", "Throw away all " .. label, request("inventory", "trash", what.filter)) end
+        if away then add("trash", "Throw away", "Throw away all " .. label, request("inventory", "trash", what.filter), throwTip(away)) end
     else
         if beyond then add("take", "Take", "Take all " .. label, request("container", "inventory", what.filter, { sourceContainer = source })) end
         if what.everywhere and what.everywhere > total then
@@ -454,6 +458,9 @@ local function allRows(s, what, label, carried, total, picked, source, target, d
         if mine > 0 and storage(source) then
             add("put", "Put mine in here (" .. mine .. ")", "Put my " .. label .. " in here (" .. mine .. ")",
                 request("inventory", "container", what.filter, { ref = source }))
+        end
+        if away and what.kind ~= "bin" then
+            add("trash", "Throw away", "Throw away all " .. label, request("container", "trash", what.filter, { sourceContainer = source }), throwTip(away))
         end
     end
     return rows
@@ -499,7 +506,7 @@ local function itemRows(host, s, items, item)
     local total, mine, everywhere = ofTypes(order)
     local label = #order == 1 and tostring(item:getName()) or (#order .. " selected types")
     group(host, "all", "All " .. label .. " (" .. total .. ")",
-        allRows(s, { filter = { ids = {}, types = order, all = false }, clicked = clicked, mine = mine, everywhere = everywhere },
+        allRows(s, { filter = { ids = {}, types = order, all = false }, clicked = clicked, mine = mine, everywhere = everywhere, kind = facts and facts.kind },
             label .. " (" .. total .. ")", carried, total, picked, source, target, descriptor), item)
 
     if #order == 1 and s.preferences.categoryShortcuts then
@@ -515,7 +522,7 @@ local function itemRows(host, s, items, item)
                 local name = App.categoryName(entry.id)
                 local open = carried and 0 or sumOpen(s, function(f) return f.categories and f.categories[entry.id] or 0 end)
                 group(host, "category", "All " .. name .. " (" .. amount .. ")",
-                    allRows(s, { filter = oneCategory(entry.id), clicked = clicked, mine = held, everywhere = open },
+                    allRows(s, { filter = oneCategory(entry.id), clicked = clicked, mine = held, everywhere = open, kind = facts and facts.kind },
                         name .. " (" .. amount .. ")", carried, amount, total, source, target, descriptor))
             end
         end
@@ -579,18 +586,18 @@ end
 local function aroundRows(host, s)
     local square = s.player:getCurrentSquare()
     if not square then return end
-    local list, bins, clicked = listFilter(s.app), s.world:hasKnownBins(), Log.point(square)
+    local list, away, clicked = listFilter(s.app), s.world:binDistance(), Log.point(square)
     local child = host:sub("around", "Around here")
     local function place(target, icon, title, scope, options)
         local rows = {}
-        local function add(rowIcon, text, kind, filter)
+        local function add(rowIcon, text, kind, filter, tip)
             rows[#rows + 1] = { icon = rowIcon, title = text, single = title .. ": " .. text:sub(1, 1):lower() .. text:sub(2),
-                run = act(s, "menu.around", text .. " - " .. title, request(scope, kind, filter), clicked, options) }
+                run = act(s, "menu.around", text .. " - " .. title, request(scope, kind, filter), clicked, options), tip = tip }
         end
         if list then add("takeSome", "Take my loot list", "inventory", list) end
         add("take", "Take everything", "inventory", everything())
         if s.world:hasStorageLabels() then add("sort", "Put away loose items", "labels", everything()) end
-        if bins then add("trash", "Throw everything away", "trash", everything()) end
+        if away then add("trash", "Throw everything away", "trash", everything(), throwTip(away)) end
         group(target, icon, title, rows)
     end
     local loot = getPlayerLoot and getPlayerLoot(s.playerIndex)

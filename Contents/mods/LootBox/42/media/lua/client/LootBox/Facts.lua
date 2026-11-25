@@ -2,7 +2,6 @@
 -- loaded objects and saved state only: no discover(), no disk, no search of the
 -- loaded world, and nothing is remembered or changed.
 --
--- world:hasKnownBins()                  -> boolean
 -- world:hasStorageLabels()              -> boolean, any container has a label
 -- world:storageAccepts(descriptor)      -> boolean, some labelled container takes this item
 -- world:rememberedVehicleLoaded()       -> boolean
@@ -19,14 +18,17 @@
 --                                          exclude leaves out what lies inside that container.
 -- world:roomFacts(square)               -> {name, containers, groundItems, truncated}, or nil outside a room
 -- world:labelledContainers()            -> list of {key, labels, container or nil, name, point or nil}
--- world:knownBins()                     -> list of {key, container or nil, name, point, capacity, used or nil}
+-- world:deletionAllowed()               -> boolean, false where a server forbids emptying cans
+-- world:knownBins(near)                 -> list of {key, point, capacity, away}, nearest first; away is in tiles from
+--                                          the player or from near, whichever is closer
+-- world:binDistance(near)               -> away of the nearest can close enough to use, or nil when nothing can be thrown away
 
 local Log = require "LootBox/Log"
 local call = require "LootBox/Safe"
 local Sort = require "LootBox/Sort"
 
 local MAX_ITEMS, MAX_SQUARES, SNAPSHOT_MS = 400, 150, 50
-local Facts = {}
+local Facts = {BIN_RANGE = 150}
 
 local function size(list) return call(list, "size") or 0 end
 
@@ -39,11 +41,6 @@ local function kindOf(self, container)
     if inVehicle(container) then return "vehicle" end
     if instanceof and instanceof(call(container, "getParent"), "IsoDeadBody") then return "corpse" end
     return self:isTrash(container) and "bin" or "fixture"
-end
-
-function Facts:hasKnownBins()
-    for _ in pairs(self.state.trash) do return true end
-    return false
 end
 
 local function storageLabel(key, labels) return #labels > 0 and key:sub(1, 7) ~= "player:" end
@@ -237,19 +234,46 @@ function Facts:labelledContainers()
     return Sort(result, function(entry) return entry.name, entry.key end)
 end
 
-function Facts:knownBins()
-    local result = {}
-    for key, memory in pairs(self.state.trash) do
-        if type(memory) == "table" then
-            local container = endpoint(self, key)
-            result[#result + 1] = {key = key, container = container,
-                name = container and self:name(container) or getTextOrNull and getTextOrNull("IGUI_ContainerTitle_" .. tostring(memory.kind))
-                    or tostring(memory.kind),
-                point = {x = memory.x, y = memory.y, z = memory.z}, capacity = memory.capacity,
-                used = container and call(container, "getCapacityWeight") or self.binUsed[key]}
-        end
+function Facts.binPoint(key)
+    local x, y, z = tostring(key):match("^(%-?%d+):(%-?%d+):(%-?%d+)$")
+    return x and {x = tonumber(x), y = tonumber(y), z = tonumber(z)} or nil
+end
+
+function Facts.awayText(away)
+    local tiles = math.max(1, math.floor(away + 0.5))
+    return tiles == 1 and "1 tile away" or tiles .. " tiles away"
+end
+
+function Facts:deletionAllowed()
+    return not isClient() or getServerOptions():getBoolean("TrashDeleteAll") == true
+end
+
+local function eachBin(self, near, visit)
+    local here = squarePoint(call(self.player, "getCurrentSquare"))
+    local function apart(from, point)
+        return from and math.sqrt((from.x - point.x) ^ 2 + (from.y - point.y) ^ 2) or math.huge
     end
-    return Sort(result, function(entry) return entry.key end)
+    for key, capacity in pairs(self.state.trash) do
+        local point = Facts.binPoint(key)
+        visit(key, point, capacity, math.min(apart(here, point), apart(near, point)))
+    end
+end
+
+function Facts:knownBins(near)
+    local result = {}
+    eachBin(self, near, function(key, point, capacity, away)
+        result[#result + 1] = {key = key, point = point, capacity = capacity, away = away}
+    end)
+    return Sort(result, function(bin) return bin.away, bin.key end)
+end
+
+function Facts:binDistance(near)
+    local nearest
+    if not self:deletionAllowed() then return nil end
+    eachBin(self, near, function(_, _, _, away)
+        if away <= Facts.BIN_RANGE and (not nearest or away < nearest) then nearest = away end
+    end)
+    return nearest
 end
 
 return Facts

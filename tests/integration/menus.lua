@@ -83,7 +83,7 @@ local function setup()
     local world = {graph = {list = function() return {} end, matches = function() return false end}}
     function world:owns(c) return c.facts.owned end
     function world:containerFacts(c) return c.facts end
-    function world:hasKnownBins() return f.bins == true end
+    function world:binDistance() return f.bins and 12 or nil end
     function world:hasStorageLabels() return f.storage == true end
     function world:storageAccepts() return f.storage == true end
     function world:rememberedVehicleLoaded() return f.car == true end
@@ -185,7 +185,18 @@ test("loot items offer taking only when there is more than what was clicked", fu
     local menu = newMenu()
     Menus.inventoryMenu(0, menu, {item("Nails", crate)})
     local t = tree(menu)
-    assert(has(t, "All Nails (5) > Take") and has(t, "All Nails (5) > Take from all open containers (7)"))
+    assert(has(t, "All Nails (5) > Take") and has(t, "All Nails (5) > Take from all open containers (7)") and not has(t, "Throw"))
+    f.bins = true
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", crate)})
+    t = tree(menu)
+    has(t, "All Nails (5) > Throw away").onSelect()
+    assert(f.acted.scope == "container" and f.acted.sourceContainer == crate and f.acted.destination.kind == "trash" and f.acted.filter.types[1] == "Base.Nails")
+    crate.facts.kind = "bin"
+    menu = newMenu()
+    Menus.inventoryMenu(0, menu, {item("Nails", crate)})
+    assert(not has(tree(menu), "Throw"), "It is already in a trash can")
+    crate.facts.kind, f.bins = "fixture", nil
     crate.facts.types["Base.Nails"], shelf.facts.types["Base.Nails"] = 1, nil
     menu = newMenu()
     Menus.inventoryMenu(0, menu, {item("Nails", crate)})
