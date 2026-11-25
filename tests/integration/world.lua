@@ -169,7 +169,6 @@ case("Junk source labels select only matching loaded containers across rooms", f
     local reconnected = World.new(f.player, f.state)
     local scan = assert(reconnected:scan({scope = "labeled", sourceLabels = {"native:Junk"}}))
     equal(f.names(scan, {ids = {"native:Food"}}), "Apple,Beans")
-    equal(#scan.groundSquares, 0)
     equal(#scan.sources, 2)
 end)
 
@@ -329,9 +328,10 @@ end)
 
 case("An area source-label filter excludes unlabeled storage and ground loot", function(f)
     local request = {scope = "area", area = {x1 = 0, x2 = 0, y1 = 0, y2 = 0, z = 0}, sourceLabels = {"native:Junk"}}
+    local ground = f.item(nil, "GroundFood")
+    f.origin.ground[1] = {getItem = function() return ground end}
     local scan = assert(f.world:scan(request))
     equal(f.names(scan), "Beans,Scrap")
-    equal(#scan.groundSquares, 0)
     request.includeInventory = true
     equal(f.names(assert(f.world:scan(request))), "Beans,CarriedFood,Scrap")
 end)
@@ -339,13 +339,18 @@ end)
 case("Empty extra source-label selection preserves an ordinary area scope", function(f)
     local scan = assert(f.world:scan({scope = "area", area = {x1 = 0, x2 = 0, y1 = 0, y2 = 0, z = 0}, sourceLabels = {}}))
     equal(f.names(scan), "Beans,Cake,Scrap,Soup")
-    equal(#scan.groundSquares, 1)
+    local ground = f.item(nil, "GroundFood")
+    f.origin.ground[1] = {getItem = function() return ground end}
+    scan = assert(f.world:scan({scope = "area", area = {x1 = 0, x2 = 0, y1 = 0, y2 = 0, z = 0}, sourceLabels = {}}))
+    equal(f.names(scan), "Beans,Cake,GroundFood,Scrap,Soup")
+    local record
+    for _, entry in ipairs(scan.items) do if entry.item == ground then record = entry end end
+    equal(record.groundSquare, f.origin, "A floor record carries the tile it lies on")
 end)
 
 case("Reach source labels do not expand the native accessible-container set", function(f)
     local scan = assert(f.world:scan({scope = "reach", sourceLabels = {"native:Junk"}}))
     equal(f.names(scan), "Beans,Scrap")
-    equal(#scan.groundSquares, 0)
 end)
 
 case("Unloaded labeled sources remain remembered and are reported unavailable", function(f)
@@ -1224,7 +1229,10 @@ case("Explicit consumption permits owned food and fluid equipment without weaken
     fluid = {}
     local originalContainer = vessel.getContainer
     function vessel:getContainer() return f.junk end
-    assert(f.world:protected(vessel, policy), "External or bag equipment must not be moved")
+    assert(not f.world:protected(vessel, policy), "An attachment flag on an item in world storage is not the player's equipment")
+    function f.player:getPrimaryHandItem() return vessel end
+    assert(f.world:protected(vessel, policy), "The player's held item stays protected outside main inventory")
+    function f.player:getPrimaryHandItem() return nil end
     function vessel:getContainer() return nil end
     assert(f.world:protected(vessel, policy))
     vessel.getContainer = originalContainer
@@ -1514,10 +1522,13 @@ case("Smart Take All leaves protected and unwanted source items and never opens 
     matchingFixture(f)
     f.state.keep[tostring(f.junk.items[1].id)] = true
     f.junk.items[2].isUnwanted = function(_, player) return player == f.player end
-    local _, nested = weightedBag(f, f.junk, "Source bag", 80)
-    f.item(nested, "Hidden")
+    local whole, nested = weightedBag(f, f.junk, "Source bag", 80)
+    local hidden = f.item(nested, "Hidden")
     local records = assert(f.world:smartLootRecords("all", f.junk))
-    equal(#records, 0)
+    equal(#records, 1, "A filled loot bag is taken whole without opening it")
+    equal(records[1].item, whole)
+    function hidden:isFavorite() return true end
+    equal(#assert(f.world:smartLootRecords("all", f.junk)), 0, "A bag holding a Favorite item stays in place")
 end)
 
 case("Smart matching fails closed for missing native maps and rejects carried or recovery sources", function(f)

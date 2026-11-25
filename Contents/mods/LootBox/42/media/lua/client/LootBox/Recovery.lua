@@ -1,3 +1,5 @@
+local Log = require "LootBox/Log"
+local Sort = require "LootBox/Sort"
 local Store = require "LootBox/Store"
 local Recovery = {}
 Recovery.__index = Recovery
@@ -107,7 +109,7 @@ function Recovery.new(player, world, path)
         local ok, invalid = validate(document)
         if not ok then document, err = nil, invalid end
     end
-    local self = setmetatable({player = player, world = world, path = path .. "/recovery", error = err,
+    local self = setmetatable({player = player, world = world, path = path .. "/recovery", error = err, unreadable = err,
         receipt = document and document.pending and document or nil}, Recovery)
     self.reserved = reservedIdentities(self.receipt)
     return self
@@ -121,19 +123,44 @@ function Recovery:save(candidate)
     return true
 end
 
+-- pending: a receipt exists, so personal gear may be staged somewhere.
+-- blocking: gear has really left the player and is still owed back. Callers
+-- should refuse only another heavy lift for it; other work stays safe because
+-- the gear and its container are protected.
+-- items: what the receipt still covers. dropped: what turned out to be gone.
+-- A read or write error alone is reported in error and never sets pending.
 function Recovery:status()
     local receipt = self.receipt
-    if not receipt then return {pending = self.error ~= nil, phase = "blocked", count = 0, reason = self.error} end
-    local point = receipt.endpoint.point
-    return {pending = true, phase = receipt.phase, count = #receipt.entries, reason = self.error or receipt.reason,
+    if not receipt then
+        return {pending = false, blocking = false, phase = "none", count = 0, items = {}, dropped = {}, error = self.error, reason = self.error}
+    end
+    local point, items, blocking = receipt.endpoint.point, {}, false
+    for _, entry in ipairs(receipt.entries) do
+        items[#items + 1] = {id = entry.id, fullType = entry.fullType, name = entry.name, staged = entry.touched == true}
+        blocking = blocking or entry.touched == true and entry.restored ~= true
+    end
+    return {pending = true, blocking = blocking, phase = receipt.phase, count = #receipt.entries, reason = self.error or receipt.reason,
+        error = self.error, items = items, dropped = copy(receipt.dropped or {}),
         location = receipt.endpointName .. " (" .. point.x .. ", " .. point.y .. ", floor " .. point.z .. ")",
         point = copy(point)}
+end
+
+-- Gives up on the staged gear without moving anything. Returns the items the
+-- receipt covered (an empty list when only an unreadable receipt was cleared).
+function Recovery:forget()
+    local dropped = self:status().items
+    local ok, reason = Store.save(self.path, {version = 1, pending = false})
+    self.receipt, self.reserved, self.liveEndpoint, self.unreadable = nil, {}, nil, nil
+    self.error = not ok and "Personal gear recovery could not be saved: " .. tostring(reason) or nil
+    Log.warn(self.interaction, "GEAR-FORGET", "items", #dropped, "saved", ok == true, "error", reason)
+    return dropped, self.error
 end
 
 function Recovery:block(reason)
     if self.receipt then
         local candidate = copy(self.receipt)
         candidate.phase, candidate.reason = "blocked", reason
+        Log.warn(self.interaction, "GEAR-BLOCKED", "reason", reason, "at", candidate.endpointName)
         local ok, failure = self:save(candidate)
         if not ok then return nil, failure end
     end
@@ -180,10 +207,7 @@ end
 local function restoreOrder(selected, current, maximum)
     local ordered, remaining = {}, current
     for _, root in ipairs(selected) do ordered[#ordered + 1], remaining = root, remaining - root.freed end
-    table.sort(ordered, function(a, b)
-        local aHeadroom, bHeadroom = a.raw - a.freed, b.raw - b.freed
-        return aHeadroom > bHeadroom or (aHeadroom == bHeadroom and a.entry.id < b.entry.id)
-    end)
+    Sort(ordered, function(root) return root.freed - root.raw, root.entry.id end)
     for _, root in ipairs(ordered) do
         if remaining + root.raw > maximum + 0.0001 then return nil end
         remaining = remaining + root.freed
@@ -192,7 +216,7 @@ local function restoreOrder(selected, current, maximum)
 end
 
 function Recovery:prepare(blockedItem, candidates)
-    if self.error then return nil, self.error end
+    if self.unreadable then return nil, self.unreadable end
     if self.receipt then return nil, "Recover the personal gear already staged before starting another heavy lift" end
     local current, maximum = self.world:carrying()
     local needed = current + math.max(0, blockedItem:getUnequippedWeight()) - maximum
@@ -225,7 +249,7 @@ function Recovery:prepare(blockedItem, candidates)
             end
         end
     end
-    table.sort(roots, function(a, b) return a.score > b.score or (a.score == b.score and a.entry.id < b.entry.id) end)
+    Sort(roots, function(root) return -root.score, root.entry.id end)
     local sourceContainers, source = {}, blockedItem:getContainer()
     while source and not sourceContainers[source] do
         sourceContainers[source] = true
@@ -281,7 +305,6 @@ local function rootItem(self, entry, endpoint)
     if matches(main, entry) and main:getContainer() == self.player:getInventory() then return main, self.player:getInventory() end
     local staged = endpoint:getItemWithID(entry.id)
     if matches(staged, entry) and staged:getContainer() == endpoint then return staged, endpoint end
-    return nil, nil, "Personal item is missing or changed: " .. entry.name
 end
 
 local function heldConflict(self, item, entry)
@@ -301,18 +324,44 @@ local function heldConflict(self, item, entry)
     end
 end
 
-local function contentsIntact(self, item, entry)
-    if #entry.children == 0 then return true end
+local function missingContents(self, item, entry)
+    local missing = {}
+    if #entry.children == 0 then return missing end
     local bag, observed = call(item, "getInventory"), {}
     for _, record in ipairs(bag and self.world:records(bag, true) or {}) do
         observed[record.item:getID()] = tostring(record.item:getFullType())
     end
     for _, child in ipairs(entry.children) do
-        if observed[child.id] ~= child.fullType then
-            return nil, "Personal bag contents changed; recover the missing recorded item before finishing: " .. entry.name .. " (" .. child.fullType .. ")"
-        end
+        if observed[child.id] ~= child.fullType then missing[#missing + 1] = child end
     end
-    return true
+    return missing
+end
+
+-- Items the player or the world has since taken away can never be put back, so
+-- they leave the receipt and are reported instead of holding everything else.
+local function dropGone(self, candidate, endpoint, mode)
+    local kept, gone = {}, {}
+    local function drop(entry, name)
+        gone[#gone + 1] = name .. " (" .. entry.fullType .. ")"
+        candidate.dropped = candidate.dropped or {}
+        table.insert(candidate.dropped, {id = entry.id, fullType = entry.fullType, name = name})
+    end
+    for _, entry in ipairs(candidate.entries) do
+        local item = rootItem(self, entry, endpoint)
+        if item or mode == "restore" and not entry.touched then
+            kept[#kept + 1] = entry
+            local missing = item and missingContents(self, item, entry) or {}
+            for _, child in ipairs(missing) do
+                drop(child, entry.name .. " contents")
+                for index, original in ipairs(entry.children) do
+                    if original == child then table.remove(entry.children, index); break end
+                end
+            end
+        else drop(entry, entry.name) end
+    end
+    candidate.entries = kept
+    if #gone > 0 then Log.warn(self.interaction, "GEAR-GONE", "items", table.concat(gone, ", "), "at", candidate.endpointName) end
+    return #gone > 0
 end
 
 function Recovery:allows(op)
@@ -326,8 +375,7 @@ function Recovery:allows(op)
         or intent.twoHands ~= op.twoHands then
         return nil, "The operation has no matching durable personal gear intent"
     end
-    local intact, failure = contentsIntact(self, op.item, entry)
-    if not intact then return nil, failure end
+    if #missingContents(self, op.item, entry) > 0 then return nil, "Personal bag contents changed: " .. entry.name end
     local inventory = self.player:getInventory()
     if op.kind == "transfer" then
         if op.source == inventory and op.destination == endpoint and receipt.phase == "staging" then return true end
@@ -347,7 +395,7 @@ end
 
 function Recovery:next(mode)
     local receipt = self.receipt
-    if not receipt then return nil, self.error, self.error == nil end
+    if not receipt then return nil, self.unreadable, self.unreadable == nil end
     if self.error then
         local saved, failure = self:save(copy(receipt))
         if not saved then return nil, failure end
@@ -356,20 +404,16 @@ function Recovery:next(mode)
     if mode ~= "stage" and mode ~= "restore" then return nil, "Choose staging or recovery" end
     local endpoint, reason = self:endpoint()
     if not endpoint then return self:block(reason) end
+    -- A multiplayer container that has not been opened lists no items yet.
+    if call(endpoint, "isExplored") == false then return self:block("The personal gear staging container has not been opened yet") end
     local candidate = copy(receipt)
+    dropGone(self, candidate, endpoint, mode)
     candidate.phase = mode == "stage" and "staging" or "restoring"
     candidate.reason = mode == "stage" and "Making room for a heavy lift" or "Recovering personal gear and original equipment slots"
     local op
     for index, entry in ipairs(candidate.entries) do
-        local item, source, missing
-        if mode == "stage" or entry.touched then
-            item, source, missing = rootItem(self, entry, endpoint)
-            if not item then return self:block(missing) end
-        end
-        if mode == "stage" or entry.touched then
-            local intact, failure = contentsIntact(self, item, entry)
-            if not intact then return self:block(failure) end
-        end
+        local item, source
+        if mode == "stage" or entry.touched then item, source = rootItem(self, entry, endpoint) end
         if mode == "stage" and source ~= endpoint then
             entry.touched = true
             if self.player:isEquipped(item) then op = {kind = "gear", mode = "unequip", item = item, source = source}
@@ -407,7 +451,7 @@ function Recovery:next(mode)
         end
     end
     candidate.intent = nil
-    if mode == "restore" then
+    if mode == "restore" or #candidate.entries == 0 then
         local ok, err = self:save(nil)
         if ok then self.liveEndpoint = nil end
         return nil, err, ok == true

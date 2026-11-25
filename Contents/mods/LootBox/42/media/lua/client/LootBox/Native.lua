@@ -5,6 +5,7 @@ require "Vehicles/TimedActions/ISEnterVehicle"
 require "Vehicles/TimedActions/ISExitVehicle"
 require "Vehicles/TimedActions/ISSwitchVehicleSeat"
 require "Vehicles/TimedActions/ISUnlockVehicleDoor"
+require "Vehicles/TimedActions/ISLockVehicleDoor"
 require "Vehicles/TimedActions/ISOpenVehicleDoor"
 require "Vehicles/TimedActions/ISCloseVehicleDoor"
 require "Vehicles/TimedActions/ISLockDoors"
@@ -14,6 +15,7 @@ require "TimedActions/ISEquipWeaponAction"
 require "TimedActions/ISUnequipAction"
 
 local Carry = require "LootBox/Carry"
+local Log = require "LootBox/Log"
 
 local Native = {}
 Native.__index = Native
@@ -335,6 +337,8 @@ local function observeAction(self, state)
     return false, "The native action ended without the expected result"
 end
 
+local SEATED = "Get out of the vehicle to continue"
+
 local function approach(self, state)
     local op = state.op
     if op.location ~= nil or op.locations ~= nil then
@@ -349,7 +353,7 @@ local function approach(self, state)
             return false
         end
         if reached() then return true end
-        if self.player:getVehicle() then return nil, "Exit the vehicle before walking to the destination" end
+        if self.player:getVehicle() then return nil, SEATED, "seated" end
         local action
         if op.locations then
             local targets = {}
@@ -369,13 +373,14 @@ local function approach(self, state)
         if not anchor then return nil, "The container is locked or has no live outer location" end
         local part = anchor.container:getVehiclePart()
         if part then
-            if self.player:getVehicle() then return nil, "Exit the vehicle before approaching another storage part" end
+            if self.player:getVehicle() then return nil, SEATED, "seated" end
             if not part:getArea() then return nil, "The vehicle storage has no native access area" end
             state.pathArrived = false
             local action = ISPathFindAction:pathToVehicleArea(self.player, part:getVehicle(), part:getArea())
             action:setOnComplete(function() state.pathArrived = true end)
             return submitPath(self, state, action, function() return state.pathArrived end, "access")
         end
+        if self.player:getVehicle() then return nil, SEATED, "seated" end
         local object = anchor.object
         if anchor.floorBag then
             local square = anchor.square
@@ -392,10 +397,18 @@ local function approach(self, state)
     if not op.square then return nil, "No approach location was supplied" end
     local arrived = op.exact and onSquare or nearSquare
     if arrived(self.player, op.square) then return true end
-    if self.player:getVehicle() then return nil, "Exit the vehicle before walking to the destination" end
+    if self.player:getVehicle() then return nil, SEATED, "seated" end
     return submitPath(self, state,
         ISPathFindAction:pathToLocationF(self.player, op.square:getX() + 0.5, op.square:getY() + 0.5, op.square:getZ()),
         function() return arrived(self.player, op.square) end, "done")
+end
+
+-- The operation remembers what it unlocked so the owner can lock it again afterwards.
+local function unlock(self, state, vehicle, part, nextPhase)
+    state.op.unlocked = state.op.unlocked or {}
+    table.insert(state.op.unlocked, {vehicle = vehicle, partId = part:getId()})
+    return submit(self, state, ISUnlockVehicleDoor:new(self.player, part),
+        function() return not part:getDoor():isLocked() end, nextPhase)
 end
 
 local function approachAccess(self, state, container, arrivedPhase)
@@ -422,8 +435,7 @@ local function approachAccess(self, state, container, arrivedPhase)
         local door = doorPart:getDoor()
         if door:isLocked() then
             if not vehicle:canUnlockDoor(doorPart, self.player) then return nil, "The storage door is locked; prepare the remembered vehicle first" end
-            return submit(self, state, ISUnlockVehicleDoor:new(self.player, doorPart),
-                function() return not door:isLocked() end, "access")
+            return unlock(self, state, vehicle, doorPart, "access")
         end
         if not door:isOpen() then
             return submit(self, state, ISOpenVehicleDoor:new(self.player, vehicle, doorPart),
@@ -468,6 +480,39 @@ local function closeDriverDoor(self, state, nextPhase)
     return true
 end
 
+-- Locks the parts in op.relock. Parts that refuse a lock from outside are locked
+-- from the driver seat first; the driver door is always last, from outside, because
+-- a locked one would trap the exit.
+local function relockStep(self, state)
+    local vehicle, player = state.op.vehicle, self.player
+    local inside, driver = player:getVehicle() == vehicle, driverDoor(vehicle)
+    local ready, refused = nil, false
+    for _, partId in ipairs(state.op.relock) do
+        local part = vehicle:getPartById(partId)
+        local door = part and part:getInventoryItem() and part:getDoor()
+        if door and not door:isLocked() and not door:isLockBroken()
+            and not (inside and part == driver and state.originalVehicle ~= vehicle) then
+            if vehicle:canLockDoor(part, player) then ready = ready or part
+            elseif part ~= driver then refused = true end
+        end
+    end
+    if refused and not inside and not state.lockedInside then return nil, "seat" end
+    if not ready then
+        state.lockedInside = state.lockedInside or inside
+        state.phase = "restore"
+        return true
+    end
+    local door = ready:getDoor()
+    if not inside and not state.atVehicle and ready:getArea() and not vehicle:isInArea(ready:getArea(), player) then
+        local action = ISPathFindAction:pathToVehicleArea(player, vehicle, ready:getArea())
+        action:setOnComplete(function() state.atVehicle = true end)
+        return submitPath(self, state, action, function() return state.atVehicle == true end, "relock")
+    elseif door:isOpen() then
+        return submit(self, state, ISCloseVehicleDoor:new(player, vehicle, ready), function() return not door:isOpen() end, "relock")
+    end
+    return submit(self, state, ISLockVehicleDoor:new(player, ready), function() return door:isLocked() end, "relock")
+end
+
 local function vehicleStep(self, state)
     local vehicle = state.op.vehicle
     local changed = vehicleChanged(self, state)
@@ -479,14 +524,18 @@ local function vehicleStep(self, state)
             if vehicle:getPartByIndex(index):getItemContainer() then hasStorage = true end
         end
         if not hasStorage then return nil, "The selected vehicle has no item storage" end
-        if not vehicle:isAnyDoorLocked() and not vehicle:isTrunkLocked() then state.phase = "restore"; return true end
+        if state.op.relock then
+            local accepted, reason = relockStep(self, state)
+            if accepted or reason ~= "seat" then return accepted, reason end
+        elseif not vehicle:isAnyDoorLocked() and not vehicle:isTrunkLocked() then state.phase = "restore"; return true end
+        local seated = state.op.relock and "relock" or "unlockDoors"
         if current == vehicle then
-            if vehicle:getSeat(self.player) == 0 then state.phase = "unlockDoors"; return true end
+            if vehicle:getSeat(self.player) == 0 then state.phase = seated; return true end
             if vehicle:isSeatOccupied(0) or not vehicle:canSwitchSeat(vehicle:getSeat(self.player), 0) then
                 return nil, "The driver seat is unavailable for unlocking storage"
             end
             return submit(self, state, ISSwitchVehicleSeat:new(self.player, 0),
-                function() return self.player:getVehicle() == vehicle and vehicle:getSeat(self.player) == 0 end, "unlockDoors")
+                function() return self.player:getVehicle() == vehicle and vehicle:getSeat(self.player) == 0 end, seated)
         end
         if not vehicle:isSeatInstalled(0) or vehicle:isSeatOccupied(0)
             or not vehicle:getPassengerPosition(0, "outside") or vehicle:isEnterBlocked(self.player, 0) then
@@ -508,8 +557,7 @@ local function vehicleStep(self, state)
         local part = driverDoor(vehicle)
         if part and part:getDoor():isLocked() then
             if not vehicle:canUnlockDoor(part, self.player) then return nil, "You cannot unlock the driver door" end
-            return submit(self, state, ISUnlockVehicleDoor:new(self.player, part),
-                function() return not part:getDoor():isLocked() end, "driverOpen")
+            return unlock(self, state, vehicle, part, "driverOpen")
         end
         state.phase = "driverOpen"
     elseif state.phase == "driverOpen" then
@@ -519,10 +567,21 @@ local function vehicleStep(self, state)
         return submit(self, state, ISEnterVehicle:new(self.player, vehicle, 0),
             function() return self.player:getVehicle() == vehicle and vehicle:getSeat(self.player) == 0 end, "closeEntry")
     elseif state.phase == "closeEntry" then
-        return closeDriverDoor(self, state, "unlockDoors")
+        return closeDriverDoor(self, state, state.op.relock and "relock" or "unlockDoors")
+    elseif state.phase == "relock" then
+        local accepted, reason = relockStep(self, state)
+        if reason == "seat" then return nil, "A vehicle door cannot be locked from here" end
+        return accepted, reason
     elseif state.phase == "unlockDoors" then
         if current ~= vehicle or vehicle:getSeat(self.player) ~= 0 then return nil, "The driver seat is no longer available" end
         if vehicle:isAnyDoorLocked() then
+            state.op.unlocked = state.op.unlocked or {}
+            for seat = 0, vehicle:getMaxPassengers() - 1 do
+                local part = vehicle:getPassengerDoor(seat)
+                if part and part:getDoor() and part:getDoor():isLocked() then
+                    table.insert(state.op.unlocked, {vehicle = vehicle, partId = part:getId()})
+                end
+            end
             return submit(self, state, ISLockDoors:new(self.player, vehicle, false),
                 function() return not vehicle:isAnyDoorLocked() end, "unlockTrunk")
         end
@@ -530,8 +589,7 @@ local function vehicleStep(self, state)
     elseif state.phase == "unlockTrunk" then
         local part = vehicle:getPartById("TrunkDoor") or vehicle:getPartById("DoorRear") or vehicle:getPartById("TrunkDoorOpened")
         if part and part:getDoor() and part:getDoor():isLocked() then
-            return submit(self, state, ISUnlockVehicleDoor:new(self.player, part),
-                function() return not part:getDoor():isLocked() end, "restore")
+            return unlock(self, state, vehicle, part, "restore")
         end
         if vehicle:isTrunkLocked() then return nil, "The vehicle's trunk cannot be unlocked through native door actions" end
         state.phase = "restore"
@@ -556,7 +614,7 @@ local function vehicleStep(self, state)
         return submit(self, state, ISExitVehicle:new(self.player),
             function() return self.player:getVehicle() == nil end, "closeExit")
     elseif state.phase == "closeExit" then
-        return closeDriverDoor(self, state, "done")
+        return closeDriverDoor(self, state, state.op.relock and "relock" or "done")
     end
     return true
 end
@@ -633,7 +691,8 @@ local function gearStep(self, state)
             or not main:isItemAllowed(item) or main:isInside(item) then return nil, "The native container rules refuse this gear" end
         if not containerReachable(player, source) then
             local anchor = containerAnchor(player, source)
-            if not anchor or not anchor.square or player:getVehicle() then return nil, "The gear source is unreachable" end
+            if player:getVehicle() then return nil, SEATED, "seated" end
+            if not anchor or not anchor.square then return nil, "The gear source is unreachable" end
             local part = anchor.container:getVehiclePart()
             if part then
                 if state.phase == "access" then return approachAccess(self, state, source, "prepare") end
@@ -726,20 +785,38 @@ function Native:isPlayerBusy()
         or not self.player:getCharacterActions():isEmpty()
 end
 
+-- Returns what the player was told, "combat" when it was a fight, and the trigger for the log.
 function Native:takeoverReason()
     local player = self.player
-    if not player then return "The player is no longer available" end
-    if playerFlag(player, "isDead") then return "The player died" end
-    if playerFlag(player, "isAsleep") then return "Sleeping stopped the job" end
+    if not player then return "The player is no longer available", nil, "no-player" end
+    if playerFlag(player, "isDead") then return "The player died", nil, "death" end
+    if playerFlag(player, "isAsleep") then return "Sleeping stopped the job", nil, "sleep" end
     if playerFlag(player, "pressedAim") or playerFlag(player, "isAiming") then
-        return "Aiming paused the job", "combat"
+        return "Aiming paused the job", "combat", "aim"
     end
     if playerFlag(player, "isAttacking") or playerFlag(player, "isPerformingShoveAnimation") then
-        return "Attacking or shoving paused the job", "combat"
+        return "Attacking or shoving paused the job", "combat", playerFlag(player, "isAttacking") and "attack" or "shove"
     end
     if playerFlag(player, "pressedMovement", false)
         and (playerFlag(player, "isRunning") or playerFlag(player, "isSprinting")) then
-        return "Running or sprinting stopped the job"
+        return "Running or sprinting stopped the job", nil, "run"
+    end
+end
+
+-- True when the player can already use this container without walking.
+function Native:reachable(container)
+    local ok, reachable = pcall(containerReachable, self.player, container)
+    if ok then return reachable == true end
+    Log.fault(self.interaction, "Native.reachable", reachable)
+    return false
+end
+
+-- Deadlines are wall clock, but a paused game runs no ticks.
+function Native:extend(milliseconds)
+    local state = self.active
+    if not state then return end
+    for _, field in ipairs({"deadline", "walkHardDeadline", "walkStamp", "actionGoneAt"}) do
+        if state[field] then state[field] = state[field] + milliseconds end
     end
 end
 
@@ -755,9 +832,9 @@ function Native:begin(op)
     local ok, result, reason, code = pcall(function()
         if op.kind == "approach" then
             op.travel = nil
-            local accepted, err = approach(self, state)
+            local accepted, err, code = approach(self, state)
             if accepted and not state.action then state.phase = "done" end
-            return accepted, err
+            return accepted, err, code
         elseif op.kind == "transfer" then
             if not op.item or not op.source or not op.destination then return nil, "A transfer needs an item, source, and destination" end
             op.resultItem = nil
@@ -861,6 +938,7 @@ function Native:begin(op)
             return vehicleStep(self, state)
         end
     end)
+    if not ok then Log.fault(self.interaction, "Native.begin:" .. op.kind, result, "trace", reason) end
     if not ok or not result then
         stopOwned(self, state)
         self.active = nil
@@ -882,6 +960,7 @@ function Native:cancel(op)
     state.cancelled = true
     state.failure = state.failure or "Cancelled"
     local ok, err = pcall(stopOwned, self, state)
+    if not ok then Log.fault(self.interaction, "Native.stopOwned", err) end
     if not ok then return false, "Could not stop the owned native action: " .. tostring(err) end
     return true
 end
@@ -972,7 +1051,9 @@ function Native:poll()
     if not state then return true end
     local ok, result, reason, code = pcall(poll, self, state)
     if ok then return result, reason, code end
-    pcall(stopOwned, self, state)
+    Log.fault(self.interaction, "Native.poll:" .. state.op.kind, result, "trace", reason)
+    local stopped, problem = pcall(stopOwned, self, state)
+    if not stopped then Log.fault(self.interaction, "Native.stopOwned", problem) end
     return finish(self, state, false, "Native operation error: " .. tostring(result))
 end
 

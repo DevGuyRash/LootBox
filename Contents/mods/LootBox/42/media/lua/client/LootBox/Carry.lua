@@ -1,15 +1,8 @@
+local Log = require "LootBox/Log"
+local call = require "LootBox/Safe"
+
 local Carry = {}
 Carry.__index = Carry
-
-local function call(value, name, ...)
-    if not value then return nil end
-    local args = {...}
-    local ok, result = pcall(function()
-        local method = value[name]
-        return method and method(value, unpack(args))
-    end)
-    if ok then return result end
-end
 
 local function bag(item) return call(item, "IsInventoryContainer") == true end
 local function identity(item) return tostring(call(item, "getID")) .. ":" .. tostring(call(item, "getFullType")) end
@@ -59,7 +52,8 @@ function Carry.prototype(fullType)
     local menu = ISInventoryPaneContextMenu
     if not menu or not menu.getItemInstance then return nil end
     local ok, item = pcall(menu.getItemInstance, fullType)
-    return ok and item or nil
+    if ok then return item end
+    Log.fault(nil, "Carry.prototype", item, "type", fullType)
 end
 
 function Carry.permittedVariant(item, fullType)

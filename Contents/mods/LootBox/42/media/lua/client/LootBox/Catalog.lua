@@ -1,3 +1,5 @@
+local Sort = require "LootBox/Sort"
+
 local Catalog = {}
 
 local function rawCategory(item)
@@ -19,11 +21,7 @@ local function categoryName(raw)
     return translated
 end
 
-local function ordered(left, right)
-    local a, b = string.lower(left.name), string.lower(right.name)
-    if a ~= b then return a < b end
-    return (left.id or left.fullType) < (right.id or right.fullType)
-end
+local function ordered(entry) return string.lower(entry.name), entry.id or entry.fullType end
 
 function Catalog.read()
     if type(getAllItems) ~= "function" then return nil, "The game item catalog is not available yet" end
@@ -50,8 +48,8 @@ function Catalog.read()
             end
         end
     end
-    table.sort(result.items, ordered)
-    table.sort(result.categories, ordered)
+    Sort(result.items, ordered)
+    Sort(result.categories, ordered)
     return result
 end
 

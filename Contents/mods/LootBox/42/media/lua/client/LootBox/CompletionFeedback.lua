@@ -1,3 +1,5 @@
+local Log = require "LootBox/Log"
+
 local Feedback = {}
 
 local function countLabel(count, unit, action)
@@ -12,7 +14,7 @@ local function show(player, title, detail, elapsed, status, note)
         hud.show(player:getPlayerNum(), {brand = "LOOTBOX", theme = "loot", title = title,
             detail = table.concat(detail, " | "), status = status, note = note})
     end)
-    if not ok then print("[LootBox] Completion card unavailable: " .. tostring(failure)) end
+    if not ok then Log.fault(nil, "CompletionFeedback", failure) end
 end
 
 function Feedback.job(player, plan, view, measured, stamp)
