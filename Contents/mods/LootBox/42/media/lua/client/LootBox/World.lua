@@ -1,6 +1,7 @@
 local Catalog = require "LootBox/Catalog"
 local Survey = require "LootBox/Survey"
 local Facts = require "LootBox/Facts"
+local Items = require "LootBox/Items"
 local Log = require "LootBox/Log"
 local call = require "LootBox/Safe"
 local Sort = require "LootBox/Sort"
@@ -11,6 +12,7 @@ for name, method in pairs(Facts) do World[name] = method end
 
 local MAX_SQUARES = 16384
 local DISCOVERY_RADIUS = 12
+local PRUNE_MS = 60000
 
 local function nativeInteger(value)
     return type(value) == "number" and value == value and math.abs(value) <= 2147483647 and value == math.floor(value)
@@ -170,6 +172,65 @@ local function itemTypes(container)
     Log.fault(nil, "World.itemTypes", map)
 end
 
+-- Identical objects on one tile are told apart by their order among themselves.
+local function rankOf(objects, object, sprite)
+    local rank = 0
+    for index = 0, size(objects) - 1 do
+        local other = at(objects, index)
+        if other == object then return rank end
+        if spriteName(other) == sprite then rank = rank + 1 end
+    end
+    return 0
+end
+
+local function objectsOf(square, corpse) return call(square, corpse and "getStaticMovingObjects" or "getObjects") end
+
+-- Saved keys once held the object's index, which any dropped item shifts.
+local function oldKey(key)
+    local where, index, rest = tostring(key):match("^(%a+:%-?%d+:%-?%d+:%-?%d+:)(%d+)(:.*)$")
+    return where, tonumber(index), rest
+end
+
+-- lower lists the indexes other saved keys give to objects that look the same.
+local function currentKey(key, lower)
+    local where, index, rest = oldKey(key)
+    if not where then return key end
+    local rank = 0
+    for _, other in ipairs(lower or {}) do if other < index then rank = rank + 1 end end
+    local kind, x, y, z = where:match("^(%a+):(.-):(.-):(.-):")
+    local cell = getCell and getCell()
+    local square = cell and cell:getGridSquare(tonumber(x), tonumber(y), tonumber(z))
+    local objects, sprite = square and objectsOf(square, kind == "corpse"), rest:match("^:(.*):%d+:[^:]*$")
+    local object = index < size(objects) and at(objects, index) or nil
+    if object and spriteName(object) == sprite then rank = rankOf(objects, object, sprite) end
+    return where .. "#" .. rank .. rest
+end
+
+local function upgradeKeys(stores)
+    local alike, renamed, seen, count = {}, {}, {}, 0
+    for _, store in ipairs(stores) do
+        for key in pairs(store) do
+            local where, index, rest = oldKey(key)
+            if where and not seen[key] then
+                seen[key], count = true, count + 1
+                alike[where .. rest] = alike[where .. rest] or {}
+                table.insert(alike[where .. rest], index)
+            end
+        end
+    end
+    for key in pairs(seen) do
+        local where, _, rest = oldKey(key)
+        renamed[key] = currentKey(key, alike[where .. rest])
+    end
+    for _, store in ipairs(stores) do
+        for old, key in pairs(renamed) do
+            if store[key] == nil then store[key] = store[old] end
+            store[old] = nil
+        end
+    end
+    return count
+end
+
 function World.new(player, state)
     state.containerLabels = state.containerLabels or {}
     state.itemLabels = state.itemLabels or {}
@@ -181,37 +242,27 @@ function World.new(player, state)
         end
     end
     for _, memory in pairs(state.trash) do if type(memory) == "table" then memory.used = nil end end
+    local upgraded = upgradeKeys({state.containerLabels, state.trash})
+    if upgraded > 0 then Log.info(nil, "KEYS-UPGRADED", "count", upgraded, "reason", "the object index is now the order among identical objects") end
     return setmetatable({player = player, state = state, endpoints = {}, anchors = {}, vehicles = {}, containerKeys = {},
-        inspectedTrash = {}, binUsed = {}}, World)
+        inspectedTrash = {}, binUsed = {}, moving = {}, dirty = upgraded > 0 or nil}, World)
 end
 
--- Runs fn with vehicle identities resolved once for every key it asks for.
+World.currentKey = currentKey
+
+-- Runs fn with vehicle identities resolved at most once for every key it asks for.
 function World:pass(fn)
-    if self.identities then return fn() end
-    self.identities = vehicleIdentities()
+    if self.passing then return fn() end
+    self.passing = true
     local ok, a, b = pcall(fn)
-    self.identities = nil
+    self.passing, self.identities = nil, nil
     if not ok then error(a, 0) end
     return a, b
 end
 
--- Drops label IDs that valid(id) refuses, and lists left empty. Returns how many IDs were dropped.
-function World:pruneLabels(valid)
-    local dropped = 0
-    for _, field in ipairs({"containerLabels", "itemLabels"}) do
-        for key, ids in pairs(self.state[field]) do
-            local kept = {}
-            for _, id in ipairs(ids) do
-                if valid(id) then kept[#kept + 1] = id else dropped = dropped + 1 end
-            end
-            if #kept ~= #ids or #kept == 0 then
-                self.state[field][key] = #kept > 0 and kept or nil
-                self.dirty = true
-            end
-        end
-    end
-    if dropped > 0 then Log.info(nil, "LABELS-PRUNED", "count", dropped) end
-    return dropped
+-- A carried item by its identity, in whatever object now represents it, and its container.
+function World:carried(id, fullType)
+    return Items.eachCarried(self.player, function(item) return item:getID() == id and tostring(item:getFullType()) == fullType end)
 end
 
 function World:itemId(item)
@@ -551,7 +602,9 @@ function World:_rawKey(container)
         local keyId, script = vehicleIdentity(vehicle)
         if not keyId then return nil, "Vehicle has no usable native key identity" end
         local resolved, err
-        if self.identities then resolved, err = self.identities[keyId .. ":" .. script], "Vehicle key is ambiguous or no longer loaded"
+        if self.passing then
+            self.identities = self.identities or vehicleIdentities()
+            resolved, err = self.identities[keyId .. ":" .. script], "Vehicle key is ambiguous or no longer loaded"
         else resolved, err = uniqueVehicle(keyId, script, vehicle) end
         if resolved ~= vehicle then return nil, err end
         return "vehicle:" .. tostring(keyId) .. ":" .. script .. ":" .. tostring(call(part, "getId"))
@@ -561,11 +614,11 @@ function World:_rawKey(container)
     local square = self:square(container)
     local point = squareId(square)
     if not parent or not point then return nil, "Container has no loaded world anchor" end
-    local slot = call(parent, "getContainerIndex", container)
-    local index = instance(parent, "IsoDeadBody") and call(parent, "getStaticMovingObjectIndex") or call(parent, "getObjectIndex")
+    local slot, corpse = call(parent, "getContainerIndex", container), instance(parent, "IsoDeadBody")
+    local index = call(parent, corpse and "getStaticMovingObjectIndex" or "getObjectIndex")
     if slot == nil or index == nil or slot < 0 or index < 0 then return nil, "Container is no longer in the world" end
-    local kind = instance(parent, "IsoDeadBody") and "corpse" or "world"
-    return kind .. ":" .. point .. ":" .. tostring(index) .. ":" .. spriteName(parent)
+    local sprite = spriteName(parent)
+    return (corpse and "corpse:" or "world:") .. point .. ":#" .. rankOf(objectsOf(square, corpse), parent, sprite) .. ":" .. sprite
         .. ":" .. tostring(slot) .. ":" .. tostring(call(container, "getType"))
 end
 
@@ -573,17 +626,21 @@ function World:key(container)
     local key, failure = self:_rawKey(container)
     if not key then return nil, failure end
     local previous = self.containerKeys[container]
-    if previous and previous ~= key then
-        if previous:sub(1, 8) ~= "vehicle:" then
+    if previous and previous ~= key and not self.moving[container] then
+        self.moving[container] = true
+        local holder = self.endpoints[key]
+        if holder and holder ~= container then self:key(holder); holder = self.endpoints[key] end
+        -- A container that moved up takes its labels along, in place of the removed twin's.
+        if previous:sub(1, 8) ~= "vehicle:" and (not holder or holder == container or not self:valid(holder)) then
             for _, store in ipairs({self.state.containerLabels, self.state.trash}) do
-                if store[previous] ~= nil then self.dirty = true end
-                if store[previous] ~= nil and store[key] == nil then store[key] = store[previous] end
-                store[previous] = nil
+                if store[previous] ~= nil or store[key] ~= nil then self.dirty = true end
+                store[key], store[previous] = store[previous], nil
             end
             self.inspectedTrash[previous] = nil
+            self.anchors[key] = self.anchors[previous]
         end
-        self.endpoints[previous] = nil
-        self.anchors[previous] = nil
+        if self.endpoints[previous] == container then self.endpoints[previous], self.anchors[previous] = nil, nil end
+        self.moving[container] = nil
     end
     self.containerKeys[container] = key
     return key
@@ -840,28 +897,6 @@ function World:scan(request)
 end
 
 function World:_request(request)
-    if request.sourceLabels ~= nil then
-        if type(request.sourceLabels) ~= "table" then return nil, "Source labels must be a list" end
-        local count = 0
-        for index, id in pairs(request.sourceLabels) do
-            if not nativeInteger(index) or index < 1 or index > #request.sourceLabels or type(id) ~= "string" then
-                return nil, "Source labels must be a dense list of category IDs"
-            end
-            count = count + 1
-        end
-        if count ~= #request.sourceLabels then return nil, "Source labels must be a dense list of category IDs" end
-    end
-    if request.scope == "lootPane" then
-        if type(request.sourceContainers) ~= "table" then return nil, "Choose the visible loot containers" end
-        local count = 0
-        for index in pairs(request.sourceContainers) do
-            if not nativeInteger(index) or index < 1 or index > #request.sourceContainers then
-                return nil, "Visible loot containers must form a dense list"
-            end
-            count = count + 1
-        end
-        if count ~= #request.sourceContainers then return nil, "Visible loot containers must form a dense list" end
-    end
     if request.scope == "building" then
         local current = call(self.player, "getCurrentSquare")
         local definition = call(call(current, "getBuilding"), "getDef")
@@ -1008,10 +1043,25 @@ function World:sourceAnchor(container, visited)
     end
     local parent, square = call(container, "getParent"), self:square(container)
     if not parent or not square then return nil end
-    local corpse = instance(parent, "IsoDeadBody")
-    return {kind = corpse and "corpse" or "world", point = position(square), sprite = spriteName(parent), parent = parent, square = square,
+    local corpse, sprite = instance(parent, "IsoDeadBody"), spriteName(parent)
+    return {kind = corpse and "corpse" or "world", point = position(square), sprite = sprite, parent = parent, square = square,
         index = call(parent, corpse and "getStaticMovingObjectIndex" or "getObjectIndex"),
+        rank = rankOf(objectsOf(square, corpse), parent, sprite),
         slot = call(parent, "getContainerIndex", container), containerType = call(container, "getType")}
+end
+
+local function findObject(square, anchor)
+    local objects, same = objectsOf(square, anchor.kind == "corpse"), {}
+    for index = 0, size(objects) - 1 do
+        local object = at(objects, index)
+        if spriteName(object) == anchor.sprite then
+            -- Saved receipts name the index.
+            if not anchor.rank and index == anchor.index then return object end
+            same[#same + 1] = object
+        end
+    end
+    if anchor.rank then return same[anchor.rank + 1] end
+    return #same == 1 and same[1] or nil
 end
 
 function World:resolveSource(anchor)
@@ -1058,15 +1108,11 @@ function World:resolveSource(anchor)
         end
         return nil, "Ground source bag changed after preview"
     end
-    local objects = call(square, anchor.kind == "corpse" and "getStaticMovingObjects" or "getObjects")
-    local object = nativeInteger(anchor.index) and at(objects, anchor.index)
+    local object = anchor.square == square and anchor.parent or findObject(square, anchor)
     local container = object and nativeInteger(anchor.slot) and call(object, "getContainerByIndex", anchor.slot)
     if container and spriteName(object) == anchor.sprite and call(container, "getType") == anchor.containerType
-        and self:valid(container) then
-        if anchor.square == square and anchor.parent ~= object then return nil, "Source storage was replaced after preview" end
-        return container
-    end
-    return nil, "Source storage changed after preview"
+        and self:valid(container) then return container end
+    return nil, "That storage was replaced or removed"
 end
 
 function World:sectionTarget(section)
@@ -1205,14 +1251,22 @@ function World:_discover()
     for _, record in ipairs(self:records(call(self.player, "getInventory"), true)) do
         if isBag(record.item) then self:_observe(call(record.item, "getInventory")) end
     end
+    self:prune()
+end
+
+-- Forgets containers that are gone or unloaded. Kahlua has no weak tables to do it.
+function World:prune()
     for key, container in pairs(self.endpoints) do
         if not self:valid(container) then
             self.endpoints[key] = nil
-            self.containerKeys[container] = nil
             self.inspectedTrash[key] = nil
             if self.state.containerLabels[key] == nil and self.state.trash[key] == nil then self.anchors[key] = nil end
         end
     end
+    for container in pairs(self.containerKeys) do
+        if not self:valid(container) then self.containerKeys[container] = nil end
+    end
+    self.prunedAt = getTimestampMs()
 end
 
 local SIGHT = 8
@@ -1238,6 +1292,11 @@ function World:noticeBins(cell, x, y, z)
 end
 
 function World:observeNearby()
+    if getTimestampMs() - (self.prunedAt or 0) >= PRUNE_MS then self:prune() end
+    return self:pass(function() return self:_observeNearby() end)
+end
+
+function World:_observeNearby()
     local changed = self.dirty == true
     self.dirty = false
     local current = call(self.player, "getCurrentSquare") or call(self.player, "getSquare")
@@ -1499,12 +1558,19 @@ function World:matchingTargets(mode, records)
     return result
 end
 
-function World:matchingRecords(mode)
+-- Everything carried, in the order the game's own matching buttons use.
+function World:matchingSources()
     local scan, err = self:scan({scope = "inventory", includeBags = true})
-    if not scan then return nil, nil, err end
-    local ordered
-    ordered, err = self:matchingOrder(scan.items)
-    if not ordered then return nil, nil, err end
+    if not scan then return nil, err end
+    return self:matchingOrder(scan.items)
+end
+
+function World:matchingRecords(mode, ordered)
+    local err
+    if not ordered then
+        ordered, err = self:matchingSources()
+        if not ordered then return nil, nil, err end
+    end
     local targets
     targets, err = self:matchingTargets(mode, ordered)
     if not targets then return nil, nil, err end

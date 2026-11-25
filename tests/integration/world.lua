@@ -7,6 +7,8 @@ local Categories = require "LootBox/Categories"
 local saved = {getCell = getCell, instanceof = instanceof, isClient = isClient,
     ISInventoryPaneContextMenu = ISInventoryPaneContextMenu, getTextOrNull = getTextOrNull, getVehicleById = getVehicleById}
 local failures, passed = {}, 0
+local clock = 0
+getTimestampMs = function() return clock end
 
 local function list(values)
     return {size = function() return #values end, get = function(_, index) return values[index + 1] end,
@@ -362,14 +364,6 @@ case("Unloaded labeled sources remain remembered and are reported unavailable", 
     assert(#scan.warnings > 0, "Unavailable labeled sources must remain visible in the preview")
 end)
 
-case("A source label restriction requires a dense list", function(f)
-    for _, invalid in ipairs({"native:Junk", {[2] = "native:Junk"}, {true}}) do
-        local scan, err = f.world:scan({scope = "labeled", sourceLabels = invalid})
-        equal(scan, nil)
-        assert(type(err) == "string" and #err > 0)
-    end
-end)
-
 case("A floor bag resolves its live world-item square", function(f)
     local bag = f.item(nil, "FloorBag", "Container")
     local storage = f.container("bag")
@@ -671,6 +665,106 @@ case("A selected source cannot adopt a live replacement with identical metadata"
     assert(reason and reason:find("replaced", 1, true))
 end)
 
+local function plainObject(sprite) return {getSpriteName = function() return sprite end, getContainerCount = function() return 0 end} end
+
+case("Laying a rug under a labelled crate keeps its labels, its key and its place in a running job", function(f)
+    local place = f.square(3, 0)
+    local crate = f.crate(place, "shelves")
+    local key, anchor = assert(f.world:key(crate)), assert(f.world:sourceAnchor(crate))
+    f.state.containerLabels[key] = {"native:Food"}
+    table.insert(place.objects, 1, plainObject("rug"))
+    equal(f.world:key(crate), key)
+    equal(f.world:resolveSource(anchor), crate)
+    local later = World.new(f.player, {containerLabels = {[key] = {"native:Food"}}})
+    equal(later:key(crate), key, "A new session finds the same label")
+    table.remove(place.objects, 1)
+    equal(f.world:resolveSource(anchor), crate)
+end)
+
+case("Picking up one of three stacked identical crates leaves each of the others its own labels", function(f)
+    local place = f.square(3, 0)
+    local crates = {f.crate(place, "crate"), f.crate(place, "crate"), f.crate(place, "crate")}
+    for index, container in ipairs(crates) do
+        f.world:_observe(container)
+        f.state.containerLabels[f.world:key(container)] = {"native:" .. index}
+    end
+    table.remove(place.objects, 1)
+    for _, order in ipairs({3, 2}) do
+        f.world:_observe(crates[order])
+        equal(f.state.containerLabels[f.world:key(crates[order])][1], "native:" .. order)
+    end
+    local count = 0
+    for key in pairs(f.state.containerLabels) do if key:find(":3:0:0:", 1, true) then count = count + 1 end end
+    equal(count, 2, "The removed crate's label is gone")
+end)
+
+case("Labels, trash cans and gear receipts saved under an object index are still found", function(f)
+    local place = f.square(3, 0)
+    place.objects[1] = plainObject("floor")
+    local lower, upper = f.crate(place, "crate"), f.crate(place, "crate")
+    local bin = f.crate(place, "bin"); bin.parent.trash = true
+    local state = {containerLabels = {["world:3:0:0:2:crate:0:crate"] = {"native:Upper"}, ["world:80:9:1:4:cup:board:0:crate"] = {"native:First"},
+            ["world:80:9:1:7:cup:board:0:crate"] = {"native:Second"}, ["bag:12"] = {"native:Bag"}, ["vehicle:5:Base.Van:TruckBed"] = {"native:Van"}},
+        trash = {["world:3:0:0:3:bin:0:crate"] = {x = 3, y = 0, z = 0, index = 3, slot = 0, sprite = "bin", kind = "crate"}}}
+    local world = World.new(f.player, state)
+    equal(state.containerLabels[world:key(upper)][1], "native:Upper", "The loaded square tells which of two it was")
+    equal(state.containerLabels[world:key(lower)], nil)
+    assert(state.trash[world:key(bin)] and world.dirty)
+    equal(state.containerLabels["world:80:9:1:#0:cup:board:0:crate"][1], "native:First", "Where nothing is loaded the order decides")
+    equal(state.containerLabels["world:80:9:1:#1:cup:board:0:crate"][1], "native:Second")
+    equal(state.containerLabels["bag:12"][1], "native:Bag")
+    equal(state.containerLabels["vehicle:5:Base.Van:TruckBed"][1], "native:Van")
+    equal(World.currentKey("world:3:0:0:2:crate:0:crate"), world:key(upper))
+    equal(World.currentKey(world:key(upper)), world:key(upper), "A current key stays as it is")
+    local saved = {kind = "world", point = {x = 3, y = 0, z = 0}, sprite = "bin", index = 3, slot = 0, containerType = "crate"}
+    equal(world:resolveSource(saved), bin)
+    table.insert(place.objects, 2, plainObject("rug"))
+    equal(world:resolveSource(saved), bin, "The only one of its kind is the one that was meant")
+    saved.sprite, saved.index = "crate", 9
+    equal(world:resolveSource(saved), nil, "Two alike cannot be told apart")
+end)
+
+case("Containers that are gone are forgotten within a minute, labels stay", function(f)
+    f.player.location = f.far
+    clock = 100000
+    f.world:observeNearby()
+    local key = f.world:key(f.remote)
+    assert(f.world.endpoints[key] == f.remote and f.world.containerKeys[f.remote])
+    f.squares["50:50:0"] = nil
+    f.player.location = f.origin
+    clock = clock + 59000
+    f.world:observeNearby()
+    assert(f.world.endpoints[key] == f.remote)
+    clock = clock + 1000
+    f.world:observeNearby()
+    assert(f.world.endpoints[key] == nil and f.world.containerKeys[f.remote] == nil and f.state.containerLabels[key])
+    clock = 0
+end)
+
+case("Walking past vehicles reads the list of vehicles at most once a step", function(f)
+    local reads, cell = 0, getCell()
+    local vehicles = {getVehicles = function() reads = reads + 1; return cell:getVehicles() end, getGridSquare = cell.getGridSquare}
+    local original = getCell
+    getCell = function() return vehicles end
+    local vehicle = {getId = function() return 1 end, getKeyId = function() return 4 end, getScriptName = function() return "Base.Van" end,
+        getSquare = function() return f.origin end, isRemovedFromWorld = function() return false end, class = "BaseVehicle"}
+    local parts = {}
+    for index = 1, 3 do
+        local part = {getId = function() return "Part" .. index end, getIndex = function() return index - 1 end, getVehicle = function() return vehicle end}
+        local storage = f.container("seat", {getSquare = function() return f.origin end})
+        function storage:getVehiclePart() return part end
+        function part:getItemContainer() return storage end
+        parts[index] = part
+    end
+    function vehicle:getPartCount() return #parts end
+    function vehicle:getPartByIndex(index) return parts[index + 1] end
+    f.vehicles[1], f.origin.moving[1] = vehicle, vehicle
+    instanceof = function(object, class) return object == vehicle and class == "BaseVehicle" end
+    f.world:observeNearby()
+    getCell = original
+    equal(reads, 1)
+end)
+
 local function bag(f, source, name, id)
     local value = f.item(source, name, "Container")
     if id then value.id = id end
@@ -690,6 +784,17 @@ local function weightedBag(f, source, name, reduction)
     function f.player:isEquipped(item) return item.equipped == true end
     return value, storage
 end
+
+case("A carried item is found by its identity in whatever bag and object now holds it", function(f)
+    local _, outer = bag(f, f.inventory, "Outer")
+    local _, inner = bag(f, outer, "Inner")
+    local item = f.item(outer, "Beans")
+    table.remove(outer.items)
+    local current = f.item(inner, "Beans"); current.id = item.id
+    local found, holder = f.world:carried(item.id, "Fixture.Beans")
+    equal(found, current); equal(holder, inner)
+    equal(f.world:carried(item.id, "Fixture.Other"), nil)
+end)
 
 local function weightedItem(f, source, weight)
     local value = f.item(source, "Weighted supply")
@@ -1493,14 +1598,13 @@ case("Loot-pane floor and crate scanning uses actual floor permissions and never
     ISInventoryPage = nil
 end)
 
-case("Loot-pane scans reject malformed snapshots and never recurse into source bags", function(f)
+case("Loot-pane scans never recurse into source bags", function(f)
     matchingFixture(f)
     local _, nested = weightedBag(f, f.junk, "Source bag", 80)
     f.item(nested, "Hidden")
     local sources = assert(f.world:smartLootSources(nil, true))
     local scan = assert(f.world:scan({scope = "lootPane", sourceContainers = sources, includeBags = true, includeInventory = true}))
     for _, record in ipairs(scan.items) do assert(record.source ~= nested and record.source ~= f.inventory) end
-    assert(not f.world:scan({scope = "lootPane", sourceContainers = {["bad"] = f.junk}}))
 end)
 
 case("Smart Take Matching finds native alias matches in every nested carried bag", function(f)

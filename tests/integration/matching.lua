@@ -26,8 +26,9 @@ end
 
 package.loaded["ISUI/InventoryWindow/ISInventoryWindowContainerControls"] = true
 package.loaded["ISUI/LootWindow/ISLootWindowContainerControls"] = true
+package.loaded["LootBox/Act"] = {moving = function(player) return player.moving == true end}
 package.loaded["LootBox/App"] = {
-    getPreferences = function() return current.preferences, current.preferenceError end,
+    getPreferences = function() error("Asked every frame; the preferences must not be copied") end,
     preference = function(key) if current.preferences[key] == nil then return key == "smartTakeAllContainers" or nil end return current.preferences[key] end,
     get = function(playerNum) current.appPlayer = playerNum; return current.app end,
 }
@@ -65,8 +66,8 @@ local function fixture()
         setItemsToHighlight = f.inventoryPane.setItemsToHighlight}}
     f.player = {getInventory = function() return inventory end,
         getCurrentSquare = function() return not f.noSquare and {} or nil end}
-    f.app = {world = {matchingRecords = function(_, mode)
-        f.calls, f.lastMode = f.calls + 1, mode
+    f.app = {world = {matchingSources = function() f.reads = (f.reads or 0) + 1; return f.records end, matchingRecords = function(_, mode, ordered)
+        f.calls, f.lastMode, f.lastOrdered = f.calls + 1, mode, ordered
         if f.matchingError then return nil, nil, f.matchingError end
         return f.records, f.targets or {}
     end, smartLootRecords = function(_, mode, source, allContainers)
@@ -481,6 +482,20 @@ test("matching buttons appear only while something matches, without rescanning e
     changed(f)
     assert(not handler:shouldBeVisible() and f.calls == 2)
     f.inventoryWindow.isCollapsed = nil
+end)
+
+test("the buttons share one reading of what is carried, and none while walking", function(f)
+    local one, two = f:handler("displayed"), f:handler("nearby")
+    assert(one:shouldBeVisible() and two:shouldBeVisible())
+    assert(f.reads == 1 and f.calls == 2 and f.lastOrdered == f.records)
+    f.player.moving = true
+    changed(f); one:shouldBeVisible(); two:shouldBeVisible()
+    assert(f.reads == 1 and f.calls == 2)
+    f.player.moving = false
+    one:shouldBeVisible(); two:shouldBeVisible()
+    assert(f.reads == 2 and f.calls == 4)
+    one:perform()
+    assert(f.reads == 2 and f.calls == 5 and f.lastOrdered == nil, "A click reads afresh")
 end)
 
 test("a click with nothing to do says so and starts nothing", function(f)

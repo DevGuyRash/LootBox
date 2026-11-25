@@ -7,6 +7,7 @@ if not available or not ISInventoryWindowControlHandler or not ISInventoryWindow
     return Matching
 end
 
+local Act = require "LootBox/Act"
 local App = require "LootBox/App"
 local Log = require "LootBox/Log"
 local Handler = ISInventoryWindowControlHandler:derive("LootBoxMatchingTransfer")
@@ -31,6 +32,18 @@ local function peerPresent(mode)
     return false
 end
 
+-- What is carried, read once for all the buttons that ask about the same moment.
+local carried = {}
+local function carriedNow(playerNum, app, seen)
+    local known = carried[playerNum]
+    if not known or known.seen ~= seen or known.app ~= app then
+        known = {seen = seen, app = app}
+        known.records, known.error = app.world:matchingSources()
+        carried[playerNum] = known
+    end
+    return known.records, known.error
+end
+
 -- Buttons appear only while they have something to do. The answer is kept for
 -- a moment because the windows ask every frame.
 local function worthwhile(self, count)
@@ -42,10 +55,11 @@ local function worthwhile(self, count)
     local seen = tostring(inventory and inventory.inventoryPane and inventory.inventoryPane.refreshContainerCount) .. ":"
         .. tostring(loot and loot.inventoryPane and loot.inventoryPane.refreshContainerCount)
     local first = self.worthwhile == nil or self.checkedFor ~= self.container
-    -- A running job changes containers constantly; the answer can wait for it.
-    if first or (self.checkedSeen ~= seen and stamp - self.checkedAt >= 700 and not (app.active and app:active())) then
+    -- Walking and running jobs change containers constantly; the answer can wait for them.
+    if first or (self.checkedSeen ~= seen and stamp - self.checkedAt >= 700 and not Act.moving(self.playerObj)
+        and not (app.active and app:active())) then
         self.checkedAt, self.checkedFor, self.checkedSeen = stamp, self.container, seen
-        self.worthwhile = Log.guard(self.Type, count, self) == true
+        self.worthwhile = Log.guard(self.Type, count, self, seen) == true
     end
     return self.worthwhile
 end
@@ -57,14 +71,13 @@ end
 
 function Handler:shouldBeVisible()
     if getCore():isTutorial() or not peerPresent(self.mode) then return hidden(self) end
-    local preferences = App.getPreferences()
-    if preferences.matchingTransferButtons == false then return hidden(self) end
+    if App.preference("matchingTransferButtons") == false then return hidden(self) end
     local player = self.playerObj
     local loot = getPlayerLoot(self.playerNum)
     if not player or not player:getCurrentSquare() or not loot or not loot.inventoryPane or not loot.inventoryPane.inventory then return hidden(self) end
     if player:getInventory():isEmpty() then return hidden(self) end
     if self.mode == "displayed" and loot.inventoryPane.inventory:isEmpty() then return hidden(self) end
-    if not worthwhile(self, function(handler) return #(handler:getItemsToTransfer()) > 0 end) then return hidden(self) end
+    if not worthwhile(self, function(handler, seen) return #(handler:getItemsToTransfer(seen)) > 0 end) then return hidden(self) end
     return true
 end
 
@@ -80,10 +93,13 @@ function Handler:getControl()
     return button
 end
 
-function Handler:getItemsToTransfer()
+-- seen lets the buttons share one reading of what is carried; a click always reads afresh.
+function Handler:getItemsToTransfer(seen)
     local app = App.get(self.playerNum)
     if not app then return {}, {} end
-    local records, _, err = app.world:matchingRecords(self.mode)
+    local records, ordered, err, _
+    if seen then ordered, err = carriedNow(self.playerNum, app, seen) end
+    if ordered or not seen then records, _, err = app.world:matchingRecords(self.mode, ordered) end
     self.matchingError = err
     local items, selected = {}, {}
     for _, record in ipairs(records or {}) do
@@ -156,17 +172,15 @@ function Condense:shouldBeVisible()
         if class.Type == "ISInventoryWindowControlHandler_TransferAll" then peer = true; break end
     end
     if not peer then return false end
-    local preferences = App.getPreferences()
-    if preferences.condenseButton == false then return false end
+    if App.preference("condenseButton") == false then return false end
     local player = self.playerObj
     return player ~= nil and player:getCurrentSquare() ~= nil and not player:getInventory():isEmpty()
 end
 
 function Condense:getControl()
-    local preferences = App.getPreferences()
-    local mode = preferences.condenseRebalance and "Optimize bag contents" or "Pack main inventory, heaviest first"
-    local scope = preferences.condenseUseUnequipped and "Equipped and unequipped carried bags" or "Equipped bags only"
-    local nested = preferences.condenseNested and "Nested contents included" or "Nested contents left in place"
+    local mode = App.preference("condenseRebalance") and "Optimize bag contents" or "Pack main inventory, heaviest first"
+    local scope = App.preference("condenseUseUnequipped") and "Equipped and unequipped carried bags" or "Equipped bags only"
+    local nested = App.preference("condenseNested") and "Nested contents included" or "Nested contents left in place"
     local button = self:getButtonControl("Condense")
     button:setTooltip(mode .. ".\n" .. scope .. ". " .. nested
         .. ".\nThe bags themselves stay where they are.")
@@ -188,8 +202,7 @@ local SmartTake = ISInventoryWindowControlHandler:derive("LootBoxSmartTake")
 
 function SmartTake:shouldBeVisible()
     if getCore():isTutorial() then return hidden(self) end
-    local preferences = App.getPreferences()
-    if preferences.matchingTransferButtons == false then return hidden(self) end
+    if App.preference("matchingTransferButtons") == false then return hidden(self) end
     local list = self.floor and ISLootWindowContainerControls_FloorHandlerList or ISLootWindowContainerControls_HandlerList
     local present = false
     for _, class in ipairs(list or {}) do if class.Type == self.peer then present = true; break end end

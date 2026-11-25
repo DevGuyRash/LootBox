@@ -15,8 +15,6 @@ local PaneClicks = require "LootBox/PaneClicks"
 
 local Menus = {}
 local UI
-local wrapped = setmetatable({}, { __mode = "k" })
-local invoking = setmetatable({}, { __mode = "k" })
 local ownNoItems = false
 
 local icons = {
@@ -191,8 +189,9 @@ local function everything() return { ids = {}, types = {}, all = true } end
 local function oneType(fullType) return { ids = {}, types = { fullType }, all = false } end
 local function oneCategory(id) return { ids = { id }, types = {}, all = false } end
 
+-- Taking everything takes a bag with what is in it.
 local function request(scope, kind, filter, extra)
-    local result = { scope = scope, includeInventory = false, includeBags = true, filter = filter, sourceLabels = {}, destination = { kind = kind, labels = {} } }
+    local result = { scope = scope, includeInventory = false, includeBags = not (kind == "inventory" and filter.all), filter = filter, sourceLabels = {}, destination = { kind = kind, labels = {} } }
     for key, value in pairs(extra or {}) do
         if key == "ref" or key == "mode" then result.destination[key] = value else result[key] = value end
     end
@@ -221,7 +220,11 @@ local function ask(s, origin, label, clicked, action)
     end
 end
 
-local function floorHere(s) return s.square or s.player:getCurrentSquare() end
+-- Nobody can stand where a fixture is, so its contents are dropped at the player's feet.
+local function floorHere(s)
+    if s.square and call(s.square, "isFree", false) == true then return s.square end
+    return s.player:getCurrentSquare()
+end
 
 -- The job in progress ------------------------------------------------------
 
@@ -738,9 +741,9 @@ function Menus.refreshContainers(page, phase)
     PaneClicks.attach(page.inventoryPane)
     for _, button in ipairs(page.backpacks or {}) do
         local previous = button.onRightMouseDown
-        if previous and previous ~= wrapped[button] then
+        if previous and previous ~= button.lootBoxRightClick then
             local function onRightMouseDown(clicked, x, y, ...)
-                if invoking[clicked] then return previous(clicked, x, y, ...) end
+                if clicked.lootBoxInvoking then return previous(clicked, x, y, ...) end
                 local owner, container = clicked.parent and clicked.parent.parent, clicked.inventory
                 local callback = previous
                 if Focus.select(owner, container, clicked) then
@@ -752,9 +755,9 @@ function Menus.refreshContainers(page, phase)
                         x, y = live:getMouseX(), live:getMouseY()
                     end
                 end
-                invoking[clicked] = true
+                clicked.lootBoxInvoking = true
                 local result = pack(pcall(callback, clicked, x, y, ...))
-                invoking[clicked] = nil
+                clicked.lootBoxInvoking = nil
                 if not result[1] then error(result[2], 0) end
                 -- A bag's icon opens the bag's item menu, which already has everything.
                 if owner and container and clicked.inventory == container and clicked.parent and clicked.parent.parent == owner
@@ -764,7 +767,7 @@ function Menus.refreshContainers(page, phase)
                 return unpack(result, 2, result.n)
             end
             button.onRightMouseDown = onRightMouseDown
-            wrapped[button] = onRightMouseDown
+            button.lootBoxRightClick = onRightMouseDown
         end
     end
 end
