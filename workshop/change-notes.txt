@@ -1,35 +1,10 @@
-LootBox 0.9.21
+LootBox 0.10.0
 
-Mounted water dispensers can be topped up with 50-250 mL of plain water at a time on multiplayer servers that advertise matching LootBox files. Empty and partially filled dispensers were verified with the normal player role on Build 42.22.2, including a reconnect. Does not enable this action on servers that do not advertise matching LootBox or replace the existing single-player/manual actions.
+Storage, start to finish. A container can be labelled for one item, a kind of item, your categories, game categories or anything else, and filled first, as usual or last. Its title, tooltip and icon say what belongs in it, and every item's tooltip says where it goes. Right-click an item for Belongs here (one click), Where it goes, Pick up when looting and Keep, each for every one of its kind or only this one. Right-click a container to label it with what is inside, or copy, paste and clear labels. The Storage page names and edits every labelled container, even out of sight, and Show me points the way. Put Away in the inventory window puts away what you carry that has a place nearby, with a preview. Automatic put-away (off by default) puts away what you bring home once you stand still and are safe, never what you left with, and stops the moment you move or act.
 
-Includes nearby and world fluid sources, filling equipped vessels in place, and exact container context menus and focus for vanilla inventory and supported NeatUI sections. Native access, compatibility and capacity still apply.
+A new interface: one LootBox entry that shows only what applies where you click, a new planner and job strip, and container icons and NeatUI titles that offer that exact object's own options. A detailed local log explains every click for bug reports.
 
-LootBox 0.9.20
+Opening and eating or drinking until full, and refilling a dispenser's jug, now find what the action made even on a laggy server. Cleaning, sorting, Condense and the job engine were reworked, and Condense packs bags more tightly.
 
-Options bound to the exact selected fixture or container stay at the top level. The rest remain under World Actions. No fixture names or mod-specific handlers.
+Saves gain new kinds of labels. An older LootBox drops them when it loads such a save.
 
-LootBox 0.9.19
-
-Right-click a container icon or a NeatUI section to get that exact container's pane actions. Stock world actions and other mods' world entries are available under World Actions. No per-mod rules.
-
-LootBox 0.9.18
-
-Fill worn, held or attached fluid vessels in place. A hydration pack can receive liquid without being taken off or emptied of gear. Stock capacity, permissions and fluid compatibility still apply.
-
-LootBox 0.9.17
-
-Pour Into now lists nearby accepting world fixtures. Right-click a carried vessel for Fill From, or a world fixture for individual pours and ordered Fill All. Collectors can receive and supply compatible fluids; plumbed sinks follow stock plumbing; ponds, rivers and lakes supply water without becoming writable reservoirs. Uses stock actions and preserves hands for world deposits.
-
-LootBox 0.9.16
-
-Adds a default-on Mod Options switch to activate the container you click. Right-clicking a vanilla container icon or a NeatUI section title selects the exact container before its normal menu. Clicking an item in either window focuses its source without changing what a normal click, multiselect or drag does. Mixed-source stacks stay ambiguous until a single member is clicked. Turning this off keeps all existing menus.
-
-Fixes a vehicle behind the inventory window taking precedence over a clicked fixture in Shelf Aware and other world-menu providers that consult the world-scaled pointer. Actual world clicks still pick vehicles normally.
-
-LootBox 0.9.12
-
-Pour Into and Fill All move liquids between compatible vessels in your inventory, carried bags, and visible nearby loot. Stock dropped vessels pour in place. Collapsed stacks use the least-filled eligible vessel. Loot-to-loot targets are optional and off by default.
-
-Adds opt-in automatic drinking from equipped reservoirs and safe food/drinks from carried bags. Nested bags and risky opening are separate settings. Automatic intake never starts during combat or while another action is queued.
-
-Fixes fluid menu compatibility with the game's Lua interpreter and combined loot panes, corrects single-player transfer completion, and keeps an in-progress Ground pour from being misreported as cancelled when the game refreshes the loot tab.
