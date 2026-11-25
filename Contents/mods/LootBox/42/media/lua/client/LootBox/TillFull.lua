@@ -249,6 +249,8 @@ function TillFull:next()
     -- A server reports needs late: never plan past what was already consumed.
     if self.left then hunger, thirst = math.min(hunger, self.left.hunger), math.min(thirst, self.left.thirst) end
     local effects, why = self:inspect(record)
+    local drunk = not effects and record.opened and self.kind == "fluid" and Vessels.fluid(record.item)
+    if drunk and drunk:isEmpty() then return self:finish("finished", "You drank it as it was opened", "exhausted") end
     if not effects then return self:finish(self.count > 0 and "finished" or "cancelled", why) end
     local portion = self:plannedPortion(hunger, thirst, effects)
     if portion == nil then return self:finish("cancelled", "This does not help with what you chose") end

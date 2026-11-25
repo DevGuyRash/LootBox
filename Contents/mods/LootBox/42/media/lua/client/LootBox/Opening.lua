@@ -86,7 +86,9 @@ function Opening.watch(player, item, recipe, kind, interaction)
     return Items.watch(player, { item = item, interaction = interaction,
         ready = keeps and function(survivor) return Opening.usable(survivor, kind) end or nil,
         makes = not keeps and function(made)
-            if not Opening.usable(made, kind) or only and made:getFullType() ~= only then return false end
+            -- The game may auto-drink a vessel the moment it appears, so it may be empty.
+            local right = kind == "fluid" and Vessels.fluid(made) ~= nil and not made:isSealed() or Opening.usable(made, kind)
+            if not right or only and made:getFullType() ~= only then return false end
             return made:getModData().NoLabel and 2 or only and 1 or 0
         end or nil })
 end

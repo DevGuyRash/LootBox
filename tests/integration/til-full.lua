@@ -160,6 +160,18 @@ for _, mp in ipairs({ false, true }) do
         assert(job.state == 'finished' and near(player.thirst, 0), job.reason)
     end)
 
+    case('the game drinking the new vessel first is not a failure', function()
+        player.thirst = 0.15
+        local shell = give(Game.item('Base.WaterRationCan', { food = { hunger = 0 } }))
+        Game.onTick = function()
+            for _, i in ipairs(player.main.items.values) do
+                if i.fullType == 'Base.WaterRationCanEmpty' then i.fluid.amount, i.fluid.name = 0, nil end
+            end
+        end
+        local job = Game.run(start({ shell }, 'fluid', ration))
+        assert(job.state == 'finished' and job.reason:find('as it was opened'), job.reason)
+    end)
+
     case('refuses alcohol, unsafe food and protected items before opening', function()
         player.hunger, player.thirst = 0.5, 0.5
         local beer = give(Game.item('Base.Beer', { litres = 0.3, liquid = 'Beer' }))
