@@ -7,7 +7,7 @@ local PlanList = {}
 
 -- Engine notices that are true of every job and say nothing about this one.
 local boilerplate = { "Live capacity", "Native multiplayer does not", "Bin choice compares", "Floor items will be inspected",
-    "This shows the first arrangement", "Uninspected bins", "Cleanup permanently", "Useful bags will be prepared" }
+    "This shows the first arrangement", "Uninspected bins", "Cleanup permanently", "Continuing approves", "Useful bags will be prepared" }
 
 local function ordinary(text)
     for _, prefix in ipairs(boilerplate) do if text:sub(1, #prefix) == prefix then return true end end
@@ -64,13 +64,14 @@ function PlanList.rows(plan, options)
     end
     for _, target in ipairs(targets) do
         local entries = byTarget[target]
-        local title = options.heading or (target ~= "" and ("To " .. target) or "Moving")
+        local title = options.heading or (target:find("^Trash can") and "To a trash can, then deleted") or (target ~= "" and ("To " .. target) or "Moving")
         rows[#rows + 1] = { heading = true, title = title, right = plural(#entries, "item") }
         for _, entry in ipairs(group(entries, function(row) return tostring(row.itemName) .. "\1" .. tostring(row.from) end)) do
             local row = entry.row
             rows[#rows + 1] = { title = tostring(row.itemName) .. (entry.count > 1 and ("  x" .. entry.count) or ""),
-                icon = iconOf(row.record), right = tostring(row.from or ""), tone = options.tone,
-                tooltip = tostring(row.itemName) .. "\nFrom " .. tostring(row.from) .. " to " .. target .. (row.status and ("\n" .. tostring(row.status)) or "") }
+                icon = iconOf(row.record), right = not options.heading and tostring(row.from or "") or nil, tone = options.tone,
+                tooltip = not options.heading and (tostring(row.itemName) .. "\nFrom " .. tostring(row.from)
+                    .. (row.status and row.status ~= "Move" and ("\n" .. tostring(row.status)) or "")) or nil }
         end
     end
     local rooms = plan.building and plan.building.roomsTotal or 0

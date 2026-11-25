@@ -17,7 +17,7 @@ function Review.show(playerIndex, options)
     o.playerIndex, o.options = playerIndex, options
     o.title = options.title or "Review"
     Review.open[playerIndex] = o
-    return o:show()
+    return K.Window.show(o)
 end
 
 function Review:build()
@@ -28,7 +28,7 @@ function Review:build()
     self.rows = K.list(self, self)
     if options.kind == "bin" then
         local bin, existing = plan.bin, #(plan.moves or {})
-        self.heading:set("Empty this " .. tostring(bin.name):lower() .. "?")
+        self.heading:set("Empty this trash can?")
         local space = bin.capacity and bin.used and string.format("%.1f of %.1f full. ", bin.used, bin.capacity) or ""
         self.sub:set(space .. (#(plan.skipped or {}) > 0 and "It holds protected items, so it cannot be used."
             or existing > 0 and "Everything in it now is deleted together with what you throw away."
