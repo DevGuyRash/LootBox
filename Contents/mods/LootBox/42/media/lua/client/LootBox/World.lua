@@ -1585,9 +1585,13 @@ function World:destinationPass(request, graph)
     local pass = {graph = graph or self.graph, accepted = {}}
     if destination.kind == "inventory" then
         pass.bags, pass.types, pass.aliases = {}, {}, {}
+        -- A bag that is itself being hauled, and any bag in it, is cargo rather than storage for the rest of the load.
+        local cargo = {}
         for _, record in ipairs(self:records(call(self.player, "getInventory"), true)) do
             local container = isBag(record.item) and call(record.item, "getInventory")
-            if container then pass.bags[#pass.bags + 1] = {container = container, factor = self:carryFactor(container)} end
+            local hauled = container and destination.cargo and destination.cargo[self:itemId(record.item)]
+            if container and (cargo[record.source] or hauled and not hauled.delivered) then cargo[container] = true
+            elseif container then pass.bags[#pass.bags + 1] = {container = container, factor = self:carryFactor(container)} end
         end
     elseif destination.kind == "matching" then
         pass.matching = {}

@@ -1509,7 +1509,7 @@ function Jobs:pickup(record)
         end
         local destination, request
         if direct then request = plan.request
-        else request = { includeBags = plan.request.includeBags, destination = { kind = "inventory" } } end
+        else request = { includeBags = plan.request.includeBags, destination = { kind = "inventory", cargo = self.hauled } } end
         destination, err, code = self:choose(request, record.item)
         if not destination then
             if not direct and #execution.batch > 0 then self:startDelivery("source")
