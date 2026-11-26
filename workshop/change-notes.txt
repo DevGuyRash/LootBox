@@ -1,10 +1,4 @@
-LootBox 0.10.0
+LootBox 0.10.1
 
-Storage, start to finish. A container can be labelled for one item, a kind of item, your categories, game categories or anything else, and filled first, as usual or last. Its title, tooltip and icon say what belongs in it, and every item's tooltip says where it goes. Right-click an item for Belongs here (one click), Where it goes, Pick up when looting and Keep, each for every one of its kind or only this one. Right-click a container to label it with what is inside, or copy, paste and clear labels. The Storage page names and edits every labelled container, even out of sight, and Show me points the way. Put Away in the inventory window puts away what you carry that has a place nearby, with a preview. Automatic put-away (off by default) puts away what you bring home once you stand still and are safe, never what you left with, and stops the moment you move or act.
-
-A new interface: one LootBox entry that shows only what applies where you click, a new planner and job strip, and container icons and NeatUI titles that offer that exact object's own options. A detailed local log explains every click for bug reports.
-
-Opening and eating or drinking until full, and refilling a dispenser's jug, now find what the action made even on a laggy server. Cleaning, sorting, Condense and the job engine were reworked, and Condense packs bags more tightly.
-
-Saves gain new kinds of labels. An older LootBox drops them when it loads such a save.
+Job messages now say "Choose Resume", matching the button. Help explains again how to put a single copy in a category. If ticking "Don't ask" in a review cannot be saved, you are told; the job still runs. The mod list describes storage and Put Away.
 
