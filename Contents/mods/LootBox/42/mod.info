@@ -2,5 +2,5 @@ name=LootBox
 id=LootBox
 author=DevGuyRash
 description=Client-side looting, labelled storage with Put Away, hauling and cleanup through native game actions.
-modversion=0.10.0
+modversion=0.10.1
 versionMin=42.20.0

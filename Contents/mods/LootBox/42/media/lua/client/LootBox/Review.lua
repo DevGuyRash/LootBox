@@ -82,8 +82,11 @@ function Review:accept(_, start)
     local ok, err = (start or self.options.start)(self.skip and self.skip.on)
     Log.info(self.options.interaction, "REVIEW", "answer", "start", "ok", ok ~= nil and ok ~= false, "error", err)
     if not ok then self:fail(tostring(err or "This could not start.")); return end
-    if self.skip and self.skip.on then App.setPreferences({ [self.options.preference] = false }) end
+    local saved, why = true, nil
+    if self.skip and self.skip.on then saved, why = App.setPreferences({ [self.options.preference] = false }) end
     self:close()
+    -- The job runs either way; the player should know the window will ask again.
+    if not saved then require("LootBox/UI").say(self.playerIndex, "Started, but the setting could not be saved: " .. tostring(why)) end
 end
 
 function Review:alternative()
