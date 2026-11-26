@@ -1179,7 +1179,7 @@ function Jobs:recoveryStep()
         end
         self.recoveryRequired = nil
         self.view.state = saved and "paused" or "finished"
-        self.view.reason = saved and "Personal gear recovered. Choose Resume job to continue the paused job." or "Personal gear recovered to its original places."
+        self.view.reason = saved and "Personal gear recovered. Choose Resume to continue the paused job." or "Personal gear recovered to its original places."
         self:logEnd("END", "finished", "gear-recovered")
         self.execution, self.operation, self.pending, self.activeGraph, self.suspended = nil, nil, nil, nil, saved
         if not saved then self.plan, self.carry, self.hauled = nil, nil, nil end
@@ -2108,7 +2108,7 @@ function Jobs:complete(state, reason, trigger)
         self.suspended = {execution = self.execution, operation = self.operation, graph = self.activeGraph, binReview = self.binReview,
             interaction = self.interaction, startedAt = self.startedAt, opCount = self.opCount}
         if self.binReview then self.binReview.token, self.binReview.approved = nil, nil end
-        self.view.reason = (self.view.reason or "Stopped") .. ". Choose Resume job to continue."
+        self.view.reason = (self.view.reason or "Stopped") .. ". Choose Resume to continue."
     end
     self:logEnd(state == "paused" and "PAUSE" or "END", state, trigger)
     self.execution, self.pending, self.operation, self.activeGraph, self.ending, self.binReview = nil, nil, nil, nil, nil, nil
@@ -2280,7 +2280,7 @@ function Jobs:resume()
     if self.recoveryRequired and not saved.execution.recoveryOnly then return nil, "Recover personal gear before resuming the ordinary job" end
     if self.player:isDead() or self.player:isAsleep() then return nil, "The player cannot resume this job now" end
     local reason = self.native:takeoverReason()
-    if reason then return nil, reason .. ". Stop that action before choosing Resume job." end
+    if reason then return nil, reason .. ". Stop that action before choosing Resume." end
     self.execution, self.operation, self.activeGraph, self.binReview = saved.execution, saved.operation, saved.graph, nil
     self.reviews, self.previews = {}, {}
     self.startedAt, self.opCount = saved.startedAt, saved.opCount

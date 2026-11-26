@@ -24,7 +24,7 @@ Paths below are relative to the installed game root. They document the inspected
 - Native `RequestItemsForContainerPacket.processServer` replies to a newly explored container, including an empty item list, but returns without a reply for an already explored container. `AddInventoryItemToContainerPacket` adds unknown item IDs rather than replacing the full list. Its client receiver emits no correlated Lua acknowledgment and changes no exploration flag for an empty reply. Meanwhile native `ISInventoryPage:checkExplored` sets explored at request time. An empty local list, changed item handle, or changed explored flag is insufficient proof of synchronization. `requestSync()` supplies no receipt.
 - Native object network identity derives from coordinates and object index. It cannot establish persistent continuity for an identical replacement after reconnect without additional world metadata. LootBox uses local observations and reports unresolved locations.
 - `BuildingDef:getSquares()` allocates and visits an expanded bounding box across floors -32 through 30 before returning. A limit checked afterward cannot bound that work. Building jobs instead consume `BuildingDef:getRooms()` and each `RoomDef`'s native rectangle list lazily, dividing each rectangle into sections of at most 8 by 8 tiles. Rectangle upper bounds are exclusive; source scans still check native room and building membership. Native metadata on floor 31 is retained.
-- A first multiplayer character can reach `OnCreatePlayer` and `OnGameStart` with the native placeholder username `Bob`. `ConnectedPacket` assigns the actual local username after the player-connect handshake. App state is bound lazily when the player opens an interactive control, and reuse checks the current account scope.
+- A first multiplayer character can reach `OnCreatePlayer` and `OnGameStart` with the native placeholder username `Bob`. `ConnectedPacket` assigns the actual local username after the player-connect handshake. App state is bound on first use, which may be an inventory refresh or automatic put-away as well as a control; every use checks the current account scope and reloads when it changed.
 - `BaseVehicle.load()` reads a saved mechanical ID, but `addToWorld()` then calls `createPhysics()`, which replaces it with `Rand.Next(100000)` on the client. Mechanical ID therefore cannot identify the same car across a normal reconnect. The inherited native key ID survives that recreation and is also copied into native smashed replacements. Network IDs can be reallocated and the client does not receive SQL identity. LootBox uses key ID and model, retains the network ID only as a current lookup hint, and rejects multiple observed loaded matches. Native key IDs are key associations rather than guaranteed UUIDs. The mod never adopts a vehicle by its coordinates or appearance.
 
 The design follows these native behaviors instead of copying a transfer engine, rewriting categories, forcing server state, renaming inventory items, or adding equipment choreography without a demonstrated need.
@@ -33,7 +33,7 @@ The design follows these native behaviors instead of copying a transfer engine, 
 
 `PathFindBehavior2` construction for the real player cancels that player's path, and independent `PolygonalMap2` callbacks are not exposed to ordinary client Lua. LootBox keeps terrain routing in owned native `ISPathFindAction` instances. Initial destination costs estimate distance and floor changes; successful owned movement supplies bounded directional observations. The policy is a heuristic and does not claim the shortest possible stair route or globally optimal final tour.
 
-Native character mass comes from `getInventoryWeight()` and `getMaxWeight()`. Nested contents receive only the equipped outer bag's actual weight reduction. Unequipped outer bags contribute full contents weight, and attached bags use their native equipped/unequipped ratio. Per-container admission alone permits substantially more weight than the character's normal limit, so hauling reserves both storage capacity and weighted character mass.
+Native character mass comes from the main inventory's `getCapacityWeight()` against `getEffectiveCapacity(player)`. Nested contents receive only the equipped outer bag's actual weight reduction. Unequipped outer bags contribute full contents weight, and attached bags use their native equipped/unequipped ratio. Per-container admission alone permits substantially more weight than the character's normal limit, so hauling reserves both storage capacity and weighted character mass.
 
 The server implementation of `object.emptyTrash` removes every server item from the chosen native bin. It ignores a client item-ID approval list. LootBox reviews client-observed existing contents and rejects changed observed contents, but cannot make deletion atomic against unseen or concurrent multiplayer changes without server code.
 
@@ -71,6 +71,8 @@ waits briefly and stops rather than queuing the rest of the stack blindly.
 Restoration may itself stall; cancellation keeps ownership until native cleanup
 settles rather than claiming masks or items have been restored.
 
+Superseded November 25, 2026: Til Full no longer waits for need or item changes before the next item. Each portion is planned from the smaller of the live need and what is left after the portions already eaten, and the next item follows once the stock action completes; see [finding results](finding-results.md).
+
 The target is no positive hunger/thirst (zero, bounded by the native minimum), not
 maximum stuffed moodles. The default follows native action intent: Eat targets hunger, Drink targets thirst,
 even for mixed food/drink. The optional both-needs policy may exceed one already
@@ -97,6 +99,6 @@ unavailable state can still stop continuation early rather than risk an extra it
 
 Native `ISInventoryPane:onRightMouseUp` omits expanded group headers, passing
 selected children as individual item references. Collapsed rows carry groups.
-Till Full snapshots the anchor group when supplied, otherwise the explicitly
+Til Full snapshots the anchor group when supplied, otherwise the explicitly
 selected same-source/type references. It never enumerates unselected peers or
 other containers. Already-full activation does not cancel unrelated LootBox jobs.

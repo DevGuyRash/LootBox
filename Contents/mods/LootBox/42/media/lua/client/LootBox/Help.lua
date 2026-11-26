@@ -50,6 +50,7 @@ Help.topics = {
             "Open the Categories page and press New category, or right-click an item and choose Categories, New category.",
             "Pick items, game categories, or your other categories. They are added together.",
             "Use it anywhere: the loot list, storage labels, and the planner.",
+            "To put a single copy in a category rather than every copy, right-click it and use Categories, Only this one.",
         } },
     { id = "haul", title = "Haul to your car", summary = "Trunk first, then the seats.",
         steps = {

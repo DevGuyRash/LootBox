@@ -1,6 +1,6 @@
 # LootBox
 
-LootBox is a standalone Project Zomboid Build 42 client mod for looting, sorting, hauling and cleaning up, with categories of your own, storage labels and one-click jobs. LootBox is the working name.
+LootBox is a standalone Project Zomboid Build 42 client mod for looting, putting things away, hauling and cleaning up, with categories of your own, labelled storage and one-click jobs.
 
 It runs entirely on the client through the game's own actions. There is no server script, command channel or helper mod. A host may distribute it through the ordinary mod list; server permissions, locks, safehouses and capacity always apply. See [verification](docs/verification.md) for what has been tested.
 
@@ -20,7 +20,7 @@ The archive is `dist/LootBox-<version>.zip`. `dist/manifest.json` records its fi
 
 ## How it works
 
-Right-click an item, a container, a container's icon or title, a vehicle, or the ground indoors. LootBox appears as one entry and only when there is something useful to do there: no disabled rows, no settings or help entries, nothing about trash before a trash can is known, nothing about sorting before storage is labelled. One choice is a single row; several become a submenu.
+Right-click an item, a container, a container's icon or title, a vehicle, or the ground indoors. LootBox appears as one entry and only when there is something useful to do there: no disabled rows, no settings or help entries, nothing about trash before a trash can is known, nothing about putting away before storage is labelled. One choice is a single row; several become a submenu.
 
 | You right-click | You can get |
 | --- | --- |
@@ -47,7 +47,7 @@ Open it with the job key, from **Around here > Plan a job**, or from **Options >
 
 ## Inventory buttons
 
-**Smart Take All** and **Smart Take Matching** take from the open containers into your bags. **Match Displayed** and **Match Nearby** put carried items where the same kind already is. They appear only while they have something to do. **Condense** packs loose items into the bags that reduce weight most, keeping the same things together where the weight is equal; Settings adds rearranging what is already in bags, unworn bags and bags inside bags. Keys stay in main inventory or go on a key ring, because the game looks for them nowhere else, and a labelled bag takes only what its label names.
+**Put Away** puts what you carry into its labelled storage nearby; see [Storage](#storage). **Smart Take All** and **Smart Take Matching** take from the open containers into your bags. **Match Displayed** and **Match Nearby** put carried items where the same kind already is. They appear only while they have something to do. **Condense** packs loose items into the bags that reduce weight most, keeping the same things together where the weight is equal; Settings adds rearranging what is already in bags, unworn bags and bags inside bags. Keys stay in main inventory or go on a key ring, because the game looks for them nowhere else, and a labelled bag takes only what its label names.
 
 ## Storage
 
@@ -75,6 +75,29 @@ A vessel on a shelf or on the ground is fetched, used and put back where it was.
 
 Right-click a carried vessel and choose **Pour Into > Water Dispenser**, or right-click the stand and choose **Refill dispenser**. Pick one source, or **Fill from all <liquid>**. LootBox walks to the stand, takes the bottle, pours, and fits the same bottle again, with the game's own actions in single-player and multiplayer. Other things may happen in your inventory meanwhile. If nothing can be poured the bottle is put back; if you stop, the message says the bottle is in your inventory. For an empty stand, **Refill and fit a bottle** lets you choose which loose bottle. To pour out of a mounted dispenser, use the game's **Transfer Fluids**.
 
+## Eat or drink Til Full
+
+**Til Full** appears beside the game's own Eat and Drink amounts, only when it would do something. It uses only the items you clicked, one at a time, and stops when that need is met: Eat follows hunger, Drink follows thirst. **Til Full satisfies hunger and thirst together** in Settings makes it continue until both are.
+
+**Open and Eat Til Full** and **Open and Drink Til Full** use the game's own opening recipe, then eat or drink exactly what came out, in single-player and multiplayer. The game fetches the can and the opener and puts the opener back. Other things may arrive or move in your inventory meanwhile. If you are over the carrying limit the game drops the opened food at your feet and LootBox tells you so. Knives (which can injure), alcohol, and packs that hold several items are left to the game's own menu.
+
+Walking is fine where the game allows it. Aiming, fighting, running, Escape or Cancel stop it; an action you queue yourself simply goes first. Spoiled, burnt, frozen, poisonous or alcoholic items and Keep items are refused; favorites are fine when you chose them.
+
+## Automatic food and drink
+
+In **LootBox > Settings > Eating and drinking**, all four switches start **off**:
+
+- **Drink from worn and held bottles by myself:** use the liquid in a worn, held or belt-attached vessel. This includes the reservoir in a hydration backpack; it does not mean drinking every bottle in its pockets.
+- **Eat and drink carried supplies by myself:** choose one safe food or beverage from the main inventory or directly inside a carried bag. Nothing on the floor, in a nearby crate or in a vehicle is considered.
+- **Also from bags inside bags:** extend the second switch into nested carried bags. By itself this does nothing. Locked or protected bags are not traversed.
+- **Open cans with a blade if there is no opener:** prefer an ordinary can opener in both single-player and multiplayer. With this switch on, supported stock food cans may instead use the game's sharp-tool recipe at an adjacent craft surface. The game can damage the tool and cut your hand. No bare-handed opening is invented. For automatic opening, the can and tool must be in main inventory; unknown recipes and outputs are skipped.
+
+**Drinking requires Project Zomboid's own Auto-Drink option.** The game already drinks from many equipped pure-water vessels and LootBox leaves that to it. In single-player, an equipped vessel the game selects but does not use gets one retry after 20 seconds of rising thirst. Water and drinks in bags are drunk with the game's ordinary Drink action, which takes the vessel out and puts it back.
+
+A can is opened with the game's recipe and what comes out is eaten at once, in single-player and multiplayer alike.
+
+Automatic intake waits for meaningful thirst (20%) or hunger (25%), then uses one native portion for that need. The manual **Til Full satisfies hunger and thirst together** preference is not used for background intake. LootBox does not interrupt movement, aiming, combat, existing queued actions, an active or paused LootBox job, or pending gear recovery. It skips unsafe, spoiled, alcoholic, medical and unrecognized supplies; favorites and **Keep** items are never chosen. A portion that did not help is not repeated in the same need episode; an interrupted one may be tried again later. In multiplayer the client can stop requesting work, but it cannot recall a bite or sip the server has already accepted. Manual Eat, Drink and Til Full remain available.
+
 ## Select an exact stack amount
 
 Right-click a stack with at least two items and choose **Select amount...** directly in the normal item context menu. Enter a whole number and confirm. This highlights that many items in the pane you clicked. It starts no transfer or LootBox job. The **On items and containers** setting controls the option.
@@ -83,19 +106,23 @@ For a partial amount, the stack expands and only the chosen item rows or cells a
 
 Counts and source identity are checked again before selection. A stale stack or changed pane is refused rather than silently selecting different loot or reducing the amount. Larger partial selections use the active view's expanded rows or cells in that pane. This is a mouse workflow; controller selection is not qualified. LootBox shortcuts named All of this type retain their bulk meaning, so use normal game actions for the highlighted amount.
 
+## Inventory navigation shortcuts
+
+Hover the item list in your inventory or the loot window, then use **Home** or **End** to reach its top or bottom. **Page Up** and **Page Down** move one viewport with a row of overlap so partially visible rows are not skipped. These shortcuts only scroll the hovered list; they do not select, transfer, or consume items. Home and End leave the item popup closed until you move the mouse again. You can also click the row under the pointer without moving it first. Change or unbind all four under **Options > Key bindings > LootBox**. Text entry, context menus, modal dialogs, and item dragging leave the shortcuts inactive.
+
 ## Details
 
-Choose an item checklist, a source, and a destination in the planner. Sources include carried inventory, a selected container, within reach, the current room, the current building, a visually selected area on one floor, or known containers with a chosen label. Including what you carry and looking inside bags are separate switches. Native transfers can refuse nested contents inside external fixtures; affected items remain in place and appear in the result.
+Choose what, a source, and a destination in the planner. Sources include carried inventory, a selected container, within reach, the current room, the current building, a visually selected area on one floor, or known containers with a chosen label. Including what you carry and looking inside bags are separate switches. Native transfers can refuse nested contents inside external fixtures; affected items remain in place and appear in the result.
 
 Destinations include carried storage, a selected container, a chosen floor location, the remembered vehicle, matching labeled storage, and known trash cans. The list under the choices shows what would move, what stays and why, and what is still to be searched. Start runs a finite job, and the job strip's notes keep the reasons. A trash can check identifies the actual bin, floor, coordinates, observed contents weight, capacity and free space before asking for whole-bin deletion approval. Hauling uses available bag space before main inventory and retries temporary capacity failures after unloading. Unrelated carried items stay protected; a truly hard-limit-blocked cleanup item can use the temporary personal-gear workflow below. A full destination leaves an item behind with a reason. Native floor dropping can use an adjacent permitted tile when the original tile is blocked or full; the job retains that original drop area if the player moves away during an interruption.
 
-Automatic pickup uses the main inventory's live native hard capacity and current capacity weight. The HUD's normal encumbrance threshold does not block hauling; over-encumbrance is allowed. Eligible carried bags are tried before main inventory, independently of whether source-bag searching is enabled. The aggregate destination is named **My inventory (Smart Load)**. Worn bags, held bags and key rings count as storage; the Condense settings add bags that are not worn and bags inside bags. Bags already containing similar item types are preferred. Full or unsuitable bags spill into the next eligible bag; other bags are ordered by actual weight reduction, and main inventory is last. Native clothing-variant aliases count as matching types. Individual bag and main-inventory destinations remain available and receive a direct transfer. Before collecting, LootBox can equip useful carried or found bags in compatible free worn locations, including extra locations declared by other mods, then free hands when the load needs them. It considers what the bag would accept of the load, the room worn bags still have, existing contents and preparation cost, and retains occupied user equipment. A bag that is itself being moved is not put on, except when it is being taken for the player. Native bag conversions preserve observed contents and migrate LootBox labels and Keep to the observed replacement. Only an equipped outer bag's reduction affects nested contents; unequipped bags still count at full carried weight. Preview shares a body-mass reservation across the bags, and each native pickup rechecks item rules, capacity and server acceptance. Unloading and weight-reducing rearrangement remain available while overloaded.
+Automatic pickup uses the main inventory's live native hard capacity and current capacity weight. The HUD's normal encumbrance threshold does not block hauling; over-encumbrance is allowed. Eligible carried bags are tried before main inventory, independently of whether source-bag searching is enabled. The aggregate destination is named **My bags**. Worn bags, held bags and key rings count as storage; the Condense settings add bags that are not worn and bags inside bags. Bags already containing similar item types are preferred. Full or unsuitable bags spill into the next eligible bag; other bags are ordered by actual weight reduction, and main inventory is last. Native clothing-variant aliases count as matching types. Individual bag and main-inventory destinations remain available and receive a direct transfer. Before collecting, LootBox can equip useful carried or found bags in compatible free worn locations, including extra locations declared by other mods, then free hands when the load needs them. It considers what the bag would accept of the load, the room worn bags still have, existing contents and preparation cost, and retains occupied user equipment. A bag that is itself being moved is not put on, except when it is being taken for the player. Native bag conversions preserve observed contents and migrate LootBox labels and Keep to the observed replacement. Only an equipped outer bag's reduction affects nested contents; unequipped bags still count at full carried weight. Preview shares a body-mass reservation across the bags, and each native pickup rechecks item rules, capacity and server acceptance. Unloading and weight-reducing rearrangement remain available while overloaded.
 
 Vehicle hauling prefers native trunk storage, then available seat and other storage. The client uses legitimate driver access to unlock storage when possible and restores the player's original seat or outside state. Occupied seats, moving vehicles, inaccessible keys/doors, blocked exits, and unusual modded vehicle access can prevent the operation. A failed restoration is reported with the remaining player location.
 
 Cleanup remembers the trash cans you walk past, outside a building or on another floor too, and forgets them when they are gone. It uses the nearest one within 150 tiles that takes the item, or a bigger one when the emptyings it saves outweigh the detour. A full can is emptied before anything is refused, each can is emptied before it is left, and items no can can hold stay where they are. When no can works the job pauses with your load, and Resume tries again.
 
-A can is opened on arrival. If you asked to be asked and it holds anything you have not approved, its review opens by itself, even with other windows closed, and waits while you type. **Empty and continue** approves what it holds; **Use another can** keeps the job and tries a different one. An empty can needs no question, and approvals last for the job. Arrival reviews are optional and off by default. When enabled, **Skip future bin reviews** remembers automatic handling after successful approval. The separate **Start and skip bin reviews** or **Approve and skip further bin reviews** action changes only the current job. Protected items, permissions, identity and native rules are still checked. Approval tokens and skip choices are never saved in a setup. Eligible items already in a usable approved trash can are cleared in place and counted separately from hauled items.
+A can is opened on arrival. If you asked to be asked and it holds anything you have not approved, its review opens by itself, even with other windows closed, and waits while you type. **Empty and continue** approves what it holds; **Use another can** keeps the job and tries a different one. An empty can needs no question, and approvals last for the job. Arrival reviews are optional and off by default (**Settings > Ask at each trash can**). In a review, **Don't ask at trash cans** turns them off again, and **Throw away, skip can checks** skips them for the current job only. Protected items, permissions, identity and native rules are still checked. Approval tokens and skip choices are never saved in a setup. Eligible items already in a usable approved trash can are cleared in place and counted separately from hauled items.
 
 If a cleanup item still exceeds the live hard carry budget after unloading and preparing bags, LootBox can temporarily store whole top-level personal items or bags in ordinary permitted world storage. The staging container is separate from trash, and it plus the recorded personal items and descendants are excluded from cleanup. A local recovery receipt is saved before any movement. LootBox delivers and deletes the heavy load, then restores the personal items and original equipment slots. Planning checks the temporary raw weight needed to pick bags back up, including their contents. If no safe storage and restoration route fits, the item stays with a reason. An interruption, missing item, changed slot or unavailable container retains the receipt and its coordinates; choose **Fetch my gear** on the job strip. **Forget it** stops tracking gear that can no longer be found. User equipment changes are retained, and occupied original slots must be cleared before restoration. A changed world-object index while disconnected can require manual recovery at the recorded location.
 
@@ -120,37 +147,3 @@ python3 tools/play.py --game /path/to/ProjectZomboid/projectzomboid --evidence /
 ```
 
 Portable verification builds the full package before running contracts. The optional native lane needs JDK 25 and repeats contracts in the installed game's Kahlua interpreter. Boundary doubles are explicitly separate from actual gameplay. `tools/play.py` starts an owned Xvfb display and an isolated game cache using the stock game JRE, without reading launcher overrides or touching personal saves. Stop its owning process to terminate and reap its client/display. `--resume` restarts a stopped owned cache for persistence checks. See [verification](docs/verification.md), [design](docs/design.md), [reference findings](docs/research.md), and the [user's own requirements](docs/request.md).
-
-## Eat or drink Til Full
-
-**Til Full** appears beside the game's own Eat and Drink amounts, only when it would do something. It uses only the items you clicked, one at a time, and stops when that need is met: Eat follows hunger, Drink follows thirst. **Til Full satisfies hunger and thirst together** in Settings makes it continue until both are.
-
-**Open and Eat Til Full** and **Open and Drink Til Full** use the game's own opening recipe, then eat or drink exactly what came out, in single-player and multiplayer. The game fetches the can and the opener and puts the opener back. Other things may arrive or move in your inventory meanwhile. If you are over the carrying limit the game drops the opened food at your feet and LootBox tells you so. Knives (which can injure), alcohol, and packs that hold several items are left to the game's own menu.
-
-Walking is fine where the game allows it. Aiming, fighting, running, Escape or Cancel stop it; an action you queue yourself simply goes first. Spoiled, burnt, frozen, poisonous or alcoholic items and Keep items are refused; favorites are fine when you chose them.
-
-## Automatic food and drink
-
-In **LootBox > Settings > Eating and drinking**, all four switches start **off**:
-
-- **Drink from equipped vessels:** use the liquid in a worn, held or belt-attached vessel. This includes the reservoir in a hydration backpack; it does not mean drinking every bottle in its pockets.
-- **Eat and drink from carried supplies:** choose one safe food or beverage from the main inventory or directly inside a carried bag. Nothing on the floor, in a nearby crate or in a vehicle is considered.
-- **Carried supplies: search bags inside bags:** extend the second switch into nested carried bags. By itself this does nothing. Locked or protected bags are not traversed.
-- **Carried supplies: allow risky can opening:** prefer an ordinary can opener in both single-player and multiplayer. With this switch on, supported stock food cans may instead use the game's sharp-tool recipe at an adjacent craft surface. The game can damage the tool and cut your hand. No bare-handed opening is invented. For automatic opening, the can and tool must be in main inventory; unknown recipes and outputs are skipped.
-
-**Drinking requires Project Zomboid's own Auto-Drink option.** The game already drinks from many equipped pure-water vessels and LootBox leaves that to it. In single-player, an equipped vessel the game selects but does not use gets one retry after 20 seconds of rising thirst. Water and drinks in bags are drunk with the game's ordinary Drink action, which takes the vessel out and puts it back.
-
-A can is opened with the game's recipe and what comes out is eaten at once, in single-player and multiplayer alike.
-
-Automatic intake waits for meaningful thirst (20%) or hunger (25%), then uses one native portion for that need. The manual **Til Full satisfies hunger and thirst together** preference is not used for background intake. LootBox does not interrupt movement, aiming, combat, existing queued actions, an active or paused LootBox job, or pending gear recovery. It skips unsafe, spoiled, alcoholic, medical and unrecognized supplies; favorites and **Keep** items are never chosen. A portion that did not help is not repeated in the same need episode; an interrupted one may be tried again later. In multiplayer the client can stop requesting work, but it cannot recall a bite or sip the server has already accepted. Manual Eat, Drink and Til Full remain available.
-
-## Inventory navigation shortcuts
-
-Hover the item list in your inventory or the loot window, then use **Home** or
-**End** to reach its top or bottom. **Page Up** and **Page Down** move one viewport
-with a row of overlap so partially visible rows are not skipped. These shortcuts
-only scroll the hovered list; they do not select, transfer, or consume items.
-Home and End leave the item popup closed until you move the mouse again.
-You can also click the row under the pointer without moving it first.
-Change or unbind all four under **Options > Key bindings > LootBox**. Text entry,
-context menus, modal dialogs, and item dragging leave the shortcuts inactive.
