@@ -11,27 +11,13 @@ The build enforces ASCII runtime source, Lua 5.1 syntax, and executable Lua excl
 
 ## Pour Into contracts
 
-Run the ordinary verifier for inventory and equipped-bag enumeration, stock compatibility and mixture snapshots, menu stacking/ordering and stock-icon fallbacks, shelf move acknowledgement, paired fluid changes, cancellation and user-queue preservation. The optional stock-Lua lane executes the real fluid wrapper and action with Java boundary doubles. Copy the game's unmodified `shared/Fluids/ISFluidTransferAction.lua` and `shared/Fluids/ISFluidContainer.lua` into a temporary directory, and pass the path to its original `shared/Fluids/ISFluidUtil.lua` separately:
-
-```sh
-lua5.1 tests/integration/pour-native.lua "$STOCK_FLUIDS_DIR" "$STOCK_FLUID_UTIL"
-```
+The ordinary verifier covers pouring: `pour-inventory` and `pour-stacks` choose which vessels count and in what order, `pour-menu` builds the rows, and `pouring` and `dispenser` drive whole flows over `tests/support/game.lua`, including shelf vessels, fixtures, cancellation and the player's own queue.
 
 For collapsed versus expanded inventory selections, optionally supply the stock pane module too. This runs the unmodified pane refresh, right-click and physical item flattening with UI/Java boundaries doubled. It checks least-percent source choice and no fluid change on menu discovery, not rendered or live multiplayer behavior:
 
 ```sh
 lua5.1 tests/stock/pour-stacks.lua "$STOCK_MEDIA_LUA_DIR/client/ISUI/ISInventoryPane.lua"
 ```
-
-An additional stock inventory lane loads the game's unchanged `client/TimedActions/ISInventoryTransferAction.lua` and `shared/TimedActions/ISInventoryTransferUtil.lua` beneath the same vanilla `media/lua` directory. It checks normal submission, native acceptance/rejection, and Add-before-Remove observation:
-
-```sh
-lua5.1 tests/integration/pour-move.lua "$STOCK_MEDIA_LUA_DIR"
-```
-
-Stock Build 42 dropped vessels transfer their fluid component to the world object and pour in place. The separate item-owned Ground fallback uses the stock inventory transfer and the stock Place Item timed action. Run `lua5.1 tests/integration/pour-ground.lua` for native-authority doubles and optionally supply the pinned stock `ISDropWorldItemAction.lua` path. These cases cover an exact original square and placement pose, native pickup ACK, delayed projection, owned-queue cancellation, and blocked or ambiguous returns. Multiplayer placement observes the world and inventory mirrors; stock provides no per-placement acknowledgement to this local wrapper. A real ordinary client/server repeat is still required.
-
-The fluid lane exercises the same constructor, SP completion and MP delayed-field observation as the [stock B42.22 action](https://github.com/Project-Zomboid-Community-Modding/ProjectZomboid-Vanilla-Lua/blob/3b21e63fe4905a0a300a4021d05d01a9bb534729/shared/Fluids/ISFluidTransferAction.lua).
 
 ## Native interpreter and file APIs
 
@@ -277,15 +263,7 @@ The complete production build preceded new contracts. `verify-final/report.json`
 
 ### Til Full portable lane
 
-`tests/integration/till-full.lua` exercises the actual finite controller with
-explicit Java-item/stat and native-action doubles: partial food units, selected
-stack identity, pure and mixed needs, configurable first/both targets, negative
-hunger bounds, cancellation, preparation failure, no-progress timeout, protected
-and unsafe items, live contamination, and fluid depletion. `till-full-native.lua`
-exercises the actual adapter with a modeled timed-action queue, including foreign
-work and native restoration. Menu, settings and App tests cover callback matching,
-persistence and mutual exclusion with the existing job scheduler. These are not
-native gameplay or multiplayer acceptance, nor proof of exact consumption timing.
+`tests/integration/til-full.lua` runs the real flow over the model of the game's queue, recipes and server replies in `tests/support/game.lua`, with amounts worked out by hand; `consume-menu` and `auto-needs` cover the menu rows and automatic intake. These are not native gameplay or multiplayer acceptance, nor proof of exact consumption timing.
 
 
 ## Delayed consumption and exact-stack regression (November 16, 2026)
@@ -323,11 +301,11 @@ thirst growth while consuming, and already-full no-op preserving unrelated jobs.
 
 For a release, replay these against the exact packaged files in a disposable save. Portable tests and the installed-interpreter lane are not live gameplay proof.
 
-1. With all four switches off, approach a hunger/thirst threshold while carrying food and water. Only the game's ordinary auto-drink should act. Enable only **Drink from equipped vessels** and test a stock hydration backpack, belt-attached or worn canteen, and an ordinary main-inventory bottle. Record actual thirst, volume and queued action counts. A selected vessel alone does not count as a sip.
-2. Test the carried option with food in the main inventory, a modded worn bag, and a bag inside that bag. Toggle nesting independently. A floor duplicate or dropped parent must never be selected. Repeat with a favorite, a Keep-protected item, mixed hazardous drink and unsafe raw food.
-3. In SP, watch one nested pure-water bottle enter main, a real stock sip, and a return to its exact original parent. Try walking, starting another action, dropping the parent before an outbound/return transfer, and filling the source bag before return. No unrelated action or item may be lost.
-4. With the can and regular opener in main, validate one stock opening action and only its own edible output. No knife opening with the risk switch off. When enabled, remove the opener, provide an eligible sharp tool and adjacent legal surface; confirm the game owns injury/tool wear and no walk is queued. Never use a production save to test this.
-5. In multiplayer confirm server-observed food/non-water beverage changes and no duplicate drink. For nested pure water require the same bottle ID, correct type, verified prior parent, real stock transactions in both directions, and both a matching volume drop and thirst improvement before returning. For cans verify ordinary safe and opted-in risky recipes on the server, exact can removed, no automatically chained bite, and a separate ready-food choice only after native completion plus input removal. Test interruption and delayed or missing acknowledgement. Do not claim server results from client logs alone.
+1. With all four switches off, approach a hunger/thirst threshold while carrying food and water. Only the game's ordinary auto-drink should act. Enable only **Drink from worn and held bottles by myself** (it needs the game's own Auto-Drink) and test a stock hydration backpack, belt-attached or worn canteen, and an ordinary main-inventory bottle. Record actual thirst, volume and queued action counts. A selected vessel alone does not count as a sip.
+2. Test **Eat and drink carried supplies by myself** with food in the main inventory, a modded worn bag, and a bag inside that bag. Toggle **Also from bags inside bags** independently. A floor duplicate or dropped parent must never be selected. Repeat with a favorite, a Keep-protected item, mixed hazardous drink and unsafe raw food.
+3. In SP, watch a nested pure-water bottle drunk with the game's own Drink action, which takes it out of its bag and puts it back. Try walking and starting another action meanwhile. No unrelated action or item may be lost.
+4. With the can and regular opener in main, validate one stock opening action and only its own edible output. No knife opening with **Open cans with a blade if there is no opener** off. When enabled, remove the opener, provide an eligible sharp tool and adjacent legal surface; confirm the game owns injury/tool wear and no walk is queued. Never use a production save to test this.
+5. In multiplayer confirm server-observed food/non-water beverage changes and no duplicate drink. For nested pure water require the same bottle ID and both a matching volume drop and thirst improvement. For cans verify ordinary safe and opted-in risky recipes on the server, exact can removed, and that the opened item is the one eaten next. Test interruption and delayed or missing acknowledgement. Do not claim server results from client logs alone.
 
 ## 0.9.16 active-container mouse input and scoped world picking
 
@@ -336,7 +314,7 @@ The native Mod Options tickbox is the only stored value for click focus. On stoc
 Run the normal stable-source suite in Lua 5.1 and the installed Kahlua interpreter. For an additional installed-source slice run:
 
 ```sh
-python3 tools/check-container-world-stock.py --game "$PZ" --neat-views "$NEAT_VIEWS" --shelf-entry "$SHELF_ENTRY"
+python3 tools/check-container-world-stock.py (removed in 0.10.0) --game "$PZ" --neat-views "$NEAT_VIEWS" --shelf-entry "$SHELF_ENTRY"
 ```
 
 The latter exercises installed vanilla input, selector, selection, options and world-menu functions; native World Actions submenu pooling, nesting and callback dispatch; NeatUI's grid hit-tests, open stacks and input handlers; and Shelf Aware's original vehicle-first world subscriber. The stock water-source argument shape exercises promotion and the installed get-up action before calling the stock wash callback. Inventory objects, Java menu generation, rendering and networking at this boundary are doubles. This is not a real mouse/renderer or multiplayer gameplay claim. In a disposable client, separately check the active sidebar highlight and the normal item, mixed-stack, modifier, drag, crate and actual vehicle menus with the switch on and off.

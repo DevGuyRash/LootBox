@@ -1,6 +1,6 @@
 name=LootBox
 id=LootBox
 author=DevGuyRash
-description=Client-side categories, looting, sorting, hauling, and cleanup through native game actions.
+description=Client-side looting, labelled storage with Put Away, hauling and cleanup through native game actions.
 modversion=0.10.0
 versionMin=42.20.0

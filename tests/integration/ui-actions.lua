@@ -43,7 +43,7 @@ test("pressing a toolbar button again carries on with its job instead of plannin
     local what = request(); what.shortcutIntent = "matching:nearby"
     local ok, outcome, kind = UI.act(0, what)
     assert(ok and outcome == "resumed" and kind == "continued" and not f.previewed and not f.started and not f.bad)
-    f.outcome, f.againError = nil, "Aiming paused the job. Stop that action before choosing Resume job."
+    f.outcome, f.againError = nil, "Aiming paused the job. Stop that action before choosing Resume."
     ok = UI.act(0, what)
     assert(ok == nil and f.bad == f.againError and not f.previewed and not f.started)
     what.shortcutIntent = "matching:displayed"

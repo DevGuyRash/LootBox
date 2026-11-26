@@ -99,7 +99,7 @@ function JobBar:onMouseUp()
     return true
 end
 
--- "Paused by aiming. Choose Resume job to continue." says the same thing as the buttons.
+-- "Paused by aiming. Choose Resume to continue." says the same thing as the buttons.
 local function pausedLine(reason)
     reason = tostring(reason or ""):gsub("%s*Choose Resume[^%.]*%.?", "")
     if reason == "" then return "Paused" end
